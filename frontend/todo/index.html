@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Raymond — To‑Do List</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Raymond — To‑Do List</h1>
+
+    <form id="todo-form" class="todo-form" aria-label="Add todo">
+      <input id="todo-input" type="text" placeholder="Add a new task..." aria-label="New task" />
+      <button type="submit">Add</button>
+    </form>
+
+    <div class="controls">
+      <div class="filters">
+        <button data-filter="all" class="active">All</button>
+        <button data-filter="active">Active</button>
+        <button data-filter="completed">Completed</button>
+      </div>
+      <button id="clear-completed">Clear completed</button>
+    </div>
+
+    <ul id="todo-list" class="todo-list" aria-live="polite"></ul>
+
+    <footer class="footer">
+      <span id="count">0 items</span>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
