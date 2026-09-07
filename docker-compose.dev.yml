@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - LIVE_TRADING=false
+      # Set EMERGENCY_API_KEY via env or .env file when testing emergency-stop
+      - EMERGENCY_API_KEY=
+    volumes:
+      - ./backend:/app:rw
+    restart: unless-stopped
