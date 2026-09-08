@@ -1,193 +1,292 @@
-"""
-RAYMOND v2.8 - Database Models
-Defines SQLAlchemy models for trading system persistence
-"""
-
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Enum as SQLEnum
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+"""SQLAlchemy database models for RAYMOND trading system"""
 from datetime import datetime
-import enum
-import os
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Enum, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from enum import Enum as PyEnum
+from app.database import Base
+import logging
 
-# Database connection
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./raymond.db")
-
-engine = create_engine(
-    DATABASE_URL, 
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
-)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+logger = logging.getLogger(__name__)
 
 # ==================== ENUMS ====================
-class OrderType(str, enum.Enum):
+class TradeStatus(str, PyEnum):
+    """Trade status enumeration"""
+    OPEN = "open"
+    CLOSED = "closed"
+    CANCELLED = "cancelled"
+    PARTIAL = "partial"
+
+class OrderType(str, PyEnum):
+    """Order type enumeration"""
     MARKET = "market"
     LIMIT = "limit"
     STOP = "stop"
     STOP_LIMIT = "stop_limit"
 
-class OrderStatus(str, enum.Enum):
-    PENDING = "pending"
-    PLACED = "placed"
-    FILLED = "filled"
-    PARTIALLY_FILLED = "partially_filled"
-    CANCELLED = "cancelled"
-    REJECTED = "rejected"
-
-class PositionStatus(str, enum.Enum):
-    OPEN = "open"
-    CLOSED = "closed"
-    CLOSING = "closing"
-
-class TradeDirection(str, enum.Enum):
+class OrderDirection(str, PyEnum):
+    """Order direction enumeration"""
     BUY = "buy"
     SELL = "sell"
 
+class RiskLevel(str, PyEnum):
+    """Risk level enumeration"""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
 # ==================== MODELS ====================
 class Trade(Base):
-    """Persistent trade journal entry"""
+    """Trade record model"""
     __tablename__ = "trades"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    trade_id = Column(String, unique=True, index=True)
-    symbol = Column(String, default="XAUUSD")
-    direction = Column(SQLEnum(TradeDirection), default=TradeDirection.BUY)
+    trade_id = Column(String(50), unique=True, index=True, nullable=False)
+    symbol = Column(String(20), index=True, nullable=False)  # XAUUSD, etc.
+    direction = Column(Enum(OrderDirection), nullable=False)  # BUY/SELL
+    order_type = Column(Enum(OrderType), nullable=False)
     
-    entry_price = Column(Float)
+    # Price information
+    entry_price = Column(Float, nullable=False)
     exit_price = Column(Float, nullable=True)
-    quantity = Column(Float)
+    quantity = Column(Float, nullable=False)
     
-    pnl = Column(Float, default=0.0)
-    pnl_percent = Column(Float, default=0.0)
-    
-    status = Column(SQLEnum(PositionStatus), default=PositionStatus.OPEN)
-    execution_type = Column(String, default="paper")  # "paper" or "live"
-    
-    opened_at = Column(DateTime, default=datetime.utcnow)
-    closed_at = Column(DateTime, nullable=True)
-    
+    # Risk management
     stop_loss = Column(Float, nullable=True)
     take_profit = Column(Float, nullable=True)
     
-    notes = Column(String, nullable=True)
-
-class Order(Base):
-    """Trading order record"""
-    __tablename__ = "orders"
+    # Status
+    status = Column(Enum(TradeStatus), default=TradeStatus.OPEN, index=True)
     
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(String, unique=True, index=True)
-    trade_id = Column(String, nullable=True)
+    # P&L
+    pnl = Column(Float, nullable=True)
+    pnl_percent = Column(Float, nullable=True)
     
-    symbol = Column(String, default="XAUUSD")
-    order_type = Column(SQLEnum(OrderType), default=OrderType.MARKET)
-    direction = Column(SQLEnum(TradeDirection), default=TradeDirection.BUY)
+    # Timestamps
+    opened_at = Column(DateTime, default=datetime.utcnow, index=True)
+    closed_at = Column(DateTime, nullable=True)
     
-    quantity = Column(Float)
-    price = Column(Float, nullable=True)
-    fill_price = Column(Float, nullable=True)
-    filled_quantity = Column(Float, default=0.0)
+    # Metadata
+    broker = Column(String(20), nullable=False)  # mt5, exness, paper
+    strategy_decision = Column(String(50), nullable=True)
+    confidence = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
     
-    status = Column(SQLEnum(OrderStatus), default=OrderStatus.PENDING)
-    broker = Column(String)  # "mt5" or "exness"
+    # Relationships
+    risk_events = relationship("RiskEvent", back_populates="trade")
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    filled_at = Column(DateTime, nullable=True)
-    
-    commission = Column(Float, default=0.0)
-    notes = Column(String, nullable=True)
+    def calculate_pnl(self):
+        """Calculate P&L if trade is closed"""
+        if self.exit_price and self.entry_price:
+            if self.direction == OrderDirection.BUY:
+                self.pnl = (self.exit_price - self.entry_price) * self.quantity
+            else:  # SELL
+                self.pnl = (self.entry_price - self.exit_price) * self.quantity
+            
+            self.pnl_percent = (self.pnl / (self.entry_price * self.quantity)) * 100
 
 class Position(Base):
-    """Active trading position"""
+    """Open position record"""
     __tablename__ = "positions"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    position_id = Column(String, unique=True, index=True)
+    position_id = Column(String(50), unique=True, index=True, nullable=False)
+    trade_id = Column(String(50), nullable=False)  # Reference to Trade
+    symbol = Column(String(20), index=True, nullable=False)
+    direction = Column(Enum(OrderDirection), nullable=False)
     
-    symbol = Column(String, default="XAUUSD")
-    direction = Column(SQLEnum(TradeDirection), default=TradeDirection.BUY)
-    quantity = Column(Float)
+    # Position details
+    quantity = Column(Float, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    current_price = Column(Float, nullable=False)
     
-    entry_price = Column(Float)
-    current_price = Column(Float)
-    
-    pnl = Column(Float, default=0.0)
-    pnl_percent = Column(Float, default=0.0)
-    
-    status = Column(SQLEnum(PositionStatus), default=PositionStatus.OPEN)
-    
+    # Risk
     stop_loss = Column(Float, nullable=True)
     take_profit = Column(Float, nullable=True)
     
-    max_drawdown = Column(Float, default=0.0)
-    max_profit = Column(Float, default=0.0)
+    # Current metrics
+    unrealized_pnl = Column(Float, default=0.0)
+    unrealized_pnl_percent = Column(Float, default=0.0)
     
-    opened_at = Column(DateTime, default=datetime.utcnow)
-    closed_at = Column(DateTime, nullable=True)
+    # Timestamps
+    opened_at = Column(DateTime, default=datetime.utcnow, index=True)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Metadata
+    broker = Column(String(20), nullable=False)
+    is_active = Column(Boolean, default=True, index=True)
+    
+    def update_current_price(self, new_price: float):
+        """Update current price and recalculate P&L"""
+        self.current_price = new_price
+        self.last_updated = datetime.utcnow()
+        
+        if self.direction == OrderDirection.BUY:
+            self.unrealized_pnl = (new_price - self.entry_price) * self.quantity
+        else:  # SELL
+            self.unrealized_pnl = (self.entry_price - new_price) * self.quantity
+        
+        self.unrealized_pnl_percent = (self.unrealized_pnl / (self.entry_price * self.quantity)) * 100
 
-class StrategyMetric(Base):
-    """Strategy performance metrics"""
-    __tablename__ = "strategy_metrics"
-    
+class StrategyDecision(Base):
+    """Strategy decision record for audit trail"""
+    __tablename__ = "strategy_decisions"
+
     id = Column(Integer, primary_key=True, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    
-    symbol = Column(String, default="XAUUSD")
-    
-    # Technical indicators
-    ema20 = Column(Float)
-    ema50 = Column(Float)
-    rsi = Column(Float)
-    atr = Column(Float)
-    
-    # Market data
-    current_price = Column(Float)
-    bid = Column(Float)
-    ask = Column(Float)
+    symbol = Column(String(20), index=True, nullable=False)
     
     # Decision
-    ai_decision = Column(String)  # "buy", "sell", "hold"
-    ai_confidence = Column(Float)
-    reason = Column(String, nullable=True)
+    decision = Column(String(50), nullable=False)  # STRONG_BUY, BUY, HOLD, SELL, STRONG_SELL
+    confidence = Column(Float, nullable=False)
+    
+    # Price info
+    current_price = Column(Float, nullable=False)
+    bid = Column(Float, nullable=False)
+    ask = Column(Float, nullable=False)
+    
+    # Recommendation
+    suggested_entry = Column(Float, nullable=True)
+    recommended_stop_loss = Column(Float, nullable=True)
+    recommended_take_profit = Column(Float, nullable=True)
+    risk_reward_ratio = Column(Float, nullable=True)
+    
+    # Indicators
+    ema20 = Column(Float, nullable=True)
+    ema50 = Column(Float, nullable=True)
+    rsi = Column(Float, nullable=True)
+    atr = Column(Float, nullable=True)
+    momentum = Column(Float, nullable=True)
+    
+    # Risk assessment
+    risk_level = Column(Enum(RiskLevel), nullable=True)
+    
+    # Metadata
+    executed = Column(Boolean, default=False)
+    notes = Column(Text, nullable=True)
 
-class BacktestResult(Base):
-    """Backtest execution results"""
-    __tablename__ = "backtest_results"
-    
+class RiskEvent(Base):
+    """Risk management events (alerts, stops, etc.)"""
+    __tablename__ = "risk_events"
+
     id = Column(Integer, primary_key=True, index=True)
-    backtest_id = Column(String, unique=True, index=True)
+    trade_id = Column(String(50), ForeignKey("trades.trade_id"), index=True, nullable=True)
+    position_id = Column(String(50), nullable=True)
     
-    start_date = Column(DateTime)
-    end_date = Column(DateTime)
+    # Event info
+    event_type = Column(String(50), nullable=False)  # stale_market, stop_loss_hit, tp_hit, etc.
+    severity = Column(Enum(RiskLevel), nullable=False)
     
+    # Details
+    message = Column(Text, nullable=False)
+    action_taken = Column(String(100), nullable=True)
+    
+    # Timestamps
+    occurred_at = Column(DateTime, default=datetime.utcnow, index=True)
+    resolved_at = Column(DateTime, nullable=True)
+    
+    # Metadata
+    resolved = Column(Boolean, default=False)
+    
+    # Relationship
+    trade = relationship("Trade", back_populates="risk_events")
+
+class Journal(Base):
+    """Trading journal for notes and analysis"""
+    __tablename__ = "journal"
+
+    id = Column(Integer, primary_key=True, index=True)
+    journal_id = Column(String(50), unique=True, index=True, nullable=False)
+    
+    # Association
+    trade_id = Column(String(50), nullable=True, index=True)
+    
+    # Content
+    entry_date = Column(DateTime, default=datetime.utcnow, index=True)
+    title = Column(String(200), nullable=False)
+    content = Column(Text, nullable=False)
+    
+    # Categories
+    category = Column(String(50), nullable=True)  # trade_analysis, risk_review, market_review, etc.
+    tags = Column(String(200), nullable=True)  # comma-separated tags
+    
+    # Metadata
+    is_private = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Account(Base):
+    """Account information and balance tracking"""
+    __tablename__ = "accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(String(50), unique=True, index=True, nullable=False)
+    
+    # Account info
+    broker = Column(String(20), nullable=False)
+    account_type = Column(String(20), nullable=False)  # demo, live, paper
+    currency = Column(String(10), default="USD")
+    
+    # Balance
+    initial_balance = Column(Float, nullable=False)
+    current_balance = Column(Float, nullable=False)
+    equity = Column(Float, nullable=False)
+    margin_used = Column(Float, default=0.0)
+    margin_available = Column(Float, nullable=False)
+    
+    # Performance
+    total_pnl = Column(Float, default=0.0)
+    total_pnl_percent = Column(Float, default=0.0)
+    max_drawdown = Column(Float, default=0.0)
+    win_rate = Column(Float, default=0.0)
+    
+    # Counters
     total_trades = Column(Integer, default=0)
     winning_trades = Column(Integer, default=0)
     losing_trades = Column(Integer, default=0)
     
-    win_rate = Column(Float, default=0.0)
-    total_pnl = Column(Float, default=0.0)
-    max_drawdown = Column(Float, default=0.0)
-    sharpe_ratio = Column(Float, default=0.0)
-    
-    initial_balance = Column(Float, default=10000.0)
-    final_balance = Column(Float, default=10000.0)
-    
+    # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Status
+    is_active = Column(Boolean, default=True, index=True)
 
-# ==================== DATABASE INITIALIZATION ====================
-def create_tables():
-    """Create all database tables"""
-    Base.metadata.create_all(bind=engine)
+class Backtest(Base):
+    """Backtest result records"""
+    __tablename__ = "backtests"
 
-def get_db():
-    """Dependency for getting database session"""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# Initialize tables on import
-create_tables()
+    id = Column(Integer, primary_key=True, index=True)
+    backtest_id = Column(String(50), unique=True, index=True, nullable=False)
+    
+    # Config
+    strategy_name = Column(String(100), nullable=False)
+    symbol = Column(String(20), nullable=False)
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=False)
+    initial_balance = Column(Float, nullable=False)
+    
+    # Results
+    final_balance = Column(Float, nullable=False)
+    total_pnl = Column(Float, nullable=False)
+    total_pnl_percent = Column(Float, nullable=False)
+    
+    # Statistics
+    total_trades = Column(Integer, nullable=False)
+    winning_trades = Column(Integer, nullable=False)
+    losing_trades = Column(Integer, nullable=False)
+    win_rate = Column(Float, nullable=False)
+    
+    # Risk metrics
+    max_drawdown = Column(Float, nullable=False)
+    sharpe_ratio = Column(Float, nullable=True)
+    sortino_ratio = Column(Float, nullable=True)
+    profit_factor = Column(Float, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Metadata
+    status = Column(String(20), default="pending")  # pending, running, completed, failed
+    notes = Column(Text, nullable=True)
