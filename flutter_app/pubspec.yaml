@@ -1,0 +1,86 @@
+name: raymond_v2_8_trader
+description: RAYMOND v2.8 - XAUUSD Automated Trading System with AI Decision Layer
+
+publish_to: 'none'
+
+version: 2.8.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # UI & State Management
+  provider: ^6.0.0
+  riverpod: ^2.4.0
+  get: ^4.6.0
+  
+  # HTTP & API
+  http: ^1.1.0
+  dio: ^5.3.0
+  retrofit: ^4.0.0
+  
+  # Data Storage
+  sqflite: ^2.3.0
+  shared_preferences: ^2.2.0
+  hive: ^2.2.0
+  
+  # Charts & Visualization
+  fl_chart: ^0.66.0
+  syncfusion_flutter_charts: ^23.1.0
+  
+  # UI Components
+  cupertino_icons: ^1.0.2
+  animated_bottom_navigation_bar: ^1.2.0
+  flutter_animate: ^4.2.0
+  shimmer: ^3.0.0
+  
+  # Date & Time
+  intl: ^0.19.0
+  timezone: ^0.9.0
+  
+  # Utilities
+  uuid: ^4.0.0
+  equatable: ^2.0.5
+  freezed_annotation: ^2.4.0
+  json_serializable: ^6.7.0
+  
+  # Logging & Analytics
+  logger: ^2.0.0
+  firebase_core: ^2.24.0
+  firebase_analytics: ^10.7.0
+  
+  # Security
+  flutter_secure_storage: ^9.0.0
+  
+  # WebSocket (for real-time data)
+  web_socket_channel: ^2.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  
+  flutter_lints: ^3.0.0
+  build_runner: ^2.4.0
+  freezed: ^2.4.0
+  retrofit_generator: ^7.0.0
+  json_serializable: ^6.7.0
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/images/
+    - assets/icons/
+    - assets/animations/
+  
+  fonts:
+    - family: Roboto
+      fonts:
+        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Roboto-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Roboto-Light.ttf
+          weight: 300
