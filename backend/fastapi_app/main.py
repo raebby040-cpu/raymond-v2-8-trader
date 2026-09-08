@@ -326,7 +326,6 @@ async def emergency_stop(action: EmergencyAction, authorized: bool = Depends(ver
     CRITICAL: Live trading disabled by default. Manual override required.
     """
     try:
-        global positions
         closed_count = len(positions)
         
         # Close all positions
