@@ -1,642 +1,443 @@
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
-void main() => runApp(const RaymondApp());
+void main() {
+  runApp(const RaymondApp());
+}
 
 class RaymondApp extends StatelessWidget {
   const RaymondApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      title: 'Raymond V2.8 Trader',
+    return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: DashboardScreen(),
-      themeMode: ThemeMode.dark,
-    );
-  }
-}
-
-class DashboardScreen extends StatelessWidget {
-  const DashboardScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context).copyWith(
-      colorScheme: ColorScheme.dark(
-        primary: Colors.tealAccent,
-        secondary: Colors.blueAccent,
-        surface: const Color(0xFF0F1720),
-        background: const Color(0xFF071018),
-      ),
-      useMaterial3: true,
-    );
-
-    return Theme(
-      data: theme,
-      child: Scaffold(
-        backgroundColor: theme.colorScheme.background,
-        appBar: AppBar(
-          surfaceTintColor: Colors.transparent,
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          leading: const _RaymondLogo(),
-          title: const _HeaderTitle(),
-          actions: const [_ConnectionStatus(), _NotificationButton()],
+      title: 'RAYMOND V2.8',
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF030B14),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFFF5B82E),
+          brightness: Brightness.dark,
         ),
-        body: const SafeArea(child: _DashboardBody()),
-        bottomNavigationBar: const _MainNavigation(),
+        fontFamily: 'Roboto',
       ),
+      home: const HomePage(),
     );
   }
 }
 
-class _RaymondLogo extends StatelessWidget {
-  const _RaymondLogo({super.key});
+class HomePage extends StatelessWidget {
+  const HomePage({super.key});
+
+  static const gold = Color(0xFFF5B82E);
+  static const green = Color(0xFF00E59B);
+  static const background = Color(0xFF030B14);
+  static const card = Color(0xFF091724);
+  static const border = Color(0xFF17334D);
+  static const muted = Color(0xFF8EA4B8);
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(8.0),
-      child: Semantics(
-        label: 'Raymond logo',
-        child: CircleAvatar(
-          radius: 18,
-          backgroundColor: Colors.teal.shade800,
-          child: const Icon(Icons.show_chart, color: Colors.white, size: 20),
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.menu, color: Colors.white),
+          onPressed: () {},
+        ),
+        title: const Row(
+          children: [
+            Text(
+              'RAYMOND',
+              style: TextStyle(
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.2,
+              ),
+            ),
+            SizedBox(width: 6),
+            Text(
+              'V2.8',
+              style: TextStyle(
+                color: gold,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          Container(
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 9,
+              vertical: 5,
+            ),
+            decoration: BoxDecoration(
+              color: green.withOpacity(.12),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: green.withOpacity(.35)),
+            ),
+            child: const Row(
+              children: [
+                Icon(Icons.circle, size: 8, color: green),
+                SizedBox(width: 5),
+                Text(
+                  'ONLINE',
+                  style: TextStyle(
+                    color: green,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.notifications_none),
+            onPressed: () {},
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'XAUUSD',
+              style: TextStyle(
+                color: muted,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 4),
+
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                const Text(
+                  '3428.73',
+                  style: TextStyle(
+                    fontSize: 34,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: green.withOpacity(.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text(
+                    '+0.42%',
+                    style: TextStyle(
+                      color: green,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 18),
+
+            _card(
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        '5 MIN',
+                        style: TextStyle(
+                          color: muted,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Row(
+                        children: const [
+                          Text(
+                            'BUY',
+                            style: TextStyle(
+                              color: green,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            'Strong Momentum',
+                            style: TextStyle(color: muted),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+
+                  SizedBox(
+                    height: 180,
+                    child: CustomPaint(
+                      painter: ChartPainter(),
+                      size: Size.infinite,
+                    ),
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: const [
+                      Text('Technical Score'),
+                      Text(
+                        '78 / 100',
+                        style: TextStyle(
+                          color: gold,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 14),
+
+            Row(
+              children: [
+                Expanded(
+                  child: _metricCard(
+                    'RSI',
+                    '56.4',
+                    'Neutral',
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _metricCard(
+                    'ATR',
+                    '12.8',
+                    'Volatility',
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 14),
+
+            _card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'PAPER TRADING',
+                        style: TextStyle(
+                          color: gold,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Icon(
+                        Icons.account_balance_wallet_outlined,
+                        color: gold,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  const Text(
+                    '\$10,000.00',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: const [
+                      _SmallStat(
+                        label: 'OPEN POSITIONS',
+                        value: '1',
+                      ),
+                      _SmallStat(
+                        label: 'TOTAL P&L',
+                        value: '+\$48.32',
+                        positive: true,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
+      bottomNavigationBar: NavigationBar(
+        backgroundColor: const Color(0xFF06111C),
+        selectedIndex: 0,
+        indicatorColor: gold.withOpacity(.16),
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home, color: gold),
+            label: 'Home',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.candlestick_chart_outlined),
+            label: 'Chart',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.analytics_outlined),
+            label: 'Analysis',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.swap_vert),
+            label: 'Positions',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            label: 'Settings',
+          ),
+        ],
+      ),
     );
   }
-}
 
-class _HeaderTitle extends StatelessWidget {
-  const _HeaderTitle({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: const [
-        Text('RAYMOND', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 1.2)),
-        SizedBox(height: 2),
-        Text('V2.8 TRADER', style: TextStyle(fontSize: 12, color: Colors.white70)),
-      ],
+  Widget _card({required Widget child}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: border),
+      ),
+      child: child,
     );
   }
-}
 
-class _ConnectionStatus extends StatelessWidget {
-  const _ConnectionStatus({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8.0),
-      child: Row(
+  Widget _metricCard(
+    String title,
+    String value,
+    String subtitle,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Tooltip(message: 'Connection status: DEMO / OFFLINE', child: _StatusDot(color: Colors.amber)),
+          Text(title, style: const TextStyle(color: muted)),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 23,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: const TextStyle(
+              color: gold,
+              fontSize: 12,
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class _StatusDot extends StatelessWidget {
-  final Color color;
-  const _StatusDot({required this.color, super.key});
+class _SmallStat extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool positive;
+
+  const _SmallStat({
+    required this.label,
+    required this.value,
+    this.positive = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 12,
-      height: 12,
-      decoration: BoxDecoration(
-        color: color,
-        shape: BoxShape.circle,
-        boxShadow: const [BoxShadow(blurRadius: 4, color: Colors.black54)],
-      ),
-    );
-  }
-}
-
-class _NotificationButton extends StatelessWidget {
-  const _NotificationButton({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      tooltip: 'Notifications',
-      icon: const Icon(Icons.notifications_rounded),
-      onPressed: () => ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Notifications are not configured.'))),
-    );
-  }
-}
-
-class _DashboardBody extends StatelessWidget {
-  const _DashboardBody({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(builder: (context, constraints) {
-      final isWide = constraints.maxWidth > 600;
-      // Make whole screen scrollable on narrow devices
-      return SingleChildScrollView(
-        padding: const EdgeInsets.all(12.0),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: constraints.maxHeight - 24),
-          child: IntrinsicHeight(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // Market overview & Account summary (responsive)
-                if (isWide)
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(child: _MarketOverviewCard()),
-                      const SizedBox(width: 12),
-                      SizedBox(width: 300, child: const _AccountSummaryCard()),
-                    ],
-                  )
-                else ...[
-                  _MarketOverviewCard(),
-                  const SizedBox(height: 10),
-                  const _AccountSummaryCard(),
-                ],
-
-                const SizedBox(height: 10),
-
-                // Chart and controls + side panel
-                if (isWide)
-                  SizedBox(
-                    height: 520,
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          flex: 3,
-                          child: Column(children: const [Expanded(child: _PriceChartCard()), SizedBox(height: 10), _TradingControlsCard()]),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          flex: 1,
-                          child: Column(children: const [Expanded(child: _StrategyPanelCard()), SizedBox(height: 10), _OpenPositionsCard()]),
-                        ),
-                      ],
-                    ),
-                  )
-                else ...[
-                  const _PriceChartCard(),
-                  const SizedBox(height: 10),
-                  const _TradingControlsCard(),
-                  const SizedBox(height: 10),
-                  const _StrategyPanelCard(),
-                  const SizedBox(height: 10),
-                  const _OpenPositionsCard(),
-                ],
-
-                // Fill remaining space on tall displays
-                const SizedBox(height: 10),
-              ],
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Color(0xFF8EA4B8),
+            fontSize: 10,
           ),
         ),
-      );
-    });
-  }
-}
-
-// Market overview
-class _MarketOverviewCard extends StatelessWidget {
-  const _MarketOverviewCard({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      color: const Color(0xFF0B1220),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(10.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
-            Text('Market', style: TextStyle(color: Colors.white70)),
-            Text('DEMO / OFFLINE', style: TextStyle(color: Colors.amber)),
-          ]),
-          const SizedBox(height: 6),
-          const Text('XAUUSD', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: Colors.white)),
-          const SizedBox(height: 6),
-          // Make price boxes wrap on narrow screens
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: const [
-              _PriceBox(label: 'Price', value: '1,910.45', valueColor: Colors.teal),
-              _PriceBox(label: 'Bid', value: '1,910.40', valueColor: Colors.green),
-              _PriceBox(label: 'Ask', value: '1,910.50', valueColor: Colors.red),
-              _PriceBox(label: 'Spread', value: '0.10', valueColor: Colors.white70),
-            ],
+        const SizedBox(height: 5),
+        Text(
+          value,
+          style: TextStyle(
+            color: positive ? const Color(0xFF00E59B) : Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
           ),
-          const SizedBox(height: 8),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
-            Text('Market status', style: TextStyle(color: Colors.white70)),
-            Text('CLOSED (demo)', style: TextStyle(color: Colors.amber)),
-          ]),
-        ]),
-      ),
+        ),
+      ],
     );
   }
 }
 
-class _PriceBox extends StatelessWidget {
-  final String label;
-  final String value;
-  final Color valueColor;
-  const _PriceBox({required this.label, required this.value, required this.valueColor, super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: 80, maxWidth: 200),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        decoration: BoxDecoration(color: const Color(0xFF071018), borderRadius: BorderRadius.circular(8)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label, style: const TextStyle(fontSize: 11, color: Colors.white70)),
-          const SizedBox(height: 4),
-          Text(value, style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: valueColor)),
-        ]),
-      ),
-    );
-  }
-}
-
-// Account summary
-class _AccountSummaryCard extends StatelessWidget {
-  const _AccountSummaryCard({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      color: const Color(0xFF0B1220),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(10.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Account Summary', style: TextStyle(color: Colors.white70)),
-          const SizedBox(height: 6),
-          _SummaryRow(label: 'Balance', value: r'10,000.00', valueColor: Colors.tealAccent),
-          _SummaryRow(label: 'Equity', value: r'10,150.00', valueColor: Colors.tealAccent),
-          _SummaryRow(label: "Today's P&L", value: r'+150.00', valueColor: Colors.green),
-          _SummaryRow(label: 'Margin', value: r'500.00', valueColor: Colors.white70),
-          _SummaryRow(label: 'Free Margin', value: r'9,650.00', valueColor: Colors.white70),
-        ]),
-      ),
-    );
-  }
-}
-
-class _SummaryRow extends StatelessWidget {
-  final String label;
-  final String value;
-  final Color valueColor;
-  const _SummaryRow({required this.label, required this.value, required this.valueColor, super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
-      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        Flexible(child: Text(label, style: const TextStyle(color: Colors.white70))),
-        const SizedBox(width: 8),
-        Flexible(child: Text(value, textAlign: TextAlign.right, style: TextStyle(color: valueColor, fontWeight: FontWeight.w600))),
-      ]),
-    );
-  }
-}
-
-// Chart card
-class _PriceChartCard extends StatelessWidget {
-  const _PriceChartCard({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      color: const Color(0xFF071018),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(10.0),
-        child: LayoutBuilder(builder: (context, constraints) {
-          // compute available height and allow the chart to shrink when space is tight
-          final available = constraints.maxHeight.isFinite ? constraints.maxHeight : double.infinity;
-          const headerHeight = 24.0; // approximate
-          const maxChart = 220.0;
-          final chartHeight = available.isFinite ? math.max(80.0, math.min(maxChart, available - headerHeight - 16.0)) : maxChart;
-          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const _ChartHeader(),
-            const SizedBox(height: 6),
-            ConstrainedBox(
-              constraints: BoxConstraints(maxHeight: chartHeight, minHeight: 60),
-              child: SizedBox(height: chartHeight, child: const _DemoPriceChart()),
-            ),
-          ]);
-        }),
-      ),
-    );
-  }
-}
-
-class _ChartHeader extends StatelessWidget {
-  const _ChartHeader({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
-      Text('XAUUSD Chart', style: TextStyle(color: Colors.white70)),
-      _ChartTimeframeButtons(),
-    ]);
-  }
-}
-
-class _ChartTimeframeButtons extends StatelessWidget {
-  const _ChartTimeframeButtons({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(children: [
-      FilledButton.tonal(onPressed: () {}, child: const Text('15M')),
-      const SizedBox(width: 8),
-      FilledButton.tonal(onPressed: () {}, child: const Text('1H')),
-      const SizedBox(width: 8),
-      FilledButton.tonal(onPressed: () {}, child: const Text('4H')),
-    ]);
-  }
-}
-
-class _DemoPriceChart extends StatelessWidget {
-  const _DemoPriceChart({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(builder: (context, constraints) {
-      return CustomPaint(size: Size(constraints.maxWidth, constraints.maxHeight), painter: _ChartPainter());
-    });
-  }
-}
-
-class _ChartPainter extends CustomPainter {
-  final List<double> data = const [1910.4, 1910.7, 1910.2, 1911.0, 1910.5, 1910.8, 1911.2, 1910.9, 1910.6, 1910.45];
-
+class ChartPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    final bg = Rect.fromLTWH(0, 0, size.width, size.height);
-    final paintBg = Paint()..shader = const LinearGradient(colors: [Color(0xFF071018), Color(0xFF0B1220)]).createShader(bg);
-    canvas.drawRect(bg, paintBg);
-
-    final padding = 8.0;
-    final chartRect = Rect.fromLTWH(padding, padding, size.width - padding * 2, size.height - padding * 2);
-
-    // draw grid
-    final gridPaint = Paint()..color = Colors.white10..strokeWidth = 0.6;
-    for (var i = 0; i <= 4; i++) {
-      final y = chartRect.top + i * (chartRect.height / 4);
-      canvas.drawLine(Offset(chartRect.left, y), Offset(chartRect.right, y), gridPaint);
-    }
-
-    // scale data
-    final min = data.reduce((a, b) => a < b ? a : b);
-    final max = data.reduce((a, b) => a > b ? a : b);
-    final scaleY = (max - min) == 0 ? 1 : chartRect.height / (max - min);
-    final stepX = chartRect.width / (data.length - 1);
-
-    final path = Path();
-    for (var i = 0; i < data.length; i++) {
-      final x = chartRect.left + stepX * i;
-      final y = chartRect.bottom - (data[i] - min) * scaleY;
-      if (i == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
-    }
+    final gridPaint = Paint()
+      ..color = const Color(0xFF17334D)
+      ..strokeWidth = 1;
 
     final linePaint = Paint()
-      ..style = PaintingStyle.stroke
+      ..color = const Color(0xFF00E59B)
       ..strokeWidth = 2
-      ..shader = const LinearGradient(colors: [Color(0xFF00E5A8), Color(0xFF00B0FF)]).createShader(chartRect);
+      ..style = PaintingStyle.stroke;
+
+    for (int i = 1; i < 5; i++) {
+      final y = size.height * i / 5;
+      canvas.drawLine(
+        Offset(0, y),
+        Offset(size.width, y),
+        gridPaint,
+      );
+    }
+
+    final path = Path();
+
+    path.moveTo(0, size.height * .72);
+    path.lineTo(size.width * .08, size.height * .65);
+    path.lineTo(size.width * .16, size.height * .69);
+    path.lineTo(size.width * .24, size.height * .52);
+    path.lineTo(size.width * .32, size.height * .57);
+    path.lineTo(size.width * .40, size.height * .43);
+    path.lineTo(size.width * .48, size.height * .49);
+    path.lineTo(size.width * .56, size.height * .34);
+    path.lineTo(size.width * .64, size.height * .40);
+    path.lineTo(size.width * .72, size.height * .27);
+    path.lineTo(size.width * .80, size.height * .32);
+    path.lineTo(size.width * .88, size.height * .18);
+    path.lineTo(size.width, size.height * .23);
+
     canvas.drawPath(path, linePaint);
-
-    // draw last price
-    final last = data.last;
-    final lastX = chartRect.left + stepX * (data.length - 1);
-    final lastY = chartRect.bottom - (last - min) * scaleY;
-    final dotPaint = Paint()..color = Colors.tealAccent.shade200;
-    canvas.drawCircle(Offset(lastX, lastY), 4, dotPaint);
-
-    // labels
-    final tp = TextPainter(textDirection: TextDirection.ltr);
-    tp.text = TextSpan(text: '${max.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white70, fontSize: 10));
-    tp.layout();
-    tp.paint(canvas, Offset(chartRect.right - tp.width, chartRect.top - tp.height));
-
-    tp.text = TextSpan(text: '${min.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white70, fontSize: 10));
-    tp.layout();
-    tp.paint(canvas, Offset(chartRect.right - tp.width, chartRect.bottom - tp.height));
   }
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-// Trading controls
-class _TradingControlsCard extends StatelessWidget {
-  const _TradingControlsCard({super.key});
-
-  void _showDemoSnack(BuildContext context, String action) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$action: backend not connected (DEMO).')));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      color: const Color(0xFF0B1220),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(10.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Trading Controls', style: TextStyle(color: Colors.white70)),
-          const SizedBox(height: 6),
-          Row(children: [
-            Expanded(
-              child: FilledButton(
-                onPressed: () => _showDemoSnack(context, 'BUY'),
-                style: FilledButton.styleFrom(backgroundColor: Colors.teal.shade700, textStyle: const TextStyle(fontWeight: FontWeight.bold)),
-                child: const Padding(padding: EdgeInsets.symmetric(vertical: 12.0), child: Text('BUY')),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: FilledButton(
-                onPressed: () => _showDemoSnack(context, 'SELL'),
-                style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700, textStyle: const TextStyle(fontWeight: FontWeight.bold)),
-                child: const Padding(padding: EdgeInsets.symmetric(vertical: 12.0), child: Text('SELL')),
-              ),
-            ),
-          ]),
-          const SizedBox(height: 10),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
-            Text('Auto Trading', style: TextStyle(color: Colors.white70)),
-            _AutoTradingSwitch(),
-          ]),
-          const SizedBox(height: 6),
-          const _RiskStatus(),
-        ]),
-      ),
-    );
-  }
-}
-
-class _AutoTradingSwitch extends StatefulWidget {
-  const _AutoTradingSwitch({super.key});
-
-  @override
-  State<_AutoTradingSwitch> createState() => _AutoTradingSwitchState();
-}
-
-class _AutoTradingSwitchState extends State<_AutoTradingSwitch> {
-  bool enabled = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return Switch.adaptive(
-      value: enabled,
-      activeColor: Colors.tealAccent.shade200,
-      onChanged: (v) => setState(() {
-        enabled = v;
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Auto Trading ${enabled ? 'enabled (demo)' : 'disabled'} - backend not connected')));
-      }),
-    );
-  }
-}
-
-class _RiskStatus extends StatelessWidget {
-  const _RiskStatus({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(children: [
-      Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4), decoration: BoxDecoration(color: Colors.teal.shade900, borderRadius: BorderRadius.circular(8)), child: const Text('RISK: LOW', style: TextStyle(color: Colors.white70))),
-      const SizedBox(width: 8),
-      const Flexible(child: Text('Mode: DEMO', style: TextStyle(color: Colors.amber))),
-    ]);
-  }
-}
-
-// Open positions
-class _OpenPositionsCard extends StatelessWidget {
-  const _OpenPositionsCard({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    // demo empty state
-    final hasPositions = false;
-    return Card(
-      color: const Color(0xFF0B1220),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(10.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Open Positions', style: TextStyle(color: Colors.white70)),
-          const SizedBox(height: 6),
-          if (!hasPositions) ...[
-            const SizedBox(height: 12),
-            Center(child: Column(children: const [Icon(Icons.folder_open, size: 48, color: Colors.white24), SizedBox(height: 8), Text('No open positions', style: TextStyle(color: Colors.white70))])),
-          ] else ...[
-            // list of positions
-          ]
-        ]),
-      ),
-    );
-  }
-}
-
-// Strategy panel
-class _StrategyPanelCard extends StatelessWidget {
-  const _StrategyPanelCard({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      color: const Color(0xFF0B1220),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(10.0),
-        child: LayoutBuilder(builder: (context, constraints) {
-          // allow vertical scrolling when the card is too small
-          return ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: constraints.maxHeight),
-            child: SingleChildScrollView(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
-                Text('Raymond Strategy', style: TextStyle(color: Colors.white70)),
-                SizedBox(height: 6),
-                _StrategyRow(label: 'Signal', value: 'WAITING', color: Colors.amber),
-                _StrategyRow(label: 'Confidence', value: '—', color: Colors.white70),
-                _StrategyRow(label: 'Trend', value: '—', color: Colors.white70),
-                _StrategyRow(label: 'RSI', value: '—', color: Colors.white70),
-                _StrategyRow(label: 'MACD', value: '—', color: Colors.white70),
-                _StrategyRow(label: 'Risk Mode', value: 'DEMO', color: Colors.amber),
-              ]),
-            ),
-          );
-        }),
-      ),
-    );
-  }
-}
-
-class _StrategyRow extends StatelessWidget {
-  final String label;
-  final String value;
-  final Color color;
-  const _StrategyRow({required this.label, required this.value, required this.color, super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
-      child: Row(children: [
-        Expanded(child: Text(label, style: const TextStyle(color: Colors.white70))),
-        const SizedBox(width: 8),
-        Flexible(child: Text(value, textAlign: TextAlign.right, style: TextStyle(color: color, fontWeight: FontWeight.w600))),
-      ]),
-    );
-  }
-}
-
-// Bottom navigation
-class _MainNavigation extends StatefulWidget {
-  const _MainNavigation({super.key});
-
-  @override
-  State<_MainNavigation> createState() => _MainNavigationState();
-}
-
-class _MainNavigationState extends State<_MainNavigation> {
-  int _index = 0;
-
-  static const _labels = ['Home', 'Positions', 'Strategy', 'Settings'];
-
-  @override
-  Widget build(BuildContext context) {
-    return NavigationBar(
-      selectedIndex: _index,
-      onDestinationSelected: (i) => setState(() => _index = i),
-      destinations: const [
-        NavigationDestination(icon: Icon(Icons.home_outlined), label: 'Home'),
-        NavigationDestination(icon: Icon(Icons.swap_horiz), label: 'Positions'),
-        NavigationDestination(icon: Icon(Icons.psychology_alt), label: 'Strategy'),
-        NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
-      ],
-    );
-  }
 }
