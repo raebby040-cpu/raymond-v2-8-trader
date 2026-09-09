@@ -1,16 +1,17 @@
 """
 RAYMOND v2.8 Backend - FastAPI Application
 
-Step 1B:
-- Broker-neutral MT5 connection API
-- MT5 connection status
-- MT5 account information
-- MT5 terminal information
-- Safe disconnect
+Step 2:
+- Broker-neutral MT5 connection
+- Real MT5 market tick data
+- Broker-specific symbol discovery
+- Real MT5 OHLC candles
+- MT5 account/terminal status
+- Paper trading only
 
 IMPORTANT:
-Trade execution is NOT implemented here.
-No endpoint in this step places, modifies, or closes trades.
+Real order execution is NOT implemented.
+No endpoint places, modifies, or closes a real trade.
 """
 
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -48,14 +49,14 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# FASTAPI APPLICATION
+# APPLICATION
 # ============================================================
 
 app = FastAPI(
     title="RAYMOND v2.8 Trading System",
     description=(
-        "Broker-neutral MT5 trading system with market analysis, "
-        "paper trading, risk management and AI decision support."
+        "Broker-neutral MT5 market analysis, "
+        "paper trading and AI decision support."
     ),
     version="2.8.0",
 )
@@ -91,19 +92,17 @@ def utc_timestamp() -> str:
 
 def live_trading_enabled() -> bool:
     return (
-        os.getenv("LIVE_TRADING_ENABLED", "false").lower()
+        os.getenv(
+            "LIVE_TRADING_ENABLED",
+            "false",
+        ).lower()
         == "true"
     )
 
 
-def safe_account_response(account: dict) -> dict:
-    """
-    Return only account information needed by the dashboard.
-
-    Sensitive/unnecessary fields such as account holder name
-    are intentionally not exposed by this API response.
-    """
-
+def safe_account_response(
+    account: dict,
+) -> dict:
     allowed_fields = [
         "login",
         "server",
@@ -131,14 +130,9 @@ def safe_account_response(account: dict) -> dict:
     }
 
 
-def safe_terminal_response(terminal: dict) -> dict:
-    """
-    Return safe MT5 terminal information.
-
-    Local filesystem paths and other unnecessary terminal
-    details are intentionally excluded.
-    """
-
+def safe_terminal_response(
+    terminal: dict,
+) -> dict:
     allowed_fields = [
         "community_account",
         "community_connection",
@@ -159,11 +153,15 @@ def safe_terminal_response(terminal: dict) -> dict:
     }
 
 
-def mt5_error_response(exc: Exception) -> HTTPException:
+def mt5_error_response(
+    exc: Exception,
+) -> HTTPException:
     return HTTPException(
         status_code=503,
         detail={
-            "error": "MT5 connection/service unavailable",
+            "error": (
+                "MT5 connection/service unavailable"
+            ),
             "message": str(exc),
             "timestamp": utc_timestamp(),
         },
@@ -175,13 +173,6 @@ def mt5_error_response(exc: Exception) -> HTTPException:
 # ============================================================
 
 class MT5ConnectRequest(BaseModel):
-    """
-    Broker-neutral MT5 connection settings.
-
-    The broker itself is NOT a fixed value.
-    The MT5 server name identifies the broker's trade server.
-    """
-
     login: int = Field(..., gt=0)
     password: str = Field(..., min_length=1)
     server: str = Field(..., min_length=1)
@@ -198,38 +189,40 @@ class MT5ConnectRequest(BaseModel):
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-
     return {
         "status": "healthy",
         "timestamp": utc_timestamp(),
         "version": "2.8.0",
-        "live_trading_enabled": live_trading_enabled(),
+        "live_trading_enabled": (
+            live_trading_enabled()
+        ),
     }
 
 
 # ============================================================
-# API ROOT
+# ROOT
 # ============================================================
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
-
     return {
         "name": "RAYMOND v2.8 Trading System",
         "description": (
-            "Broker-neutral MT5 market analysis and "
-            "paper trading system"
+            "Broker-neutral MT5 market analysis "
+            "and paper trading system"
         ),
         "version": "2.8.0",
-        "broker_support": "MT5-compatible brokers",
-        "live_trading_enabled": live_trading_enabled(),
+        "broker_support": (
+            "MT5-compatible brokers"
+        ),
+        "live_trading_enabled": (
+            live_trading_enabled()
+        ),
         "endpoints": {
             "health": "/health",
             "mt5_connect": "/api/mt5/connect",
@@ -237,7 +230,16 @@ async def root():
             "mt5_status": "/api/mt5/status",
             "mt5_account": "/api/mt5/account",
             "mt5_terminal": "/api/mt5/terminal",
-            "market_data": "/api/market",
+            "market_price": "/api/market/price",
+            "market_candles": (
+                "/api/market/candlesticks"
+            ),
+            "market_symbols": (
+                "/api/market/symbols"
+            ),
+            "market_gold": (
+                "/api/market/gold-symbols"
+            ),
             "trading": "/api/trading",
             "strategy": "/api/strategy",
             "admin": "/api/admin",
@@ -247,17 +249,13 @@ async def root():
 
 
 # ============================================================
-# MT5 / BROKER CONNECTION
+# MT5 CONNECTION
 # ============================================================
 
 @app.post("/api/mt5/connect")
-async def connect_mt5(request: MT5ConnectRequest):
-    """
-    Connect RAYMOND to any MT5-compatible broker/account.
-
-    No broker is hardcoded here.
-    """
-
+async def connect_mt5(
+    request: MT5ConnectRequest,
+):
     global mt5_service
 
     config = MT5ConnectionConfig(
@@ -276,8 +274,15 @@ async def connect_mt5(request: MT5ConnectRequest):
 
         mt5_service = new_service
 
-        account = result.get("account", {})
-        terminal = result.get("terminal", {})
+        account = result.get(
+            "account",
+            {},
+        )
+
+        terminal = result.get(
+            "terminal",
+            {},
+        )
 
         logger.info(
             "MT5 connected: server=%s login=%s",
@@ -288,26 +293,33 @@ async def connect_mt5(request: MT5ConnectRequest):
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "broker": account.get("company"),
-            "server": account.get("server"),
-            "account": safe_account_response(account),
-            "terminal": safe_terminal_response(terminal),
-            "live_trading_enabled": live_trading_enabled(),
+            "broker": account.get(
+                "company"
+            ),
+            "server": account.get(
+                "server"
+            ),
+            "account": safe_account_response(
+                account
+            ),
+            "terminal": safe_terminal_response(
+                terminal
+            ),
+            "live_trading_enabled": (
+                live_trading_enabled()
+            ),
         }
 
     except MT5ServiceError as exc:
-        logger.error("MT5 connection failed: %s", exc)
+        logger.error(
+            "MT5 connection failed: %s",
+            exc,
+        )
         raise mt5_error_response(exc) from exc
 
 
 @app.post("/api/mt5/disconnect")
 async def disconnect_mt5():
-    """
-    Disconnect from the current MT5 terminal.
-
-    This does not close positions or execute trades.
-    """
-
     try:
         await mt5_service.shutdown()
 
@@ -317,18 +329,15 @@ async def disconnect_mt5():
         }
 
     except Exception as exc:
-        logger.error("MT5 disconnect failed: %s", exc)
+        logger.error(
+            "MT5 disconnect failed: %s",
+            exc,
+        )
         raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/mt5/status")
 async def get_mt5_status():
-    """
-    Return current MT5 connection heartbeat.
-
-    This endpoint does not execute trades.
-    """
-
     try:
         status = await mt5_service.heartbeat()
 
@@ -342,15 +351,28 @@ async def get_mt5_status():
                 "timestamp",
                 utc_timestamp(),
             ),
-            "connected": status.get("connected", False),
-            "account_login": status.get("account_login"),
-            "server": status.get("server"),
-            "trade_allowed": status.get("trade_allowed"),
+            "connected": status.get(
+                "connected",
+                False,
+            ),
+            "account_login": status.get(
+                "account_login"
+            ),
+            "server": status.get(
+                "server"
+            ),
+            "trade_allowed": status.get(
+                "trade_allowed"
+            ),
             "tradeapi_disabled": status.get(
                 "tradeapi_disabled"
             ),
-            "last_error": status.get("last_error"),
-            "live_trading_enabled": live_trading_enabled(),
+            "last_error": status.get(
+                "last_error"
+            ),
+            "live_trading_enabled": (
+                live_trading_enabled()
+            ),
         }
 
     except MT5ServiceError as exc:
@@ -359,17 +381,17 @@ async def get_mt5_status():
 
 @app.get("/api/mt5/account")
 async def get_mt5_account():
-    """
-    Return current MT5 account information.
-    """
-
     try:
-        account = await mt5_service.get_account_info()
+        account = (
+            await mt5_service.get_account_info()
+        )
 
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "account": safe_account_response(account),
+            "account": safe_account_response(
+                account
+            ),
         }
 
     except MT5ServiceError as exc:
@@ -378,17 +400,17 @@ async def get_mt5_account():
 
 @app.get("/api/mt5/terminal")
 async def get_mt5_terminal():
-    """
-    Return current MT5 terminal information.
-    """
-
     try:
-        terminal = await mt5_service.get_terminal_info()
+        terminal = (
+            await mt5_service.get_terminal_info()
+        )
 
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "terminal": safe_terminal_response(terminal),
+            "terminal": safe_terminal_response(
+                terminal
+            ),
         }
 
     except MT5ServiceError as exc:
@@ -396,82 +418,212 @@ async def get_mt5_terminal():
 
 
 # ============================================================
-# MARKET DATA ROUTES
+# REAL MARKET DATA
 # ============================================================
 
 @app.get("/api/market/price")
-async def get_current_price(symbol: str = "XAUUSD"):
-    """Get current market price for a symbol."""
+async def get_current_price(
+    symbol: str = Query(
+        default="XAUUSD",
+        min_length=1,
+        max_length=64,
+    ),
+):
+    """
+    Return the real current MT5 tick.
 
-    return {
-        "symbol": symbol,
-        "price": 2050.45,
-        "timestamp": utc_timestamp(),
-        "bid": 2050.40,
-        "ask": 2050.50,
-        "source": "mock",
-    }
+    No trade is placed.
+    """
+
+    try:
+        tick = (
+            await mt5_service.get_symbol_tick(
+                symbol
+            )
+        )
+
+        return {
+            "status": "ok",
+            "symbol": tick["symbol"],
+            "bid": tick["bid"],
+            "ask": tick["ask"],
+            "last": tick["last"],
+            "spread": tick["spread"],
+            "volume": tick["volume"],
+            "volume_real": tick[
+                "volume_real"
+            ],
+            "time": tick["time"],
+            "time_msc": tick[
+                "time_msc"
+            ],
+            "timestamp": utc_timestamp(),
+            "source": "mt5",
+        }
+
+    except (
+        MT5ServiceError,
+        ValueError,
+    ) as exc:
+        raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/market/candlesticks")
 async def get_candlesticks(
-    symbol: str = "XAUUSD",
-    timeframe: str = "H1",
-    limit: int = 100,
+    symbol: str = Query(
+        default="XAUUSD",
+        min_length=1,
+        max_length=64,
+    ),
+    timeframe: str = Query(
+        default="H1",
+        min_length=2,
+        max_length=4,
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=5000,
+    ),
 ):
-    """Get candlestick data for technical analysis."""
+    """
+    Return real OHLC candles from MT5.
 
-    return {
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "candlesticks": [
-            {
-                "time": utc_timestamp(),
-                "open": 2048.50,
-                "high": 2051.75,
-                "low": 2048.00,
-                "close": 2050.45,
-                "volume": 1500000,
-            }
-        ],
-        "total": 1,
-        "source": "mock",
-    }
+    MT5 supplies bar data in UTC.
+    """
 
+    try:
+        candles = (
+            await mt5_service.get_candles(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=limit,
+            )
+        )
+
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "timeframe": timeframe.upper(),
+            "candlesticks": candles,
+            "total": len(candles),
+            "timestamp": utc_timestamp(),
+            "source": "mt5",
+        }
+
+    except (
+        MT5ServiceError,
+        ValueError,
+    ) as exc:
+        raise mt5_error_response(exc) from exc
+
+
+@app.get("/api/market/symbols")
+async def get_market_symbols(
+    query: Optional[str] = Query(
+        default=None,
+        max_length=32,
+    ),
+):
+    """
+    Discover instruments available from the
+    connected MT5 broker.
+    """
+
+    try:
+        symbols = (
+            await mt5_service.get_symbols(
+                query=query
+            )
+        )
+
+        return {
+            "status": "ok",
+            "query": query,
+            "symbols": symbols,
+            "total": len(symbols),
+            "timestamp": utc_timestamp(),
+            "source": "mt5",
+        }
+
+    except MT5ServiceError as exc:
+        raise mt5_error_response(exc) from exc
+
+
+@app.get("/api/market/gold-symbols")
+async def get_gold_symbols():
+    """
+    Find XAUUSD/gold symbols regardless of broker suffix.
+
+    Examples:
+    XAUUSD
+    XAUUSDm
+    XAUUSD.a
+    GOLD
+    """
+
+    try:
+        symbols = (
+            await mt5_service.find_gold_symbols()
+        )
+
+        return {
+            "status": "ok",
+            "symbols": symbols,
+            "total": len(symbols),
+            "timestamp": utc_timestamp(),
+            "source": "mt5",
+        }
+
+    except MT5ServiceError as exc:
+        raise mt5_error_response(exc) from exc
+
+
+# ============================================================
+# INDICATORS
+# ============================================================
 
 @app.get("/api/market/indicators")
-async def get_indicators(symbol: str = "XAUUSD"):
-    """Get technical indicators."""
+async def get_indicators(
+    symbol: str = "XAUUSD",
+):
+    """
+    Indicators remain a later step.
+
+    We deliberately do not calculate indicators from
+    fake data anymore.
+    """
 
     return {
+        "status": "not_implemented",
         "symbol": symbol,
+        "message": (
+            "Real indicators will be calculated "
+            "from MT5 candles in the next market-data "
+            "stage."
+        ),
         "timestamp": utc_timestamp(),
-        "indicators": {
-            "ema20": 2049.50,
-            "ema50": 2047.00,
-            "rsi": 65.5,
-            "atr": 12.35,
-        },
-        "source": "mock",
+        "source": "none",
     }
 
 
 # ============================================================
-# TRADING ROUTES
+# TRADING - PAPER ONLY
 # ============================================================
 
 @app.post("/api/trading/place-order")
-async def place_order(order_data: dict):
+async def place_order(
+    order_data: dict,
+):
     """
-    PLACE ORDER IS STILL PAPER/MOCK ONLY.
+    PAPER TRADING ONLY.
 
-    Real MT5 execution is intentionally not implemented
-    in Step 1B.
+    This endpoint cannot send a real MT5 order.
     """
 
     logger.warning(
-        "Trade execution requested but Step 1B is "
-        "still paper/mock only."
+        "Paper trade requested. "
+        "Real execution remains disabled."
     )
 
     return {
@@ -489,7 +641,7 @@ async def place_order(order_data: dict):
             "quantity",
             0.1,
         ),
-        "price": 2050.45,
+        "price": None,
         "execution_type": "paper",
         "timestamp": utc_timestamp(),
     }
@@ -497,124 +649,121 @@ async def place_order(order_data: dict):
 
 @app.get("/api/trading/positions")
 async def get_positions():
-    """Get mock/paper positions for now."""
+    """
+    Real MT5 positions are READ ONLY.
 
-    return {
-        "positions": [
-            {
-                "position_id": "POS-001",
-                "symbol": "XAUUSD",
-                "quantity": 0.5,
-                "entry_price": 2048.50,
-                "current_price": 2050.45,
-                "pnl": 97.50,
-                "pnl_percent": 0.19,
-                "opened_at": utc_timestamp(),
-            }
-        ],
-        "total_positions": 1,
-        "source": "mock",
-    }
+    This endpoint does not modify them.
+    """
+
+    try:
+        positions = (
+            await mt5_service.get_positions()
+        )
+
+        return {
+            "status": "ok",
+            "positions": positions,
+            "total_positions": len(
+                positions
+            ),
+            "source": "mt5_read_only",
+            "timestamp": utc_timestamp(),
+        }
+
+    except MT5ServiceError as exc:
+        raise mt5_error_response(exc) from exc
 
 
 @app.post("/api/trading/close-position")
-async def close_position(position_id: str):
-    """Paper/mock position close for now."""
+async def close_position(
+    position_id: str,
+):
+    """
+    Real position closing is intentionally disabled.
+    """
 
     return {
         "position_id": position_id,
-        "status": "paper_closed",
-        "closed_at": utc_timestamp(),
-        "pnl": 97.50,
+        "status": "disabled",
+        "message": (
+            "Real MT5 position closing is "
+            "not implemented yet."
+        ),
+        "timestamp": utc_timestamp(),
     }
 
 
 # ============================================================
-# STRATEGY & AI ROUTES
+# STRATEGY / AI
 # ============================================================
 
 @app.get("/api/strategy/decision")
 async def get_strategy_decision(
     symbol: str = "XAUUSD",
 ):
-    """Get mock AI trading decision."""
-
     return {
         "symbol": symbol,
         "timestamp": utc_timestamp(),
-        "decision": "buy",
-        "confidence": 0.78,
+        "decision": "hold",
+        "confidence": 0.0,
         "reason": (
-            "EMA20 crossed above EMA50 with RSI > 60"
+            "AI execution layer is waiting for "
+            "validated real market-data pipeline."
         ),
-        "recommended_entry": 2050.00,
-        "stop_loss": 2045.00,
-        "take_profit": 2060.00,
-        "source": "mock",
+        "source": "placeholder",
     }
 
 
 @app.post("/api/strategy/backtest")
-async def run_backtest(backtest_config: dict):
-    """Run mock backtest."""
-
+async def run_backtest(
+    backtest_config: dict,
+):
     return {
-        "backtest_id": "BT-20260908-001",
-        "status": "completed",
-        "total_trades": 125,
-        "winning_trades": 98,
-        "losing_trades": 27,
-        "win_rate": 0.784,
-        "total_pnl": 2150.75,
-        "max_drawdown": 0.045,
-        "sharpe_ratio": 1.85,
-        "started_at": utc_timestamp(),
+        "backtest_id": "BT-PENDING",
+        "status": "not_implemented",
+        "message": (
+            "Backtesting will use validated "
+            "historical market data."
+        ),
+        "timestamp": utc_timestamp(),
     }
 
 
 # ============================================================
-# JOURNAL & HISTORY
+# JOURNAL
 # ============================================================
 
 @app.get("/api/journal/trades")
 async def get_trade_journal(
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(
+        default=50,
+        ge=1,
+        le=500,
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+    ),
 ):
-    """Get mock trade journal."""
-
     return {
-        "trades": [
-            {
-                "trade_id": "TRD-001",
-                "symbol": "XAUUSD",
-                "entry_price": 2048.50,
-                "exit_price": 2050.45,
-                "quantity": 0.5,
-                "pnl": 97.50,
-                "duration_minutes": 45,
-                "opened_at": utc_timestamp(),
-                "closed_at": utc_timestamp(),
-                "status": "closed",
-            }
-        ],
-        "total": 1,
+        "trades": [],
+        "total": 0,
         "limit": limit,
         "offset": offset,
+        "timestamp": utc_timestamp(),
     }
 
 
 # ============================================================
-# ADMIN ROUTES
+# ADMIN
 # ============================================================
 
 @app.post("/api/admin/emergency-stop")
 async def emergency_stop():
     """
-    Emergency stop placeholder.
+    Placeholder only.
 
-    Full execution lockout is implemented later in the
-    risk/execution gateway.
+    Full execution lockout comes before live trading.
     """
 
     logger.critical(
@@ -635,25 +784,34 @@ async def emergency_stop():
 
 @app.get("/api/admin/status")
 async def admin_status():
-    """Get system status."""
-
     try:
-        mt5_status = await mt5_service.heartbeat()
+        mt5_status = (
+            await mt5_service.heartbeat()
+        )
     except Exception:
         mt5_status = {
             "connected": False,
-            "last_error": "MT5 unavailable",
+            "last_error": (
+                "MT5 unavailable"
+            ),
         }
 
     return {
         "status": "operational",
-        "live_trading_enabled": live_trading_enabled(),
+        "live_trading_enabled": (
+            live_trading_enabled()
+        ),
         "environment": os.getenv(
             "RAYMOND_ENV",
             "development",
         ),
         "db_connected": True,
-        "market_feed_healthy": True,
+        "market_feed_healthy": (
+            mt5_status.get(
+                "connected",
+                False,
+            )
+        ),
         "mt5_connected": mt5_status.get(
             "connected",
             False,
