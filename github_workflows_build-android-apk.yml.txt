@@ -1,0 +1,47 @@
+name: Build Android APK on release
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-apk:
+    name: Build APK and upload to Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java (required for Android toolchain)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 'stable'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Accept Android SDK licenses
+        # Accept any android licenses so flutter can build
+        run: |
+          yes | flutter doctor --android-licenses || true
+
+      - name: Build debug APK
+        # Produces build/app/outputs/flutter-apk/app-debug.apk
+        run: flutter build apk --debug
+
+      - name: Upload APK to GitHub Release
+        # This action finds the release for the tag and uploads the file(s)
+        uses: ncipollo/release-action@v1
+        with:
+          files: build/app/outputs/flutter-apk/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
