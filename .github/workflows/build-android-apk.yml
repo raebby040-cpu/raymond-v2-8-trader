@@ -1,4 +1,4 @@
-name: Build Android APK on release
+name: Build Android APK on release or manual run
 
 on:
   release:
@@ -6,6 +6,7 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch: {}
 
 jobs:
   build-apk:
@@ -30,6 +31,15 @@ jobs:
         with:
           flutter-version: 'stable'
 
+      - name: Ensure Flutter project scaffold (create android/ if missing)
+        run: |
+          if [ ! -d "flutter_app/android" ]; then
+            echo "android/ missing — creating Flutter scaffold"
+            (cd flutter_app && flutter create .)
+          else
+            echo "android/ exists — skipping flutter create"
+          fi
+
       - name: Cache pub & Gradle
         uses: actions/cache@v4
         with:
@@ -50,13 +60,13 @@ jobs:
         working-directory: flutter_app
 
       - name: Restore Android keystore (optional)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           mkdir -p flutter_app/android/app
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > flutter_app/android/app/keystore.jks
 
       - name: Write Android key.properties for signing (optional)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           cat > flutter_app/android/key.properties <<'EOF'
           storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
