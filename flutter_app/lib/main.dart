@@ -23,7 +23,7 @@ class DashboardScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context).copyWith(
       colorScheme: ColorScheme.dark(
-        primary: Colors.tealAccent.shade200,
+        primary: Colors.tealAccent,
         secondary: Colors.blueAccent,
         surface: const Color(0xFF0F1720),
         background: const Color(0xFF071018),
@@ -110,7 +110,11 @@ class _StatusDot extends StatelessWidget {
     return Container(
       width: 12,
       height: 12,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle, boxShadow: const [BoxShadow(blurRadius: 4, color: Colors.black54)]),
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        boxShadow: const [BoxShadow(blurRadius: 4, color: Colors.black54)],
+      ),
     );
   }
 }
@@ -135,31 +139,67 @@ class _DashboardBody extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
       final isWide = constraints.maxWidth > 600;
-      return Padding(
+      // Make whole screen scrollable on narrow devices
+      return SingleChildScrollView(
         padding: const EdgeInsets.all(12.0),
-        child: Column(
-          children: [
-            // Market overview & Account summary
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight - 24),
+          child: IntrinsicHeight(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(child: _MarketOverviewCard()),
-                const SizedBox(width: 12),
-                SizedBox(width: isWide ? 300 : 0, child: isWide ? const _AccountSummaryCard() : const SizedBox.shrink()),
+                // Market overview & Account summary (responsive)
+                if (isWide)
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: _MarketOverviewCard()),
+                      const SizedBox(width: 12),
+                      SizedBox(width: 300, child: const _AccountSummaryCard()),
+                    ],
+                  )
+                else ...[
+                  _MarketOverviewCard(),
+                  const SizedBox(height: 12),
+                  const _AccountSummaryCard(),
+                ],
+
+                const SizedBox(height: 12),
+
+                // Chart and controls + side panel
+                if (isWide)
+                  SizedBox(
+                    height: 520,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: Column(children: const [Expanded(child: _PriceChartCard()), SizedBox(height: 12), _TradingControlsCard()]),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          flex: 1,
+                          child: Column(children: const [Expanded(child: _StrategyPanelCard()), SizedBox(height: 12), _OpenPositionsCard()]),
+                        ),
+                      ],
+                    ),
+                  )
+                else ...[
+                  const _PriceChartCard(),
+                  const SizedBox(height: 12),
+                  const _TradingControlsCard(),
+                  const SizedBox(height: 12),
+                  const _StrategyPanelCard(),
+                  const SizedBox(height: 12),
+                  const _OpenPositionsCard(),
+                ],
+
+                // Fill remaining space on tall displays
+                const SizedBox(height: 12),
               ],
             ),
-            const SizedBox(height: 12),
-            // Chart and controls
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(flex: 3, child: Column(children: const [_PriceChartCard(), SizedBox(height: 12), _TradingControlsCard()])),
-                  const SizedBox(width: 12),
-                  Expanded(flex: 1, child: Column(children: const [_StrategyPanelCard(), SizedBox(height: 12), _OpenPositionsCard()])),
-                ],
-              ),
-            ),
-          ],
+          ),
         ),
       );
     });
@@ -178,21 +218,29 @@ class _MarketOverviewCard extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(12.0),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [Text('Market', style: TextStyle(color: Colors.white70)), Text('DEMO / OFFLINE', style: TextStyle(color: Colors.amber))]),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
+            Text('Market', style: TextStyle(color: Colors.white70)),
+            Text('DEMO / OFFLINE', style: TextStyle(color: Colors.amber)),
+          ]),
           const SizedBox(height: 8),
           const Text('XAUUSD', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: Colors.white)),
           const SizedBox(height: 8),
-          Row(children: const [
-            _PriceBox(label: 'Price', value: '1,910.45', valueColor: Colors.teal),
-            SizedBox(width: 8),
-            _PriceBox(label: 'Bid', value: '1,910.40', valueColor: Colors.green),
-            SizedBox(width: 8),
-            _PriceBox(label: 'Ask', value: '1,910.50', valueColor: Colors.red),
-            SizedBox(width: 8),
-            _PriceBox(label: 'Spread', value: '0.10', valueColor: Colors.white70),
-          ]),
+          // Make price boxes wrap on narrow screens
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: const [
+              _PriceBox(label: 'Price', value: '1,910.45', valueColor: Colors.teal),
+              _PriceBox(label: 'Bid', value: '1,910.40', valueColor: Colors.green),
+              _PriceBox(label: 'Ask', value: '1,910.50', valueColor: Colors.red),
+              _PriceBox(label: 'Spread', value: '0.10', valueColor: Colors.white70),
+            ],
+          ),
           const SizedBox(height: 12),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [Text('Market status', style: TextStyle(color: Colors.white70)), Text('CLOSED (demo)', style: TextStyle(color: Colors.amber))]),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
+            Text('Market status', style: TextStyle(color: Colors.white70)),
+            Text('CLOSED (demo)', style: TextStyle(color: Colors.amber)),
+          ]),
         ]),
       ),
     );
@@ -207,14 +255,17 @@ class _PriceBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(color: const Color(0xFF071018), borderRadius: BorderRadius.circular(8)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label, style: const TextStyle(fontSize: 11, color: Colors.white70)),
-        const SizedBox(height: 4),
-        Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: valueColor)),
-      ]),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 90, maxWidth: 200),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(color: const Color(0xFF071018), borderRadius: BorderRadius.circular(8)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(label, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+          const SizedBox(height: 4),
+          Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: valueColor)),
+        ]),
+      ),
     );
   }
 }
@@ -254,7 +305,11 @@ class _SummaryRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6.0),
-      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(label, style: const TextStyle(color: Colors.white70)), Text(value, style: TextStyle(color: valueColor, fontWeight: FontWeight.w600))]),
+      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Flexible(child: Text(label, style: const TextStyle(color: Colors.white70))),
+        const SizedBox(width: 8),
+        Flexible(child: Text(value, textAlign: TextAlign.right, style: TextStyle(color: valueColor, fontWeight: FontWeight.w600))),
+      ]),
     );
   }
 }
@@ -270,13 +325,25 @@ class _PriceChartCard extends StatelessWidget {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
         padding: const EdgeInsets.all(12.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [Text('XAUUSD Chart', style: TextStyle(color: Colors.white70)), _ChartTimeframeButtons()]),
-          const SizedBox(height: 8),
-          const SizedBox(height: 220, child: _DemoPriceChart()),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
+          _ChartHeader(),
+          SizedBox(height: 8),
+          SizedBox(height: 220, child: _DemoPriceChart()),
         ]),
       ),
     );
+  }
+}
+
+class _ChartHeader extends StatelessWidget {
+  const _ChartHeader({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
+      Text('XAUUSD Chart', style: TextStyle(color: Colors.white70)),
+      _ChartTimeframeButtons(),
+    ]);
   }
 }
 
@@ -449,7 +516,7 @@ class _RiskStatus extends StatelessWidget {
     return Row(children: [
       Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6), decoration: BoxDecoration(color: Colors.teal.shade900, borderRadius: BorderRadius.circular(8)), child: const Text('RISK: LOW', style: TextStyle(color: Colors.white70))),
       const SizedBox(width: 8),
-      const Text('Mode: DEMO', style: TextStyle(color: Colors.amber)),
+      const Flexible(child: Text('Mode: DEMO', style: TextStyle(color: Colors.amber))),
     ]);
   }
 }
@@ -493,15 +560,15 @@ class _StrategyPanelCard extends StatelessWidget {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
         padding: const EdgeInsets.all(12.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Raymond Strategy', style: TextStyle(color: Colors.white70)),
-          const SizedBox(height: 8),
-          const _StrategyRow(label: 'Signal', value: 'WAITING', color: Colors.amber),
-          const _StrategyRow(label: 'Confidence', value: '—', color: Colors.white70),
-          const _StrategyRow(label: 'Trend', value: '—', color: Colors.white70),
-          const _StrategyRow(label: 'RSI', value: '—', color: Colors.white70),
-          const _StrategyRow(label: 'MACD', value: '—', color: Colors.white70),
-          const _StrategyRow(label: 'Risk Mode', value: 'DEMO', color: Colors.amber),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
+          Text('Raymond Strategy', style: TextStyle(color: Colors.white70)),
+          SizedBox(height: 8),
+          _StrategyRow(label: 'Signal', value: 'WAITING', color: Colors.amber),
+          _StrategyRow(label: 'Confidence', value: '—', color: Colors.white70),
+          _StrategyRow(label: 'Trend', value: '—', color: Colors.white70),
+          _StrategyRow(label: 'RSI', value: '—', color: Colors.white70),
+          _StrategyRow(label: 'MACD', value: '—', color: Colors.white70),
+          _StrategyRow(label: 'Risk Mode', value: 'DEMO', color: Colors.amber),
         ]),
       ),
     );
@@ -518,7 +585,11 @@ class _StrategyRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6.0),
-      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(label, style: const TextStyle(color: Colors.white70)), Text(value, style: TextStyle(color: color, fontWeight: FontWeight.w600))]),
+      child: Row(children: [
+        Expanded(child: Text(label, style: const TextStyle(color: Colors.white70))),
+        const SizedBox(width: 8),
+        Flexible(child: Text(value, textAlign: TextAlign.right, style: TextStyle(color: color, fontWeight: FontWeight.w600))),
+      ]),
     );
   }
 }
