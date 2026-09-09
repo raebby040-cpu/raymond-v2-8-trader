@@ -1,12 +1,13 @@
 """
 RAYMOND v2.8 Backend - FastAPI Application
 
-Step 2:
+Step 3:
 - Broker-neutral MT5 connection
 - Real MT5 market tick data
 - Broker-specific symbol discovery
 - Real MT5 OHLC candles
-- MT5 account/terminal status
+- MT5 account information
+- MT5 read-only position synchronization
 - Paper trading only
 
 IMPORTANT:
@@ -153,6 +154,69 @@ def safe_terminal_response(
     }
 
 
+def safe_position_response(
+    position: dict,
+) -> dict:
+    """
+    Convert a raw MT5 position into the stable
+    RAYMOND position format.
+
+    This endpoint is READ ONLY.
+    """
+
+    position_type = position.get("type")
+
+    if position_type == 0:
+        type_name = "BUY"
+    elif position_type == 1:
+        type_name = "SELL"
+    else:
+        type_name = str(position_type)
+
+    return {
+        "ticket": position.get("ticket"),
+        "time": position.get("time"),
+        "time_update": position.get(
+            "time_update"
+        ),
+        "symbol": position.get(
+            "symbol"
+        ),
+        "type": position_type,
+        "type_name": type_name,
+        "volume": position.get(
+            "volume"
+        ),
+        "price_open": position.get(
+            "price_open"
+        ),
+        "price_current": position.get(
+            "price_current"
+        ),
+        "price_stop_loss": position.get(
+            "sl"
+        ),
+        "price_take_profit": position.get(
+            "tp"
+        ),
+        "profit": position.get(
+            "profit"
+        ),
+        "swap": position.get(
+            "swap"
+        ),
+        "commission": position.get(
+            "commission"
+        ),
+        "magic": position.get(
+            "magic"
+        ),
+        "comment": position.get(
+            "comment"
+        ),
+    }
+
+
 def mt5_error_response(
     exc: Exception,
 ) -> HTTPException:
@@ -173,9 +237,20 @@ def mt5_error_response(
 # ============================================================
 
 class MT5ConnectRequest(BaseModel):
-    login: int = Field(..., gt=0)
-    password: str = Field(..., min_length=1)
-    server: str = Field(..., min_length=1)
+    login: int = Field(
+        ...,
+        gt=0,
+    )
+
+    password: str = Field(
+        ...,
+        min_length=1,
+    )
+
+    server: str = Field(
+        ...,
+        min_length=1,
+    )
 
     terminal_path: Optional[str] = None
 
@@ -553,7 +628,8 @@ async def get_market_symbols(
 @app.get("/api/market/gold-symbols")
 async def get_gold_symbols():
     """
-    Find XAUUSD/gold symbols regardless of broker suffix.
+    Find XAUUSD/gold symbols regardless of
+    broker suffix.
 
     Examples:
     XAUUSD
@@ -590,8 +666,8 @@ async def get_indicators(
     """
     Indicators remain a later step.
 
-    We deliberately do not calculate indicators from
-    fake data anymore.
+    We deliberately do not calculate indicators
+    from fake data anymore.
     """
 
     return {
@@ -647,27 +723,50 @@ async def place_order(
     }
 
 
-@app.get("/api/trading/positions")
-async def get_positions():
-    """
-    Real MT5 positions are READ ONLY.
+# ============================================================
+# STEP 3 - READ-ONLY MT5 POSITIONS
+# ============================================================
 
-    This endpoint does not modify them.
+@app.get("/api/trading/positions")
+async def get_positions(
+    symbol: Optional[str] = Query(
+        default=None,
+        min_length=1,
+        max_length=64,
+    ),
+):
+    """
+    Read real open MT5 positions.
+
+    STEP 3:
+    - Read-only
+    - No position modification
+    - No position closing
+    - No trade execution
     """
 
     try:
-        positions = (
-            await mt5_service.get_positions()
+        positions = await mt5_service.get_positions(
+            symbol=symbol
         )
+
+        normalized_positions = [
+            safe_position_response(position)
+            for position in positions
+        ]
 
         return {
             "status": "ok",
-            "positions": positions,
+            "symbol": symbol,
+            "positions": normalized_positions,
             "total_positions": len(
-                positions
+                normalized_positions
             ),
             "source": "mt5_read_only",
             "timestamp": utc_timestamp(),
+            "live_trading_enabled": (
+                live_trading_enabled()
+            ),
         }
 
     except MT5ServiceError as exc:
