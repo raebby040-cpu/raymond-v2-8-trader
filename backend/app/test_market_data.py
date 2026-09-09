@@ -28,6 +28,7 @@ class FakeMarketDataService:
             "last": 3350.25,
             "volume": 123.0,
             "volume_real": 100.0,
+            "spread": 0.30,
         }
 
     async def get_candles(self, symbol, timeframe, limit):
@@ -88,6 +89,7 @@ def test_market_price():
         assert data["ask"] == 3350.40
         assert data["last"] == 3350.25
         assert data["volume_real"] == 100.0
+        assert data["spread"] == 0.30
 
     finally:
         main.mt5_service = original_service
@@ -115,8 +117,6 @@ def test_market_candles():
 
         assert data["symbol"] == "XAUUSD"
         assert data["timeframe"] == "M5"
-
-        # main.py returns the list as "candlesticks"
         assert len(data["candlesticks"]) == 1
 
         candle = data["candlesticks"][0]
