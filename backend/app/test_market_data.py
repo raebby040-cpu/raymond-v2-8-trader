@@ -115,9 +115,11 @@ def test_market_candles():
 
         assert data["symbol"] == "XAUUSD"
         assert data["timeframe"] == "M5"
-        assert len(data["candles"]) == 1
 
-        candle = data["candles"][0]
+        # main.py returns the list as "candlesticks"
+        assert len(data["candlesticks"]) == 1
+
+        candle = data["candlesticks"][0]
 
         assert candle["time"] == 1720000000
         assert candle["open"] == 3340.0
