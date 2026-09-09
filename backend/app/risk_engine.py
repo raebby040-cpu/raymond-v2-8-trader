@@ -1,10 +1,11 @@
 """
 RAYMOND v2.8 Risk Engine
 
-Step 4A:
+Step 4B:
 - Broker-neutral risk configuration
-- Position-size calculation
-- Basic risk validation
+- Broker/instrument-aware position sizing
+- MT5 symbol specification support
+- Risk/reward validation
 - No trade execution
 """
 
@@ -59,11 +60,100 @@ class RiskConfig:
             )
 
 
+@dataclass
+class SymbolSpecification:
+    """
+    Broker-provided trading specification.
+
+    Values originate from MT5 symbol_info().
+    """
+
+    symbol: str
+    digits: int
+    point: float
+
+    tick_size: float
+    tick_value: float
+    tick_value_profit: float
+    tick_value_loss: float
+
+    contract_size: float
+
+    volume_min: float
+    volume_max: float
+    volume_step: float
+    volume_limit: float
+
+    trade_mode: int
+    trade_execution_mode: int
+    trade_stops_level: int
+    trade_freeze_level: int
+
+    currency_base: str
+    currency_profit: str
+    currency_margin: str
+
+    spread: int
+    spread_float: bool
+
+    def validate(self) -> None:
+        if not self.symbol:
+            raise RiskEngineError(
+                "symbol is required"
+            )
+
+        if self.digits < 0:
+            raise RiskEngineError(
+                "digits cannot be negative"
+            )
+
+        if self.point <= 0:
+            raise RiskEngineError(
+                "point must be greater than zero"
+            )
+
+        if self.tick_size <= 0:
+            raise RiskEngineError(
+                "tick_size must be greater than zero"
+            )
+
+        if self.tick_value <= 0:
+            raise RiskEngineError(
+                "tick_value must be greater than zero"
+            )
+
+        if self.tick_value_profit <= 0:
+            raise RiskEngineError(
+                "tick_value_profit must be greater than zero"
+            )
+
+        if self.tick_value_loss <= 0:
+            raise RiskEngineError(
+                "tick_value_loss must be greater than zero"
+            )
+
+        if self.volume_min <= 0:
+            raise RiskEngineError(
+                "volume_min must be greater than zero"
+            )
+
+        if self.volume_max < self.volume_min:
+            raise RiskEngineError(
+                "volume_max cannot be less than volume_min"
+            )
+
+        if self.volume_step <= 0:
+            raise RiskEngineError(
+                "volume_step must be greater than zero"
+            )
+
+
 class RiskEngine:
     """
     Broker-neutral risk calculator.
 
-    This class does not communicate with MT5 or place orders.
+    This class does not communicate with MT5 and does not
+    place, modify, or close trades.
     """
 
     def __init__(
@@ -116,12 +206,8 @@ class RiskEngine:
         """
         Calculate position size from monetary risk.
 
-        risk_per_unit is the broker/instrument-specific money
-        lost for one volume unit when price moves from entry
-        to stop loss.
-
-        The risk engine intentionally does not assume that every
-        broker's XAUUSD contract has the same contract size.
+        risk_per_unit is the money lost for one volume unit
+        when price moves from entry to the stop-loss.
         """
 
         if equity <= 0:
@@ -167,7 +253,6 @@ class RiskEngine:
 
         raw_volume = risk_budget / risk_per_unit
 
-        # Round DOWN so we never exceed the risk budget.
         volume_steps = int(
             raw_volume / volume_step
         )
@@ -186,6 +271,47 @@ class RiskEngine:
             volume = min(volume, max_volume)
 
         return round(volume, 8)
+
+    def calculate_position_size_from_symbol(
+        self,
+        equity: float,
+        entry_price: float,
+        stop_loss_price: float,
+        specification: SymbolSpecification,
+    ) -> float:
+        """
+        Calculate position size using actual broker symbol data.
+
+        The broker's tick size and tick value determine how much
+        one volume unit loses for a given price movement.
+        """
+
+        specification.validate()
+
+        stop_distance = abs(
+            entry_price - stop_loss_price
+        )
+
+        if stop_distance == 0:
+            raise RiskEngineError(
+                "stop_loss_price must differ from entry_price"
+            )
+
+        # Use the losing-side tick value for conservative sizing.
+        loss_per_volume = (
+            stop_distance
+            / specification.tick_size
+        ) * specification.tick_value_loss
+
+        return self.calculate_position_size(
+            equity=equity,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            risk_per_unit=loss_per_volume,
+            volume_step=specification.volume_step,
+            min_volume=specification.volume_min,
+            max_volume=specification.volume_max,
+        )
 
     def validate_stop_loss(
         self,
@@ -223,10 +349,7 @@ class RiskEngine:
         stop_loss_price: float,
         take_profit_price: float,
     ) -> float:
-        """
-        Return the risk/reward ratio and reject ratios below
-        the configured minimum.
-        """
+        """Return risk/reward ratio and enforce minimum."""
 
         risk = abs(
             entry_price - stop_loss_price
