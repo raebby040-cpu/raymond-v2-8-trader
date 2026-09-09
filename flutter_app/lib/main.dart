@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 void main() => runApp(const RaymondApp());
@@ -160,11 +161,11 @@ class _DashboardBody extends StatelessWidget {
                   )
                 else ...[
                   _MarketOverviewCard(),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 10),
                   const _AccountSummaryCard(),
                 ],
 
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
 
                 // Chart and controls + side panel
                 if (isWide)
@@ -175,28 +176,28 @@ class _DashboardBody extends StatelessWidget {
                       children: [
                         Expanded(
                           flex: 3,
-                          child: Column(children: const [Expanded(child: _PriceChartCard()), SizedBox(height: 12), _TradingControlsCard()]),
+                          child: Column(children: const [Expanded(child: _PriceChartCard()), SizedBox(height: 10), _TradingControlsCard()]),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
                           flex: 1,
-                          child: Column(children: const [Expanded(child: _StrategyPanelCard()), SizedBox(height: 12), _OpenPositionsCard()]),
+                          child: Column(children: const [Expanded(child: _StrategyPanelCard()), SizedBox(height: 10), _OpenPositionsCard()]),
                         ),
                       ],
                     ),
                   )
                 else ...[
                   const _PriceChartCard(),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 10),
                   const _TradingControlsCard(),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 10),
                   const _StrategyPanelCard(),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 10),
                   const _OpenPositionsCard(),
                 ],
 
                 // Fill remaining space on tall displays
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
               ],
             ),
           ),
@@ -216,15 +217,15 @@ class _MarketOverviewCard extends StatelessWidget {
       color: const Color(0xFF0B1220),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(12.0),
+        padding: const EdgeInsets.all(10.0),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
             Text('Market', style: TextStyle(color: Colors.white70)),
             Text('DEMO / OFFLINE', style: TextStyle(color: Colors.amber)),
           ]),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           const Text('XAUUSD', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: Colors.white)),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           // Make price boxes wrap on narrow screens
           Wrap(
             spacing: 8,
@@ -236,7 +237,7 @@ class _MarketOverviewCard extends StatelessWidget {
               _PriceBox(label: 'Spread', value: '0.10', valueColor: Colors.white70),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
             Text('Market status', style: TextStyle(color: Colors.white70)),
             Text('CLOSED (demo)', style: TextStyle(color: Colors.amber)),
@@ -256,14 +257,14 @@ class _PriceBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: 90, maxWidth: 200),
+      constraints: const BoxConstraints(minWidth: 80, maxWidth: 200),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(color: const Color(0xFF071018), borderRadius: BorderRadius.circular(8)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(label, style: const TextStyle(fontSize: 11, color: Colors.white70)),
           const SizedBox(height: 4),
-          Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: valueColor)),
+          Text(value, style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: valueColor)),
         ]),
       ),
     );
@@ -280,10 +281,10 @@ class _AccountSummaryCard extends StatelessWidget {
       color: const Color(0xFF0B1220),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(12.0),
+        padding: const EdgeInsets.all(10.0),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Text('Account Summary', style: TextStyle(color: Colors.white70)),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           _SummaryRow(label: 'Balance', value: r'10,000.00', valueColor: Colors.tealAccent),
           _SummaryRow(label: 'Equity', value: r'10,150.00', valueColor: Colors.tealAccent),
           _SummaryRow(label: "Today's P&L", value: r'+150.00', valueColor: Colors.green),
@@ -304,7 +305,7 @@ class _SummaryRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6.0),
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
       child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
         Flexible(child: Text(label, style: const TextStyle(color: Colors.white70))),
         const SizedBox(width: 8),
@@ -324,12 +325,22 @@ class _PriceChartCard extends StatelessWidget {
       color: const Color(0xFF071018),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
-          _ChartHeader(),
-          SizedBox(height: 8),
-          SizedBox(height: 220, child: _DemoPriceChart()),
-        ]),
+        padding: const EdgeInsets.all(10.0),
+        child: LayoutBuilder(builder: (context, constraints) {
+          // compute available height and allow the chart to shrink when space is tight
+          final available = constraints.maxHeight.isFinite ? constraints.maxHeight : double.infinity;
+          const headerHeight = 24.0; // approximate
+          const maxChart = 220.0;
+          final chartHeight = available.isFinite ? math.max(80.0, math.min(maxChart, available - headerHeight - 16.0)) : maxChart;
+          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const _ChartHeader(),
+            const SizedBox(height: 6),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: chartHeight, minHeight: 60),
+              child: SizedBox(height: chartHeight, child: const _DemoPriceChart()),
+            ),
+          ]);
+        }),
       ),
     );
   }
@@ -451,33 +462,33 @@ class _TradingControlsCard extends StatelessWidget {
       color: const Color(0xFF0B1220),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(12.0),
+        padding: const EdgeInsets.all(10.0),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Text('Trading Controls', style: TextStyle(color: Colors.white70)),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Row(children: [
             Expanded(
               child: FilledButton(
                 onPressed: () => _showDemoSnack(context, 'BUY'),
                 style: FilledButton.styleFrom(backgroundColor: Colors.teal.shade700, textStyle: const TextStyle(fontWeight: FontWeight.bold)),
-                child: const Padding(padding: EdgeInsets.symmetric(vertical: 14.0), child: Text('BUY')),
+                child: const Padding(padding: EdgeInsets.symmetric(vertical: 12.0), child: Text('BUY')),
               ),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
             Expanded(
               child: FilledButton(
                 onPressed: () => _showDemoSnack(context, 'SELL'),
                 style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700, textStyle: const TextStyle(fontWeight: FontWeight.bold)),
-                child: const Padding(padding: EdgeInsets.symmetric(vertical: 14.0), child: Text('SELL')),
+                child: const Padding(padding: EdgeInsets.symmetric(vertical: 12.0), child: Text('SELL')),
               ),
             ),
           ]),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: const [
             Text('Auto Trading', style: TextStyle(color: Colors.white70)),
             _AutoTradingSwitch(),
           ]),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           const _RiskStatus(),
         ]),
       ),
@@ -514,7 +525,7 @@ class _RiskStatus extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(children: [
-      Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6), decoration: BoxDecoration(color: Colors.teal.shade900, borderRadius: BorderRadius.circular(8)), child: const Text('RISK: LOW', style: TextStyle(color: Colors.white70))),
+      Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4), decoration: BoxDecoration(color: Colors.teal.shade900, borderRadius: BorderRadius.circular(8)), child: const Text('RISK: LOW', style: TextStyle(color: Colors.white70))),
       const SizedBox(width: 8),
       const Flexible(child: Text('Mode: DEMO', style: TextStyle(color: Colors.amber))),
     ]);
@@ -533,12 +544,12 @@ class _OpenPositionsCard extends StatelessWidget {
       color: const Color(0xFF0B1220),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(12.0),
+        padding: const EdgeInsets.all(10.0),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Text('Open Positions', style: TextStyle(color: Colors.white70)),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           if (!hasPositions) ...[
-            const SizedBox(height: 20),
+            const SizedBox(height: 12),
             Center(child: Column(children: const [Icon(Icons.folder_open, size: 48, color: Colors.white24), SizedBox(height: 8), Text('No open positions', style: TextStyle(color: Colors.white70))])),
           ] else ...[
             // list of positions
@@ -559,17 +570,25 @@ class _StrategyPanelCard extends StatelessWidget {
       color: const Color(0xFF0B1220),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
-          Text('Raymond Strategy', style: TextStyle(color: Colors.white70)),
-          SizedBox(height: 8),
-          _StrategyRow(label: 'Signal', value: 'WAITING', color: Colors.amber),
-          _StrategyRow(label: 'Confidence', value: '—', color: Colors.white70),
-          _StrategyRow(label: 'Trend', value: '—', color: Colors.white70),
-          _StrategyRow(label: 'RSI', value: '—', color: Colors.white70),
-          _StrategyRow(label: 'MACD', value: '—', color: Colors.white70),
-          _StrategyRow(label: 'Risk Mode', value: 'DEMO', color: Colors.amber),
-        ]),
+        padding: const EdgeInsets.all(10.0),
+        child: LayoutBuilder(builder: (context, constraints) {
+          // allow vertical scrolling when the card is too small
+          return ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: constraints.maxHeight),
+            child: SingleChildScrollView(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
+                Text('Raymond Strategy', style: TextStyle(color: Colors.white70)),
+                SizedBox(height: 6),
+                _StrategyRow(label: 'Signal', value: 'WAITING', color: Colors.amber),
+                _StrategyRow(label: 'Confidence', value: '—', color: Colors.white70),
+                _StrategyRow(label: 'Trend', value: '—', color: Colors.white70),
+                _StrategyRow(label: 'RSI', value: '—', color: Colors.white70),
+                _StrategyRow(label: 'MACD', value: '—', color: Colors.white70),
+                _StrategyRow(label: 'Risk Mode', value: 'DEMO', color: Colors.amber),
+              ]),
+            ),
+          );
+        }),
       ),
     );
   }
@@ -584,7 +603,7 @@ class _StrategyRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6.0),
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
       child: Row(children: [
         Expanded(child: Text(label, style: const TextStyle(color: Colors.white70))),
         const SizedBox(width: 8),
