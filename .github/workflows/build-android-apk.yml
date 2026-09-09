@@ -1,36 +1,101 @@
-name: Build Android APK on release or manual run
+name: Build Raymond V2.8 Android APK
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+
   push:
     tags:
-      - 'v*.*.*'
-  workflow_dispatch: {}
+      - "v*.*.*"
+
+  release:
+    types:
+      - published
 
 jobs:
   build-apk:
-    name: Build APK and upload to Release
+    name: Build Raymond V2.8 APK
     runs-on: ubuntu-latest
-    env:
-      JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF8
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Setup Java (required for Android toolchain)
+    defaults:
+      run:
+        working-directory: flutter_app
+
+    steps:
+      - name: Checkout Raymond V2.8
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '11'
+          distribution: temurin
+          java-version: "17"
 
-      - name: Setup Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 'stable'
+          channel: stable
+          cache: true
 
-      - name: Ensure Flutter project scaffold (create android/ if missing)
+      - name: Show tool versions
         run: |
-          if [ ! -d "flutter_app/android" ]; then
+          echo "===== JAVA ====="
+          java -version
+          echo "===== FLUTTER ====="
+          flutter --version
+          echo "===== DART ====="
+          dart --version
+
+      - name: Check Flutter project
+        run: |
+          test -f pubspec.yaml || {
+            echo "ERROR: pubspec.yaml missing"
+            exit 1
+          }
+
+          test -f lib/main.dart || {
+            echo "ERROR: lib/main.dart missing"
+            exit 1
+          }
+
+      - name: Create Android platform if missing
+        run: |
+          if [ ! -d android ]; then
+            echo "Android directory missing. Creating it..."
+            flutter create --platforms=android .
+          else
+            echo "Android directory already exists."
+          fi
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze Flutter project
+        run: flutter analyze
+
+      - name: Run Flutter tests
+        run: flutter test
+
+      - name: Build release APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Verify APKs
+        run: |
+          echo "===== APK OUTPUT ====="
+          ls -lah build/app/outputs/flutter-apk/
+
+          APK_COUNT=$(find build/app/outputs/flutter-apk -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No APK files were generated."
+            exit 1
+          fi
+
+          echo "Successfully generated $APK_COUNT APK file(s)."
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-v2-8-apks
+          path: flutter_app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 30
