@@ -12,6 +12,12 @@ import main  # noqa: E402
 
 
 class FakeMarketDataService:
+    """
+    Fake MT5 market-data service used for automated tests.
+
+    This does not connect to a real broker or MT5 terminal.
+    """
+
     async def get_symbol_tick(self, symbol):
         return {
             "symbol": symbol,
@@ -68,7 +74,9 @@ def test_market_price():
 
         response = client.get(
             "/api/market/price",
-            params={"symbol": "XAUUSD"},
+            params={
+                "symbol": "XAUUSD",
+            },
         )
 
         assert response.status_code == 200
@@ -111,10 +119,13 @@ def test_market_candles():
 
         candle = data["candles"][0]
 
+        assert candle["time"] == 1720000000
         assert candle["open"] == 3340.0
         assert candle["high"] == 3360.0
         assert candle["low"] == 3335.0
         assert candle["close"] == 3350.0
+        assert candle["tick_volume"] == 1000
+        assert candle["spread"] == 30
         assert candle["volume_real"] == 500.0
 
     finally:
@@ -128,7 +139,9 @@ def test_market_symbols():
     try:
         client = TestClient(main.app)
 
-        response = client.get("/api/market/symbols")
+        response = client.get(
+            "/api/market/symbols",
+        )
 
         assert response.status_code == 200
 
@@ -136,6 +149,7 @@ def test_market_symbols():
 
         assert len(data["symbols"]) == 2
         assert data["symbols"][0]["name"] == "XAUUSD"
+        assert data["symbols"][1]["name"] == "EURUSD"
 
     finally:
         main.mt5_service = original_service
@@ -148,7 +162,9 @@ def test_gold_symbols():
     try:
         client = TestClient(main.app)
 
-        response = client.get("/api/market/gold-symbols")
+        response = client.get(
+            "/api/market/gold-symbols",
+        )
 
         assert response.status_code == 200
 
