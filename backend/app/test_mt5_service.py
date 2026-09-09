@@ -1,6 +1,17 @@
+import os
+import sys
+
 import pytest
 
-from backend.app.mt5_service import (
+
+# Make backend/app importable when pytest runs from the repository root.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
+
+from mt5_service import (  # noqa: E402
     MT5ConnectionConfig,
     MT5Service,
     MT5ServiceError,
@@ -8,11 +19,6 @@ from backend.app.mt5_service import (
 
 
 def test_mt5_config_defaults(monkeypatch):
-    """
-    Test that MT5 configuration uses the correct defaults
-    when no environment variables are provided.
-    """
-
     monkeypatch.delenv("MT5_LOGIN", raising=False)
     monkeypatch.delenv("MT5_ACCOUNT", raising=False)
     monkeypatch.delenv("MT5_PASSWORD", raising=False)
@@ -27,16 +33,11 @@ def test_mt5_config_defaults(monkeypatch):
     assert config.password is None
     assert config.server is None
     assert config.terminal_path is None
-
     assert config.timeout_ms == 60000
     assert config.portable is False
 
 
 def test_mt5_config_reads_environment(monkeypatch):
-    """
-    Test that MT5 configuration correctly reads environment variables.
-    """
-
     monkeypatch.setenv("MT5_LOGIN", "12345678")
     monkeypatch.setenv("MT5_PASSWORD", "test-password")
     monkeypatch.setenv("MT5_SERVER", "Test-Server")
@@ -52,20 +53,12 @@ def test_mt5_config_reads_environment(monkeypatch):
     assert config.login == 12345678
     assert config.password == "test-password"
     assert config.server == "Test-Server"
-
-    assert config.terminal_path == (
-        "C:/MT5/terminal64.exe"
-    )
-
+    assert config.terminal_path == "C:/MT5/terminal64.exe"
     assert config.timeout_ms == 30000
     assert config.portable is True
 
 
 def test_mt5_config_accepts_account_alias(monkeypatch):
-    """
-    Test that MT5_ACCOUNT can be used instead of MT5_LOGIN.
-    """
-
     monkeypatch.delenv("MT5_LOGIN", raising=False)
     monkeypatch.setenv("MT5_ACCOUNT", "87654321")
     monkeypatch.setenv("MT5_PASSWORD", "test-password")
@@ -79,10 +72,6 @@ def test_mt5_config_accepts_account_alias(monkeypatch):
 
 
 def test_invalid_mt5_login(monkeypatch):
-    """
-    Test that an invalid MT5 login is rejected.
-    """
-
     monkeypatch.setenv("MT5_LOGIN", "not-a-number")
 
     with pytest.raises(ValueError):
@@ -90,10 +79,6 @@ def test_invalid_mt5_login(monkeypatch):
 
 
 def test_invalid_mt5_timeout(monkeypatch):
-    """
-    Test that an invalid timeout is rejected.
-    """
-
     monkeypatch.setenv("MT5_TIMEOUT_MS", "not-a-number")
 
     with pytest.raises(ValueError):
@@ -102,12 +87,7 @@ def test_invalid_mt5_timeout(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_service_requires_mt5_package(monkeypatch):
-    """
-    Test that the service fails safely when the MetaTrader5
-    Python package is unavailable.
-    """
-
-    import backend.app.mt5_service as service_module
+    import mt5_service as service_module
 
     monkeypatch.setattr(
         service_module,
