@@ -16,11 +16,12 @@ class FakeMarketDataService:
         return {
             "symbol": symbol,
             "time": 1720000000,
+            "time_msc": 1720000000123,
             "bid": 3350.10,
             "ask": 3350.40,
             "last": 3350.25,
             "volume": 123.0,
-            "spread": 0.30,
+            "volume_real": 100.0,
         }
 
     async def get_candles(self, symbol, timeframe, limit):
@@ -33,14 +34,20 @@ class FakeMarketDataService:
                 "close": 3350.0,
                 "tick_volume": 1000,
                 "spread": 30,
-                "real_volume": 500,
+                "volume_real": 500.0,
             }
         ]
 
     async def get_symbols(self, query=None):
         return [
-            {"name": "XAUUSD", "description": "Gold vs US Dollar"},
-            {"name": "EURUSD", "description": "Euro vs US Dollar"},
+            {
+                "name": "XAUUSD",
+                "description": "Gold vs US Dollar",
+            },
+            {
+                "name": "EURUSD",
+                "description": "Euro vs US Dollar",
+            },
         ]
 
     async def find_gold_symbols(self):
@@ -72,7 +79,7 @@ def test_market_price():
         assert data["bid"] == 3350.10
         assert data["ask"] == 3350.40
         assert data["last"] == 3350.25
-        assert data["spread"] == 0.30
+        assert data["volume_real"] == 100.0
 
     finally:
         main.mt5_service = original_service
@@ -108,6 +115,7 @@ def test_market_candles():
         assert candle["high"] == 3360.0
         assert candle["low"] == 3335.0
         assert candle["close"] == 3350.0
+        assert candle["volume_real"] == 500.0
 
     finally:
         main.mt5_service = original_service
