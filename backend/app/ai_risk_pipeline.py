@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 try:
     from .execution_gateway import (
         ExecutionGateway,
+        ExecutionResult,
         OrderRequest,
         OrderSide,
         OrderType,
@@ -19,6 +20,7 @@ try:
 except ImportError:
     from execution_gateway import (
         ExecutionGateway,
+        ExecutionResult,
         OrderRequest,
         OrderSide,
         OrderType,
@@ -45,7 +47,8 @@ class PipelineResult:
     volume: float
     recommendation: Dict[str, Any]
     risk_decision: RiskDecision
-    execution_result: Optional[Any] = None
+    execution_result: Optional[ExecutionResult] = None
+
 
 class AIRiskPipeline:
     """
@@ -172,12 +175,12 @@ class AIRiskPipeline:
         current_exposure: float,
         specification: SymbolSpecification,
         existing_direction_volume: float = 0.0,
-    ):
+    ) -> PipelineResult:
         """
         Run AI + risk validation and, if approved, send the exact
-        risk-approved volume to the execution gateway.
+        risk-approved volume to the paper execution gateway.
 
-        The configured Step 6 gateway is expected to be paper-only.
+        This method does not place live broker orders.
         """
 
         if self.execution_gateway is None:
@@ -234,7 +237,8 @@ class AIRiskPipeline:
                 else None
             ),
         )
-               execution_result = await self.execution_gateway.execute(order)
+
+        execution_result = await self.execution_gateway.execute(order)
 
         return PipelineResult(
             allowed=result.allowed,
@@ -244,4 +248,4 @@ class AIRiskPipeline:
             recommendation=result.recommendation,
             risk_decision=result.risk_decision,
             execution_result=execution_result,
-        ) 
+        )
