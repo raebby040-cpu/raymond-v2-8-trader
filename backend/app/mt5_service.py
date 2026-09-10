@@ -9,6 +9,9 @@ Step 1A:
 - Read open positions
 - Provide connection heartbeat
 
+Step 4B:
+- Read broker-provided symbol specifications
+
 IMPORTANT:
 This module does NOT place, modify, or close trades.
 Trade execution will be added later behind the risk/execution gateway.
@@ -67,8 +70,19 @@ class MT5ConnectionConfig:
             password=os.getenv("MT5_PASSWORD"),
             server=os.getenv("MT5_SERVER"),
             terminal_path=os.getenv("MT5_TERMINAL_PATH"),
-            timeout_ms=int(os.getenv("MT5_TIMEOUT_MS", "60000")),
-            portable=os.getenv("MT5_PORTABLE", "false").lower() == "true",
+            timeout_ms=int(
+                os.getenv(
+                    "MT5_TIMEOUT_MS",
+                    "60000",
+                )
+            ),
+            portable=(
+                os.getenv(
+                    "MT5_PORTABLE",
+                    "false",
+                ).lower()
+                == "true"
+            ),
         )
 
 
@@ -76,7 +90,12 @@ class MT5Service:
     """
     Safe wrapper around the MetaTrader5 Python API.
 
-    Step 1A intentionally contains no trading execution methods.
+    This service is broker-neutral.
+
+    It can connect to any broker/account that is available
+    through the MetaTrader 5 terminal.
+
+    No order execution is implemented here.
     """
 
     def __init__(
@@ -100,7 +119,8 @@ class MT5Service:
         if mt5 is None:
             raise MT5ServiceError(
                 "MetaTrader5 package is not installed. "
-                "Install it in the environment where the MT5 terminal runs."
+                "Install it in the environment where the MT5 "
+                "terminal runs."
             )
 
     def _last_error(self) -> str:
@@ -158,7 +178,8 @@ class MT5Service:
             self._connected = False
 
             raise MT5ServiceError(
-                f"MT5 initialization failed: {self._last_error()}"
+                f"MT5 initialization failed: "
+                f"{self._last_error()}"
             )
 
         account = mt5.account_info()
@@ -168,7 +189,8 @@ class MT5Service:
             self._connected = False
 
             raise MT5ServiceError(
-                f"MT5 account verification failed: {self._last_error()}"
+                f"MT5 account verification failed: "
+                f"{self._last_error()}"
             )
 
         self._connected = True
@@ -228,7 +250,8 @@ class MT5Service:
             self._connected = False
 
             raise MT5ServiceError(
-                f"MT5 account_info failed: {self._last_error()}"
+                f"MT5 account_info failed: "
+                f"{self._last_error()}"
             )
 
         return self._to_dict(account)
@@ -253,7 +276,8 @@ class MT5Service:
 
         if terminal is None:
             raise MT5ServiceError(
-                f"MT5 terminal_info failed: {self._last_error()}"
+                f"MT5 terminal_info failed: "
+                f"{self._last_error()}"
             )
 
         return self._to_dict(terminal)
@@ -271,7 +295,10 @@ class MT5Service:
     # MARKET TICK
     # ---------------------------------------------------------
 
-    def _tick_sync(self, symbol: str) -> Dict[str, Any]:
+    def _tick_sync(
+        self,
+        symbol: str,
+    ) -> Dict[str, Any]:
         self._require_package()
 
         symbol = symbol.upper()
@@ -354,6 +381,130 @@ class MT5Service:
         )
 
     # ---------------------------------------------------------
+    # SYMBOL SPECIFICATION
+    # ---------------------------------------------------------
+
+    def _symbol_specification_sync(
+        self,
+        symbol: str,
+    ) -> Dict[str, Any]:
+        self._require_package()
+
+        symbol = symbol.upper()
+
+        if not mt5.symbol_select(
+            symbol,
+            True,
+        ):
+            raise MT5ServiceError(
+                f"Unable to select symbol {symbol}: "
+                f"{self._last_error()}"
+            )
+
+        info = mt5.symbol_info(symbol)
+
+        if info is None:
+            raise MT5ServiceError(
+                f"Unable to retrieve symbol info "
+                f"for {symbol}: "
+                f"{self._last_error()}"
+            )
+
+        return self._to_dict(info)
+
+    async def get_symbol_specification(
+        self,
+        symbol: str,
+    ) -> Dict[str, Any]:
+        """
+        Return broker-provided trading specifications
+        for a symbol.
+
+        This is READ-ONLY.
+
+        No order is placed.
+        No order is modified.
+        No position is closed.
+        """
+
+        if not symbol:
+            raise ValueError(
+                "symbol is required"
+            )
+
+        data = await asyncio.to_thread(
+            self._symbol_specification_sync,
+            symbol,
+        )
+
+        return {
+            "symbol": data.get(
+                "name",
+                symbol.upper(),
+            ),
+            "digits": data.get(
+                "digits"
+            ),
+            "point": data.get(
+                "point"
+            ),
+            "spread": data.get(
+                "spread"
+            ),
+            "spread_float": data.get(
+                "spread_float"
+            ),
+            "tick_size": data.get(
+                "trade_tick_size"
+            ),
+            "tick_value": data.get(
+                "trade_tick_value"
+            ),
+            "tick_value_profit": data.get(
+                "trade_tick_value_profit"
+            ),
+            "tick_value_loss": data.get(
+                "trade_tick_value_loss"
+            ),
+            "contract_size": data.get(
+                "trade_contract_size"
+            ),
+            "volume_min": data.get(
+                "volume_min"
+            ),
+            "volume_max": data.get(
+                "volume_max"
+            ),
+            "volume_step": data.get(
+                "volume_step"
+            ),
+            "volume_limit": data.get(
+                "volume_limit"
+            ),
+            "trade_mode": data.get(
+                "trade_mode"
+            ),
+            "trade_execution_mode": data.get(
+                "trade_exemode"
+            ),
+            "trade_stops_level": data.get(
+                "trade_stops_level"
+            ),
+            "trade_freeze_level": data.get(
+                "trade_freeze_level"
+            ),
+            "currency_base": data.get(
+                "currency_base"
+            ),
+            "currency_profit": data.get(
+                "currency_profit"
+            ),
+            "currency_margin": data.get(
+                "currency_margin"
+            ),
+        }
+
+    # ---------------------------------------------------------
     # HEARTBEAT
     # ---------------------------------------------------------
 
@@ -379,10 +530,18 @@ class MT5Service:
                 else self._last_error()
             ),
             "account_login": (
-                getattr(account, "login", None)
+                getattr(
+                    account,
+                    "login",
+                    None,
+                )
             ),
             "server": (
-                getattr(account, "server", None)
+                getattr(
+                    account,
+                    "server",
+                    None,
+                )
             ),
             "trade_allowed": (
                 getattr(
