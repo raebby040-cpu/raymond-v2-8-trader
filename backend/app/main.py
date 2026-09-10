@@ -41,7 +41,22 @@ except ImportError:
         MT5ServiceError,
         mt5_service,
     )
-
+try:
+    from .execution_gateway import (
+        ExecutionGatewayError,
+        OrderRequest,
+        OrderSide,
+        OrderType,
+        create_execution_gateway,
+    )
+except ImportError:
+    from execution_gateway import (
+        ExecutionGatewayError,
+        OrderRequest,
+        OrderSide,
+        OrderType,
+        create_execution_gateway,
+    )
 
 # ============================================================
 # LOGGING
