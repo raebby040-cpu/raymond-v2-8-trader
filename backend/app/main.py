@@ -855,11 +855,13 @@ async def place_order(
             ),
             client_order_id=client_order_id,
         )
-        safety_manager.require_trade_permission
-        ()
-        
-                result = await 
-        execution_gateway.execute(order)
+
+        # SAFETY GATE:
+        # Emergency stop, connection loss, stale heartbeat,
+        # or any other unsafe state blocks execution.
+        safety_manager.require_trade_permission()
+
+        result = await execution_gateway.execute(order)
 
         return {
             "order_id": result.order_id,
