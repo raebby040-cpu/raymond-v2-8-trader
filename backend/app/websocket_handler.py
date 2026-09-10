@@ -7,21 +7,39 @@ from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+try:
+    from .dashboard_schema import (
+        DashboardStateError,
+        normalize_dashboard_state,
+        safe_dashboard_state,
+    )
+except ImportError:
+    from dashboard_schema import (
+        DashboardStateError,
+        normalize_dashboard_state,
+        safe_dashboard_state,
+    )
+
 
 class WebSocketHandlerError(RuntimeError):
     """Raised when WebSocket handling cannot continue safely."""
 
 
-DashboardProvider = Callable[[], Awaitable[dict[str, Any]]]
+DashboardProvider = Callable[
+    ...,
+    Awaitable[dict[str, Any]],
+]
 
 
 class DashboardWebSocketManager:
     """
     Manages dashboard WebSocket connections.
 
-    Step 9 is read-only:
-    - streams dashboard state
+    Step 9C:
+    - streams normalized dashboard state
     - sends periodic heartbeats
+    - handles provider failures safely
+    - removes broken connections
     - never places, modifies, or closes trades
     """
 
@@ -34,7 +52,10 @@ class DashboardWebSocketManager:
                 "heartbeat_interval_seconds must be greater than zero."
             )
 
-        self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.heartbeat_interval_seconds = (
+            heartbeat_interval_seconds
+        )
+
         self._connections: set[WebSocket] = set()
 
     @property
@@ -50,6 +71,7 @@ class DashboardWebSocketManager:
         """Accept and register a dashboard connection."""
 
         await websocket.accept()
+
         self._connections.add(websocket)
 
     def disconnect(
@@ -62,7 +84,9 @@ class DashboardWebSocketManager:
 
     @staticmethod
     def _timestamp() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(
+            timezone.utc
+        ).isoformat()
 
     @staticmethod
     def _safe_json(
@@ -73,7 +97,11 @@ class DashboardWebSocketManager:
                 payload,
                 default=str,
             )
-        except (TypeError, ValueError) as exc:
+
+        except (
+            TypeError,
+            ValueError,
+        ) as exc:
             raise WebSocketHandlerError(
                 "Dashboard payload is not JSON serializable."
             ) from exc
@@ -89,6 +117,7 @@ class DashboardWebSocketManager:
             await websocket.send_text(
                 self._safe_json(payload)
             )
+
         except Exception as exc:
             raise WebSocketHandlerError(
                 "Failed to send dashboard WebSocket message."
@@ -101,32 +130,73 @@ class DashboardWebSocketManager:
         """
         Broadcast one message to all connected clients.
 
-        Failed connections are removed rather than allowing one
-        broken client to stop the dashboard stream.
+        Broken connections are removed instead of allowing
+        one client to stop the entire dashboard stream.
         """
 
         disconnected: list[WebSocket] = []
 
-        for websocket in list(self._connections):
+        for websocket in list(
+            self._connections
+        ):
             try:
                 await self.send_json(
                     websocket,
                     payload,
                 )
+
             except WebSocketHandlerError:
-                disconnected.append(websocket)
+                disconnected.append(
+                    websocket
+                )
 
         for websocket in disconnected:
             self.disconnect(websocket)
 
-    async def heartbeat_message(self) -> dict[str, Any]:
+    async def heartbeat_message(
+        self,
+    ) -> dict[str, Any]:
         """Create a dashboard heartbeat message."""
 
         return {
             "type": "heartbeat",
             "timestamp": self._timestamp(),
-            "connection_count": self.connection_count,
+            "connection_count": (
+                self.connection_count
+            ),
         }
+
+    async def _safe_provider_state(
+        self,
+        provider: DashboardProvider,
+    ) -> tuple[
+        dict[str, Any],
+        Optional[str],
+    ]:
+        """
+        Execute the read-only dashboard provider safely.
+
+        Returns:
+        - normalized dashboard state
+        - optional error message
+        """
+
+        try:
+            state = await provider()
+
+            normalized = (
+                normalize_dashboard_state(
+                    state
+                )
+            )
+
+            return normalized, None
+
+        except Exception as exc:
+            return (
+                safe_dashboard_state(),
+                str(exc),
+            )
 
     async def stream(
         self,
@@ -136,8 +206,8 @@ class DashboardWebSocketManager:
         """
         Keep one dashboard connection alive.
 
-        When a provider is supplied, its read-only dashboard state
-        is sent before each heartbeat.
+        Provider data is normalized and safety checked
+        before being sent to the client.
 
         The provider must never execute trading operations.
         """
@@ -145,20 +215,35 @@ class DashboardWebSocketManager:
         try:
             while True:
                 if provider is not None:
-                    try:
-                        state = await provider()
-                    except Exception as exc:
-                        state = {
-                            "type": "dashboard_error",
-                            "timestamp": self._timestamp(),
-                            "message": str(exc),
-                        }
+                    state, error = (
+                        await self._safe_provider_state(
+                            provider
+                        )
+                    )
+
+                    if error is not None:
+                        await self.send_json(
+                            websocket,
+                            {
+                                "type": (
+                                    "dashboard_error"
+                                ),
+                                "timestamp": (
+                                    self._timestamp()
+                                ),
+                                "message": error,
+                            },
+                        )
 
                     await self.send_json(
                         websocket,
                         {
-                            "type": "dashboard_state",
-                            "timestamp": self._timestamp(),
+                            "type": (
+                                "dashboard_state"
+                            ),
+                            "timestamp": (
+                                self._timestamp()
+                            ),
                             "data": state,
                         },
                     )
@@ -187,18 +272,7 @@ async def empty_dashboard_provider() -> dict[str, Any]:
     """
     Safe default dashboard provider.
 
-    This intentionally returns read-only system information only.
+    This intentionally returns read-only information only.
     """
 
-    return {
-        "market": None,
-        "account": None,
-        "positions": [],
-        "connection": {
-            "status": "unknown",
-        },
-        "emergency_stop": {
-            "active": False,
-        },
-        "live_trading_enabled": False,
-    }
+    return safe_dashboard_state()
