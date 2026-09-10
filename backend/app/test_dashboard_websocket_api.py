@@ -76,18 +76,25 @@ def test_dashboard_websocket_connects(client, monkeypatch):
         message = websocket.receive_json()
 
         assert message["type"] == "dashboard_state"
-        assert message["data"]["market"]["symbol"] == "XAUUSD"
-        assert message["data"]["account"]["equity"] == 10000.0
+        assert (
+            message["data"]["market"]["symbol"]
+            == "XAUUSD"
+        )
+        assert (
+            message["data"]["account"]["equity"]
+            == 10000.0
+        )
         assert message["data"]["positions"] == []
-        assert message["data"]["live_trading_enabled"] is False
+        assert (
+            message["data"]["live_trading_enabled"]
+            is False
+        )
 
 
 def test_dashboard_websocket_provider_is_read_only(
     client,
     monkeypatch,
 ):
-    execution_called = False
-
     async def fake_provider():
         return {
             "market": None,
@@ -105,8 +112,6 @@ def test_dashboard_websocket_provider_is_read_only(
         }
 
     async def fake_stream(websocket, provider=None):
-        nonlocal execution_called
-
         state = await provider()
 
         await websocket.send_text(
@@ -146,8 +151,6 @@ def test_dashboard_websocket_provider_is_read_only(
             ]
             is False
         )
-
-    assert execution_called is False
 
 
 def test_dashboard_websocket_never_enables_live_trading(
