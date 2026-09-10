@@ -1,10 +1,12 @@
 """
 RAYMOND v2.8 Risk Engine
 
-Step 4B:
+Step 4C:
 - Broker-neutral risk configuration
 - Broker/instrument-aware position sizing
 - MT5 symbol specification support
+- Account-level pre-trade guardrails
+- Fail-closed risk decisions
 - Risk/reward validation
 - No trade execution
 """
@@ -19,12 +21,7 @@ class RiskEngineError(ValueError):
 
 @dataclass
 class RiskConfig:
-    """
-    Global trading-risk limits.
-
-    Percentages are expressed as normal percentages:
-    1.0 = 1% of account equity.
-    """
+    """Global trading-risk limits."""
 
     risk_per_trade_percent: float = 1.0
     max_daily_loss_percent: float = 3.0
@@ -62,11 +59,7 @@ class RiskConfig:
 
 @dataclass
 class SymbolSpecification:
-    """
-    Broker-provided trading specification.
-
-    Values originate from MT5 symbol_info().
-    """
+    """Broker-provided trading specification from MT5."""
 
     symbol: str
     digits: int
@@ -147,14 +140,34 @@ class SymbolSpecification:
                 "volume_step must be greater than zero"
             )
 
+        if self.volume_limit < 0:
+            raise RiskEngineError(
+                "volume_limit cannot be negative"
+            )
+
+
+@dataclass(frozen=True)
+class RiskDecision:
+    """Deterministic pre-trade risk result."""
+
+    allowed: bool
+    reason: str
+    risk_amount: float
+    daily_loss_limit: float
+    total_exposure_limit: float
+    proposed_exposure: float
+    open_positions: int
+
 
 class RiskEngine:
-    """
-    Broker-neutral risk calculator.
+    """Broker-neutral risk calculator and pre-trade guard."""
 
-    This class does not communicate with MT5 and does not
-    place, modify, or close trades.
-    """
+    # MT5 SYMBOL_TRADE_MODE values.
+    TRADE_MODE_DISABLED = 0
+    TRADE_MODE_LONGONLY = 1
+    TRADE_MODE_SHORTONLY = 2
+    TRADE_MODE_CLOSEONLY = 3
+    TRADE_MODE_FULL = 4
 
     def __init__(
         self,
@@ -167,7 +180,7 @@ class RiskEngine:
         self,
         equity: float,
     ) -> float:
-        """Return the maximum money risk for one trade."""
+        """Return maximum money risk for one trade."""
 
         if equity <= 0:
             raise RiskEngineError(
@@ -182,7 +195,7 @@ class RiskEngine:
         self,
         equity: float,
     ) -> float:
-        """Return the maximum permitted daily loss."""
+        """Return maximum permitted daily loss."""
 
         if equity <= 0:
             raise RiskEngineError(
@@ -191,6 +204,21 @@ class RiskEngine:
 
         return equity * (
             self.config.max_daily_loss_percent / 100
+        )
+
+    def total_exposure_limit(
+        self,
+        equity: float,
+    ) -> float:
+        """Return maximum permitted total exposure."""
+
+        if equity <= 0:
+            raise RiskEngineError(
+                "equity must be greater than zero"
+            )
+
+        return equity * (
+            self.config.max_total_exposure_percent / 100
         )
 
     def calculate_position_size(
@@ -251,13 +279,17 @@ class RiskEngine:
 
         risk_budget = self.risk_amount(equity)
 
-        raw_volume = risk_budget / risk_per_unit
+        raw_volume = (
+            risk_budget / risk_per_unit
+        )
 
         volume_steps = int(
             raw_volume / volume_step
         )
 
-        volume = volume_steps * volume_step
+        volume = (
+            volume_steps * volume_step
+        )
 
         if volume < min_volume:
             return 0.0
@@ -268,9 +300,15 @@ class RiskEngine:
                     "max_volume must be greater than zero"
                 )
 
-            volume = min(volume, max_volume)
+            volume = min(
+                volume,
+                max_volume,
+            )
 
-        return round(volume, 8)
+        return round(
+            volume,
+            8,
+        )
 
     def calculate_position_size_from_symbol(
         self,
@@ -297,7 +335,8 @@ class RiskEngine:
                 "stop_loss_price must differ from entry_price"
             )
 
-        # Use the losing-side tick value for conservative sizing.
+        # Use the losing-side tick value for
+        # conservative position sizing.
         loss_per_volume = (
             stop_distance
             / specification.tick_size
@@ -376,4 +415,264 @@ class RiskEngine:
                 "risk/reward ratio is below the configured minimum"
             )
 
-        return round(ratio, 8)
+        return round(
+            ratio,
+            8,
+        )
+
+    def validate_trade_direction(
+        self,
+        trade_mode: int,
+        side: str,
+    ) -> None:
+        """Validate BUY/SELL against the broker trade mode."""
+
+        normalized_side = (
+            side.upper().strip()
+        )
+
+        if normalized_side not in {
+            "BUY",
+            "SELL",
+        }:
+            raise RiskEngineError(
+                "side must be BUY or SELL"
+            )
+
+        if trade_mode == self.TRADE_MODE_DISABLED:
+            raise RiskEngineError(
+                "symbol trading is disabled"
+            )
+
+        if trade_mode == self.TRADE_MODE_CLOSEONLY:
+            raise RiskEngineError(
+                "symbol is close-only"
+            )
+
+        if (
+            trade_mode
+            == self.TRADE_MODE_LONGONLY
+            and normalized_side != "BUY"
+        ):
+            raise RiskEngineError(
+                "symbol allows long positions only"
+            )
+
+        if (
+            trade_mode
+            == self.TRADE_MODE_SHORTONLY
+            and normalized_side != "SELL"
+        ):
+            raise RiskEngineError(
+                "symbol allows short positions only"
+            )
+
+        if trade_mode not in {
+            self.TRADE_MODE_LONGONLY,
+            self.TRADE_MODE_SHORTONLY,
+            self.TRADE_MODE_FULL,
+        }:
+            raise RiskEngineError(
+                "unsupported symbol trade mode"
+            )
+
+    def validate_volume(
+        self,
+        volume: float,
+        specification: SymbolSpecification,
+        existing_direction_volume: float = 0.0,
+    ) -> None:
+        """Validate volume against broker constraints."""
+
+        specification.validate()
+
+        if volume <= 0:
+            raise RiskEngineError(
+                "volume must be greater than zero"
+            )
+
+        if volume < specification.volume_min:
+            raise RiskEngineError(
+                "volume is below broker minimum"
+            )
+
+        if volume > specification.volume_max:
+            raise RiskEngineError(
+                "volume exceeds broker maximum"
+            )
+
+        steps = round(
+            volume / specification.volume_step
+        )
+
+        if abs(
+            volume
+            - (
+                steps
+                * specification.volume_step
+            )
+        ) > 1e-8:
+            raise RiskEngineError(
+                "volume is not aligned to broker volume step"
+            )
+
+        if existing_direction_volume < 0:
+            raise RiskEngineError(
+                "existing_direction_volume cannot be negative"
+            )
+
+        if specification.volume_limit > 0:
+            if (
+                existing_direction_volume
+                + volume
+                > specification.volume_limit
+                + 1e-8
+            ):
+                raise RiskEngineError(
+                    "volume exceeds broker directional volume limit"
+                )
+
+    def pre_trade_check(
+        self,
+        *,
+        equity: float,
+        daily_loss: float,
+        open_positions: int,
+        current_exposure: float,
+        proposed_exposure: float,
+        entry_price: float,
+        stop_loss_price: Optional[float],
+        take_profit_price: Optional[float],
+        volume: float,
+        side: str,
+        specification: SymbolSpecification,
+        existing_direction_volume: float = 0.0,
+    ) -> RiskDecision:
+        """
+        Run all Step 4C guardrails.
+
+        This method never executes a trade.
+
+        It returns an explicit ALLOW/REJECT decision.
+        Any failed risk condition results in rejection.
+        """
+
+        if equity <= 0:
+            raise RiskEngineError(
+                "equity must be greater than zero"
+            )
+
+        if daily_loss < 0:
+            raise RiskEngineError(
+                "daily_loss cannot be negative"
+            )
+
+        if open_positions < 0:
+            raise RiskEngineError(
+                "open_positions cannot be negative"
+            )
+
+        if current_exposure < 0:
+            raise RiskEngineError(
+                "current_exposure cannot be negative"
+            )
+
+        if proposed_exposure < 0:
+            raise RiskEngineError(
+                "proposed_exposure cannot be negative"
+            )
+
+        specification.validate()
+
+        risk_amount = self.risk_amount(
+            equity
+        )
+
+        daily_limit = self.daily_loss_limit(
+            equity
+        )
+
+        exposure_limit = (
+            self.total_exposure_limit(
+                equity
+            )
+        )
+
+        checks = (
+            (
+                daily_loss >= daily_limit,
+                "maximum daily loss reached",
+            ),
+            (
+                open_positions
+                >= self.config.max_open_positions,
+                "maximum open positions reached",
+            ),
+            (
+                current_exposure
+                + proposed_exposure
+                > exposure_limit,
+                "maximum total exposure exceeded",
+            ),
+        )
+
+        for failed, reason in checks:
+            if failed:
+                return RiskDecision(
+                    allowed=False,
+                    reason=reason,
+                    risk_amount=risk_amount,
+                    daily_loss_limit=daily_limit,
+                    total_exposure_limit=exposure_limit,
+                    proposed_exposure=proposed_exposure,
+                    open_positions=open_positions,
+                )
+
+        try:
+            self.validate_trade_direction(
+                specification.trade_mode,
+                side,
+            )
+
+            self.validate_stop_loss(
+                entry_price,
+                stop_loss_price,
+            )
+
+            if take_profit_price is None:
+                raise RiskEngineError(
+                    "take profit is required"
+                )
+
+            self.validate_risk_reward(
+                entry_price,
+                stop_loss_price,
+                take_profit_price,
+            )
+
+            self.validate_volume(
+                volume,
+                specification,
+                existing_direction_volume,
+            )
+
+        except RiskEngineError as exc:
+            return RiskDecision(
+                allowed=False,
+                reason=str(exc),
+                risk_amount=risk_amount,
+                daily_loss_limit=daily_limit,
+                total_exposure_limit=exposure_limit,
+                proposed_exposure=proposed_exposure,
+                open_positions=open_positions,
+            )
+
+        return RiskDecision(
+            allowed=True,
+            reason="risk checks passed",
+            risk_amount=risk_amount,
+            daily_loss_limit=daily_limit,
+            total_exposure_limit=exposure_limit,
+            proposed_exposure=proposed_exposure,
+            open_positions=open_positions,
+        )
