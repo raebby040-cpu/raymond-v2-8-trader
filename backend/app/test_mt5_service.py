@@ -1,114 +1,148 @@
-async def get_symbol_specification(
-    self,
-    symbol: str,
-) -> dict:
-    """
-    Return broker-provided trading specifications for a symbol.
+import os
+import sys
 
-    This is read-only.
-    No order is placed or modified.
-    """
+import pytest
 
-    if not symbol:
-        raise ValueError(
-            "symbol is required"
-        )
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-    if mt5 is None:
-        raise MT5ServiceError(
-            "MetaTrader5 package is not available"
-        )
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
 
-    def _get_specification():
-        selected = mt5.symbol_select(
-            symbol,
-            True,
-        )
+from mt5_service import (
+    MT5ConnectionConfig,
+    MT5Service,
+    MT5ServiceError,
+)
 
-        if not selected:
-            raise MT5ServiceError(
-                f"Unable to select symbol: {symbol}"
-            )
 
-        info = mt5.symbol_info(symbol)
+def test_default_connection_config():
+    config = MT5ConnectionConfig()
 
-        if info is None:
-            error = mt5.last_error()
+    assert config.login is None
+    assert config.password is None
+    assert config.server is None
+    assert config.terminal_path is None
+    assert config.timeout_ms == 60000
+    assert config.portable is False
 
-            raise MT5ServiceError(
-                f"Unable to retrieve symbol info "
-                f"for {symbol}: {error}"
-            )
 
-        return info._asdict()
-
-    data = await asyncio.to_thread(
-        _get_specification
+def test_connection_config_values():
+    config = MT5ConnectionConfig(
+        login=123456,
+        password="test-password",
+        server="Test-Server",
+        terminal_path="/test/terminal.exe",
+        timeout_ms=30000,
+        portable=True,
     )
 
-    return {
-        "symbol": data.get(
-            "name",
-            symbol,
-        ),
-        "digits": data.get(
-            "digits"
-        ),
-        "point": data.get(
-            "point"
-        ),
-        "spread": data.get(
-            "spread"
-        ),
-        "spread_float": data.get(
-            "spread_float"
-        ),
-        "tick_size": data.get(
-            "trade_tick_size"
-        ),
-        "tick_value": data.get(
-            "trade_tick_value"
-        ),
-        "tick_value_profit": data.get(
-            "trade_tick_value_profit"
-        ),
-        "tick_value_loss": data.get(
-            "trade_tick_value_loss"
-        ),
-        "contract_size": data.get(
-            "trade_contract_size"
-        ),
-        "volume_min": data.get(
-            "volume_min"
-        ),
-        "volume_max": data.get(
-            "volume_max"
-        ),
-        "volume_step": data.get(
-            "volume_step"
-        ),
-        "volume_limit": data.get(
-            "volume_limit"
-        ),
-        "trade_mode": data.get(
-            "trade_mode"
-        ),
-        "trade_execution_mode": data.get(
-            "trade_exemode"
-        ),
-        "trade_stops_level": data.get(
-            "trade_stops_level"
-        ),
-        "trade_freeze_level": data.get(
-            "trade_freeze_level"
-        ),
-        "currency_base": data.get(
-            "currency_base"
-        ),
-        "currency_profit": data.get(
-            "currency_profit"
-        ),
-        "currency_margin": data.get(
-            "currency_margin"
-        ),
-    }
+    assert config.login == 123456
+    assert config.password == "test-password"
+    assert config.server == "Test-Server"
+    assert config.terminal_path == "/test/terminal.exe"
+    assert config.timeout_ms == 30000
+    assert config.portable is True
+
+
+def test_connection_config_from_env(monkeypatch):
+    monkeypatch.setenv("MT5_LOGIN", "123456")
+    monkeypatch.setenv("MT5_PASSWORD", "password")
+    monkeypatch.setenv("MT5_SERVER", "Broker-Demo")
+    monkeypatch.setenv(
+        "MT5_TERMINAL_PATH",
+        "/test/terminal.exe",
+    )
+    monkeypatch.setenv("MT5_TIMEOUT_MS", "45000")
+    monkeypatch.setenv("MT5_PORTABLE", "true")
+
+    config = MT5ConnectionConfig.from_env()
+
+    assert config.login == 123456
+    assert config.password == "password"
+    assert config.server == "Broker-Demo"
+    assert config.terminal_path == "/test/terminal.exe"
+    assert config.timeout_ms == 45000
+    assert config.portable is True
+
+
+def test_connection_config_supports_mt5_account(monkeypatch):
+    monkeypatch.delenv("MT5_LOGIN", raising=False)
+    monkeypatch.setenv("MT5_ACCOUNT", "987654")
+
+    config = MT5ConnectionConfig.from_env()
+
+    assert config.login == 987654
+
+
+def test_invalid_mt5_login(monkeypatch):
+    monkeypatch.setenv("MT5_LOGIN", "not-a-number")
+
+    with pytest.raises(ValueError):
+        MT5ConnectionConfig.from_env()
+
+
+def test_service_starts_disconnected():
+    service = MT5Service()
+
+    assert service.connected is False
+
+
+@pytest.mark.asyncio
+async def test_service_requires_mt5_package(monkeypatch):
+    import mt5_service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "mt5",
+        None,
+    )
+
+    service = MT5Service()
+
+    with pytest.raises(MT5ServiceError):
+        await service.initialize()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_without_mt5_package(monkeypatch):
+    import mt5_service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "mt5",
+        None,
+    )
+
+    service = MT5Service()
+
+    result = await service.shutdown()
+
+    assert result is True
+    assert service.connected is False
+
+
+def test_to_dict_with_none():
+    service = MT5Service()
+
+    assert service._to_dict(None) == {}
+
+
+def test_to_dict_with_namedtuple():
+    service = MT5Service()
+
+    from collections import namedtuple
+
+    TestValue = namedtuple(
+        "TestValue",
+        ["name", "value"],
+    )
+
+    value = TestValue(
+        name="test",
+        value=123,
+    )
+
+    result = service._to_dict(value)
+
+    assert result["name"] == "test"
+    assert result["value"] == 123
