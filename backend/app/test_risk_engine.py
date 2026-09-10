@@ -16,6 +16,7 @@ from risk_engine import (  # noqa: E402
     RiskConfig,
     RiskEngine,
     RiskEngineError,
+    SymbolSpecification,
 )
 
 
@@ -88,6 +89,171 @@ def test_position_size_below_minimum_returns_zero():
     assert volume == 0.0
 
 
+def test_symbol_specification_defaults():
+    specification = SymbolSpecification(
+        symbol="XAUUSD",
+        digits=2,
+        point=0.01,
+        tick_size=0.01,
+        tick_value=1.0,
+        tick_value_profit=1.0,
+        tick_value_loss=1.0,
+        contract_size=100.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+        volume_limit=0.0,
+        trade_mode=4,
+        trade_execution_mode=2,
+        trade_stops_level=0,
+        trade_freeze_level=0,
+        currency_base="XAU",
+        currency_profit="USD",
+        currency_margin="XAU",
+        spread=30,
+        spread_float=True,
+    )
+
+    specification.validate()
+
+    assert specification.symbol == "XAUUSD"
+    assert specification.tick_size == 0.01
+    assert specification.tick_value_loss == 1.0
+    assert specification.volume_step == 0.01
+
+
+def test_symbol_aware_position_size():
+    engine = RiskEngine()
+
+    specification = SymbolSpecification(
+        symbol="XAUUSD",
+        digits=2,
+        point=0.01,
+        tick_size=0.01,
+        tick_value=1.0,
+        tick_value_profit=1.0,
+        tick_value_loss=1.0,
+        contract_size=100.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+        volume_limit=0.0,
+        trade_mode=4,
+        trade_execution_mode=2,
+        trade_stops_level=0,
+        trade_freeze_level=0,
+        currency_base="XAU",
+        currency_profit="USD",
+        currency_margin="XAU",
+        spread=30,
+        spread_float=True,
+    )
+
+    volume = engine.calculate_position_size_from_symbol(
+        equity=10000,
+        entry_price=3350.00,
+        stop_loss_price=3340.00,
+        specification=specification,
+    )
+
+    assert volume == 1.0
+
+
+def test_symbol_aware_position_size_respects_max_volume():
+    engine = RiskEngine()
+
+    specification = SymbolSpecification(
+        symbol="XAUUSD",
+        digits=2,
+        point=0.01,
+        tick_size=0.01,
+        tick_value=1.0,
+        tick_value_profit=1.0,
+        tick_value_loss=1.0,
+        contract_size=100.0,
+        volume_min=0.01,
+        volume_max=0.50,
+        volume_step=0.01,
+        volume_limit=0.0,
+        trade_mode=4,
+        trade_execution_mode=2,
+        trade_stops_level=0,
+        trade_freeze_level=0,
+        currency_base="XAU",
+        currency_profit="USD",
+        currency_margin="XAU",
+        spread=30,
+        spread_float=True,
+    )
+
+    volume = engine.calculate_position_size_from_symbol(
+        equity=10000,
+        entry_price=3350.00,
+        stop_loss_price=3340.00,
+        specification=specification,
+    )
+
+    assert volume == 0.50
+
+
+def test_symbol_specification_rejects_invalid_tick_size():
+    specification = SymbolSpecification(
+        symbol="XAUUSD",
+        digits=2,
+        point=0.01,
+        tick_size=0,
+        tick_value=1.0,
+        tick_value_profit=1.0,
+        tick_value_loss=1.0,
+        contract_size=100.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+        volume_limit=0.0,
+        trade_mode=4,
+        trade_execution_mode=2,
+        trade_stops_level=0,
+        trade_freeze_level=0,
+        currency_base="XAU",
+        currency_profit="USD",
+        currency_margin="XAU",
+        spread=30,
+        spread_float=True,
+    )
+
+    with pytest.raises(RiskEngineError):
+        specification.validate()
+
+
+def test_symbol_specification_rejects_invalid_volume_step():
+    specification = SymbolSpecification(
+        symbol="XAUUSD",
+        digits=2,
+        point=0.01,
+        tick_size=0.01,
+        tick_value=1.0,
+        tick_value_profit=1.0,
+        tick_value_loss=1.0,
+        contract_size=100.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0,
+        volume_limit=0.0,
+        trade_mode=4,
+        trade_execution_mode=2,
+        trade_stops_level=0,
+        trade_freeze_level=0,
+        currency_base="XAU",
+        currency_profit="USD",
+        currency_margin="XAU",
+        spread=30,
+        spread_float=True,
+    )
+
+    with pytest.raises(RiskEngineError):
+        specification.validate()
+
+
 def test_required_stop_loss():
     engine = RiskEngine()
 
@@ -144,4 +310,4 @@ def test_invalid_risk_config():
             RiskConfig(
                 risk_per_trade_percent=0
             )
-)
+        )
