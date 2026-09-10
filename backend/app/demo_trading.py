@@ -205,11 +205,15 @@ class DemoTradingEngine:
         quantity: float,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
+        trade_id: Optional[str] = None,
     ) -> DemoTrade:
         """
         Open a simulated paper trade.
 
         No broker, MT5, Exness, or live-order API is called.
+
+        ``trade_id`` may be supplied by the journal/integration layer.
+        If omitted, a unique demo ID is generated automatically.
         """
 
         if not symbol or not symbol.strip():
@@ -269,8 +273,24 @@ class DemoTradingEngine:
                     "Sell take-profit must be below entry price."
                 )
 
+        normalized_trade_id = (
+            trade_id.strip()
+            if trade_id is not None
+            else f"demo-{uuid4().hex}"
+        )
+
+        if not normalized_trade_id:
+            raise DemoTradingError(
+                "Trade ID cannot be empty."
+            )
+
+        if normalized_trade_id in self._trades:
+            raise DemoTradingError(
+                "Demo trade ID already exists."
+            )
+
         trade = DemoTrade(
-            trade_id=f"demo-{uuid4().hex}",
+            trade_id=normalized_trade_id,
             symbol=symbol.strip().upper(),
             direction=normalized_direction,
             entry_price=entry,
