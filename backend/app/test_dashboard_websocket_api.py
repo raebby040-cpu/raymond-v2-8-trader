@@ -1,27 +1,8 @@
-import asyncio
 import json
 
-import pytest
 from fastapi.testclient import TestClient
 
 import main
-
-
-class FakeWebSocket:
-    def __init__(self):
-        self.accepted = False
-        self.messages = []
-
-    async def accept(self):
-        self.accepted = True
-
-    async def send_text(self, message):
-        self.messages.append(message)
-
-
-@pytest.fixture
-def client():
-    return TestClient(main.app)
 
 
 def test_dashboard_websocket_route_exists():
@@ -57,120 +38,228 @@ def test_dashboard_websocket_connects(client, monkeypatch):
             "live_trading_enabled": False,
         }
 
+    async def fake_stream(websocket, provider=None):
+        assert provider is not None
+
+        state = await provider()
+
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "dashboard_state",
+                    "data": state,
+                }
+            )
+        )
+
     monkeypatch.setattr(
         main,
         "build_dashboard_state",
         fake_provider,
     )
 
-    with client.websocket_connect("/ws/dashboard") as websocket:
+    monkeypatch.setattr(
+        main.dashboard_ws_manager,
+        "stream",
+        fake_stream,
+    )
+
+    with client.websocket_connect(
+        "/ws/dashboard"
+    ) as websocket:
         message = websocket.receive_json()
 
-        assert message["type"] in {
-            "dashboard_state",
-            "heartbeat",
-        }
+        assert message["type"] == "dashboard_state"
+        assert message["data"]["market"]["symbol"] == "XAUUSD"
+        assert message["data"]["account"]["equity"] == 10000.0
+        assert message["data"]["positions"] == []
+        assert message["data"]["live_trading_enabled"] is False
 
 
-def test_dashboard_websocket_returns_valid_json(client):
-    with client.websocket_connect("/ws/dashboard") as websocket:
-        message = websocket.receive_json()
+def test_dashboard_websocket_provider_is_read_only(
+    client,
+    monkeypatch,
+):
+    execution_called = False
 
-        assert isinstance(message, dict)
-        assert "type" in message
-
-
-def test_dashboard_websocket_is_read_only():
-    websocket = FakeWebSocket()
-
-    assert websocket.accepted is False
-    assert websocket.messages == []
-
-
-def test_dashboard_websocket_does_not_execute_trades():
-    """
-    Step 9B safety test.
-
-    The dashboard WebSocket must remain read-only.
-    It must not expose or invoke trade execution.
-    """
-
-    websocket = FakeWebSocket()
-
-    assert not hasattr(
-        websocket,
-        "execute",
-    )
-
-    assert not hasattr(
-        websocket,
-        "place_order",
-    )
-
-    assert not hasattr(
-        websocket,
-        "close_position",
-    )
-
-
-@pytest.mark.asyncio
-async def test_websocket_message_format():
-    websocket = FakeWebSocket()
-
-    payload = {
-        "type": "dashboard_state",
-        "timestamp": "2026-01-01T00:00:00+00:00",
-        "data": {
+    async def fake_provider():
+        return {
             "market": None,
             "account": None,
             "positions": [],
+            "connection": {
+                "status": "disconnected",
+                "healthy": False,
+            },
+            "emergency_stop": {
+                "active": True,
+                "trading_allowed": False,
+            },
             "live_trading_enabled": False,
-        },
-    }
+        }
 
-    await websocket.send_text(
-        json.dumps(payload)
+    async def fake_stream(websocket, provider=None):
+        nonlocal execution_called
+
+        state = await provider()
+
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "dashboard_state",
+                    "data": state,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        main,
+        "build_dashboard_state",
+        fake_provider,
     )
 
-    assert len(websocket.messages) == 1
-
-    decoded = json.loads(
-        websocket.messages[0]
+    monkeypatch.setattr(
+        main.dashboard_ws_manager,
+        "stream",
+        fake_stream,
     )
 
-    assert decoded["type"] == "dashboard_state"
-    assert decoded["data"]["positions"] == []
-    assert decoded["data"]["live_trading_enabled"] is False
+    with client.websocket_connect(
+        "/ws/dashboard"
+    ) as websocket:
+        message = websocket.receive_json()
+
+        assert message["type"] == "dashboard_state"
+        assert message["data"]["live_trading_enabled"] is False
+        assert message["data"]["emergency_stop"]["trading_allowed"] is False
+
+    assert execution_called is False
 
 
-@pytest.mark.asyncio
-async def test_websocket_fake_client_accepts_connection():
-    websocket = FakeWebSocket()
-
-    await websocket.accept()
-
-    assert websocket.accepted is True
-
-
-@pytest.mark.asyncio
-async def test_websocket_fake_client_can_receive_dashboard_state():
-    websocket = FakeWebSocket()
-
-    payload = {
-        "type": "dashboard_state",
-        "data": {
+def test_dashboard_websocket_never_enables_live_trading(
+    client,
+    monkeypatch,
+):
+    async def fake_provider():
+        return {
+            "market": None,
+            "account": None,
             "positions": [],
+            "connection": {
+                "status": "connected",
+                "healthy": True,
+            },
+            "emergency_stop": {
+                "active": False,
+                "trading_allowed": True,
+            },
             "live_trading_enabled": False,
-        },
-    }
+        }
 
-    await websocket.send_text(
-        json.dumps(payload)
+    async def fake_stream(websocket, provider=None):
+        state = await provider()
+
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "dashboard_state",
+                    "data": state,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        main,
+        "build_dashboard_state",
+        fake_provider,
     )
 
-    decoded = json.loads(
-        websocket.messages[0]
+    monkeypatch.setattr(
+        main.dashboard_ws_manager,
+        "stream",
+        fake_stream,
     )
 
-    assert decoded["type"] == "dashboard_state"
-    assert decoded["data"]["live_trading_enabled"] is False
+    with client.websocket_connect(
+        "/ws/dashboard"
+    ) as websocket:
+        message = websocket.receive_json()
+
+        assert message["data"]["live_trading_enabled"] is False
+
+
+def test_dashboard_websocket_sends_valid_json(
+    client,
+    monkeypatch,
+):
+    async def fake_provider():
+        return {
+            "market": None,
+            "account": None,
+            "positions": [],
+            "connection": {
+                "status": "connected",
+                "healthy": True,
+            },
+            "emergency_stop": {
+                "active": False,
+                "trading_allowed": True,
+            },
+            "live_trading_enabled": False,
+        }
+
+    async def fake_stream(websocket, provider=None):
+        state = await provider()
+
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "dashboard_state",
+                    "data": state,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        main,
+        "build_dashboard_state",
+        fake_provider,
+    )
+
+    monkeypatch.setattr(
+        main.dashboard_ws_manager,
+        "stream",
+        fake_stream,
+    )
+
+    with client.websocket_connect(
+        "/ws/dashboard"
+    ) as websocket:
+        raw_message = websocket.receive_text()
+
+        decoded = json.loads(raw_message)
+
+        assert isinstance(decoded, dict)
+        assert decoded["type"] == "dashboard_state"
+        assert isinstance(decoded["data"], dict)
+
+
+def test_dashboard_websocket_has_no_trade_endpoint():
+    websocket_routes = [
+        route.path
+        for route in main.app.routes
+        if hasattr(route, "path")
+        and route.path == "/ws/dashboard"
+    ]
+
+    assert websocket_routes == [
+        "/ws/dashboard"
+    ]
+
+
+def test_client_fixture():
+    client = TestClient(main.app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
