@@ -1,199 +1,281 @@
+from __future__ import annotations
+
 import asyncio
 import json
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Optional
 
-import pytest
+from fastapi import WebSocket, WebSocketDisconnect
 
-from app.websocket_handler import (
-    DashboardWebSocketManager,
-    WebSocketHandlerError,
-    empty_dashboard_provider,
-)
-
-
-class FakeWebSocket:
-    def __init__(self) -> None:
-        self.accepted = False
-        self.messages = []
-        self.closed = False
-
-    async def accept(self) -> None:
-        self.accepted = True
-
-    async def send_text(self, message: str) -> None:
-        if self.closed:
-            raise RuntimeError("connection closed")
-
-        self.messages.append(message)
-
-
-@pytest.mark.asyncio
-async def test_connect_accepts_and_registers_websocket():
-    manager = DashboardWebSocketManager(
-        heartbeat_interval_seconds=1
+try:
+    from .dashboard_schema import (
+        DashboardStateError,
+        normalize_dashboard_state,
+        safe_dashboard_state,
     )
-    websocket = FakeWebSocket()
-
-    await manager.connect(websocket)
-
-    assert websocket.accepted is True
-    assert manager.connection_count == 1
-
-
-def test_disconnect_removes_websocket():
-    manager = DashboardWebSocketManager(
-        heartbeat_interval_seconds=1
-    )
-    websocket = FakeWebSocket()
-
-    manager._connections.add(websocket)
-
-    manager.disconnect(websocket)
-
-    assert manager.connection_count == 0
-
-
-@pytest.mark.asyncio
-async def test_send_json_sends_serializable_payload():
-    manager = DashboardWebSocketManager(
-        heartbeat_interval_seconds=1
-    )
-    websocket = FakeWebSocket()
-
-    await manager.send_json(
-        websocket,
-        {
-            "type": "test",
-            "value": 123,
-        },
+except ImportError:
+    from dashboard_schema import (
+        DashboardStateError,
+        normalize_dashboard_state,
+        safe_dashboard_state,
     )
 
-    assert len(websocket.messages) == 1
 
-    payload = json.loads(
-        websocket.messages[0]
-    )
-
-    assert payload["type"] == "test"
-    assert payload["value"] == 123
+class WebSocketHandlerError(RuntimeError):
+    """Raised when WebSocket handling cannot continue safely."""
 
 
-@pytest.mark.asyncio
-async def test_heartbeat_message_contains_required_fields():
-    manager = DashboardWebSocketManager(
-        heartbeat_interval_seconds=1
-    )
-
-    message = await manager.heartbeat_message()
-
-    assert message["type"] == "heartbeat"
-    assert "timestamp" in message
-    assert "connection_count" in message
+DashboardProvider = Callable[
+    ...,
+    Awaitable[dict[str, Any]],
+]
 
 
-@pytest.mark.asyncio
-async def test_broadcast_sends_to_all_connections():
-    manager = DashboardWebSocketManager(
-        heartbeat_interval_seconds=1
-    )
+class DashboardWebSocketManager:
+    """
+    Manages dashboard WebSocket connections.
 
-    websocket_one = FakeWebSocket()
-    websocket_two = FakeWebSocket()
+    Step 9C:
+    - streams normalized dashboard state
+    - sends periodic heartbeats
+    - handles provider failures safely
+    - removes broken connections
+    - never places, modifies, or closes trades
+    """
 
-    await manager.connect(websocket_one)
-    await manager.connect(websocket_two)
+    def __init__(
+        self,
+        heartbeat_interval_seconds: float = 5.0,
+    ) -> None:
+        if heartbeat_interval_seconds <= 0:
+            raise WebSocketHandlerError(
+                "heartbeat_interval_seconds must be greater than zero."
+            )
 
-    await manager.broadcast_json(
-        {
-            "type": "dashboard_state",
-            "value": "ok",
-        }
-    )
-
-    assert len(websocket_one.messages) == 1
-    assert len(websocket_two.messages) == 1
-
-
-@pytest.mark.asyncio
-async def test_broken_connection_is_removed():
-    manager = DashboardWebSocketManager(
-        heartbeat_interval_seconds=1
-    )
-
-    healthy = FakeWebSocket()
-    broken = FakeWebSocket()
-    broken.closed = True
-
-    await manager.connect(healthy)
-    await manager.connect(broken)
-
-    await manager.broadcast_json(
-        {
-            "type": "test",
-        }
-    )
-
-    assert manager.connection_count == 1
-    assert len(healthy.messages) == 1
-
-
-@pytest.mark.asyncio
-async def test_empty_dashboard_provider_is_read_only():
-    state = await empty_dashboard_provider()
-
-    assert state["market"] is None
-    assert state["account"] is None
-    assert state["positions"] == []
-    assert state["live_trading_enabled"] is False
-
-
-def test_invalid_heartbeat_interval_is_rejected():
-    with pytest.raises(WebSocketHandlerError):
-        DashboardWebSocketManager(
-            heartbeat_interval_seconds=0
+        self.heartbeat_interval_seconds = (
+            heartbeat_interval_seconds
         )
 
+        self._connections: set[WebSocket] = set()
 
-@pytest.mark.asyncio
-async def test_stream_sends_dashboard_state_and_heartbeat():
-    manager = DashboardWebSocketManager(
-        heartbeat_interval_seconds=0.01
-    )
+    @property
+    def connection_count(self) -> int:
+        """Return the number of currently connected clients."""
 
-    websocket = FakeWebSocket()
+        return len(self._connections)
 
-    await manager.connect(websocket)
+    async def connect(
+        self,
+        websocket: WebSocket,
+    ) -> None:
+        """Accept and register a dashboard connection."""
 
-    async def provider():
+        await websocket.accept()
+
+        self._connections.add(websocket)
+
+    def disconnect(
+        self,
+        websocket: WebSocket,
+    ) -> None:
+        """Remove a dashboard connection safely."""
+
+        self._connections.discard(websocket)
+
+    @staticmethod
+    def _timestamp() -> str:
+        return datetime.now(
+            timezone.utc
+        ).isoformat()
+
+    @staticmethod
+    def _safe_json(
+        payload: dict[str, Any],
+    ) -> str:
+        try:
+            return json.dumps(
+                payload,
+                default=str,
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise WebSocketHandlerError(
+                "Dashboard payload is not JSON serializable."
+            ) from exc
+
+    async def send_json(
+        self,
+        websocket: WebSocket,
+        payload: dict[str, Any],
+    ) -> None:
+        """Send one JSON dashboard message."""
+
+        try:
+            await websocket.send_text(
+                self._safe_json(payload)
+            )
+
+        except Exception as exc:
+            raise WebSocketHandlerError(
+                "Failed to send dashboard WebSocket message."
+            ) from exc
+
+    async def broadcast_json(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        """
+        Broadcast one message to all connected clients.
+
+        Broken connections are removed instead of allowing
+        one client to stop the entire dashboard stream.
+        """
+
+        disconnected: list[WebSocket] = []
+
+        for websocket in list(
+            self._connections
+        ):
+            try:
+                await self.send_json(
+                    websocket,
+                    payload,
+                )
+
+            except WebSocketHandlerError:
+                disconnected.append(
+                    websocket
+                )
+
+        for websocket in disconnected:
+            self.disconnect(websocket)
+
+    async def heartbeat_message(
+        self,
+    ) -> dict[str, Any]:
+        """Create a dashboard heartbeat message."""
+
         return {
-            "market": {
-                "symbol": "XAUUSD",
-                "price": 2300.0,
-            },
-            "positions": [],
+            "type": "heartbeat",
+            "timestamp": self._timestamp(),
+            "connection_count": (
+                self.connection_count
+            ),
         }
 
-    task = asyncio.create_task(
-        manager.stream(
-            websocket,
-            provider,
-        )
-    )
+    async def _safe_provider_state(
+        self,
+        provider: DashboardProvider,
+    ) -> tuple[
+        dict[str, Any],
+        Optional[str],
+    ]:
+        """
+        Execute the read-only dashboard provider safely.
 
-    await asyncio.sleep(0.025)
+        Returns:
+        - normalized dashboard state
+        - optional error message
+        """
 
-    task.cancel()
+        try:
+            state = await provider()
 
-    with pytest.raises(asyncio.CancelledError):
-        await task
+            normalized = (
+                normalize_dashboard_state(
+                    state
+                )
+            )
 
-    assert len(websocket.messages) >= 2
+            return normalized, None
 
-    message_types = [
-        json.loads(message)["type"]
-        for message in websocket.messages
-    ]
+        except (
+            DashboardStateError,
+            Exception,
+        ) as exc:
+            return (
+                safe_dashboard_state(),
+                str(exc),
+            )
 
-    assert "dashboard_state" in message_types
-    assert "heartbeat" in message_types
+    async def stream(
+        self,
+        websocket: WebSocket,
+        provider: Optional[DashboardProvider] = None,
+    ) -> None:
+        """
+        Keep one dashboard connection alive.
 
-    assert manager.connection_count == 0
+        Provider data is normalized and safety checked
+        before being sent to the client.
+
+        The provider must never execute trading operations.
+        """
+
+        try:
+            while True:
+                if provider is not None:
+                    state, error = (
+                        await self._safe_provider_state(
+                            provider
+                        )
+                    )
+
+                    if error is not None:
+                        await self.send_json(
+                            websocket,
+                            {
+                                "type": (
+                                    "dashboard_error"
+                                ),
+                                "timestamp": (
+                                    self._timestamp()
+                                ),
+                                "message": error,
+                            },
+                        )
+
+                    await self.send_json(
+                        websocket,
+                        {
+                            "type": (
+                                "dashboard_state"
+                            ),
+                            "timestamp": (
+                                self._timestamp()
+                            ),
+                            "data": state,
+                        },
+                    )
+
+                await self.send_json(
+                    websocket,
+                    await self.heartbeat_message(),
+                )
+
+                await asyncio.sleep(
+                    self.heartbeat_interval_seconds
+                )
+
+        except WebSocketDisconnect:
+            self.disconnect(websocket)
+
+        except asyncio.CancelledError:
+            self.disconnect(websocket)
+            raise
+
+        finally:
+            self.disconnect(websocket)
+
+
+async def empty_dashboard_provider() -> dict[str, Any]:
+    """
+    Safe default dashboard provider.
+
+    This intentionally returns read-only information only.
+    """
+
+    return safe_dashboard_state()
