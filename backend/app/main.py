@@ -808,7 +808,7 @@ async def get_indicators(
 
 
 # ============================================================
-# TRADING - PAPER ONLY
+# STEP 5 - TRADE EXECUTION GATEWAY
 # ============================================================
 
 @app.post("/api/trading/place-order")
@@ -816,36 +816,143 @@ async def place_order(
     order_data: dict,
 ):
     """
-    PAPER TRADING ONLY.
+    STEP 5 - PAPER EXECUTION GATEWAY.
 
-    This endpoint cannot send a real MT5 order.
+    This endpoint validates the order request and sends it
+    to the paper-only execution gateway.
+
+    IMPORTANT:
+    - No MT5 order_send() call exists here.
+    - No real broker order is placed.
+    - No real position is modified.
+    - Live execution remains disabled.
     """
 
-    logger.warning(
-        "Paper trade requested. "
-        "Real execution remains disabled."
+    logger.info(
+        "Trade execution request received "
+        "through Step 5 execution gateway."
     )
 
-    return {
-        "order_id": "PAPER-ORDER-001",
-        "status": "paper_only",
-        "symbol": order_data.get(
-            "symbol",
-            "XAUUSD",
-        ),
-        "order_type": order_data.get(
-            "order_type",
-            "market",
-        ),
-        "quantity": order_data.get(
-            "quantity",
-            0.1,
-        ),
-        "price": None,
-        "execution_type": "paper",
-        "timestamp": utc_timestamp(),
-    }
+    try:
+        symbol = str(
+            order_data.get(
+                "symbol",
+                "",
+            )
+        ).strip()
 
+        side_value = str(
+            order_data.get(
+                "side",
+                order_data.get(
+                    "direction",
+                    "",
+                ),
+            )
+        ).strip().lower()
+
+        # Support common strategy terminology.
+        if side_value == "long":
+            side_value = "buy"
+
+        elif side_value == "short":
+            side_value = "sell"
+
+        order_type_value = str(
+            order_data.get(
+                "order_type",
+                "market",
+            )
+        ).strip().lower()
+
+        volume_value = order_data.get(
+            "volume",
+            order_data.get(
+                "quantity",
+                0.1,
+            ),
+        )
+
+        price_value = order_data.get(
+            "price"
+        )
+
+        stop_loss_value = order_data.get(
+            "stop_loss"
+        )
+
+        take_profit_value = order_data.get(
+            "take_profit"
+        )
+
+        client_order_id = order_data.get(
+            "client_order_id"
+        )
+
+        order = OrderRequest(
+            symbol=symbol,
+            side=OrderSide(side_value),
+            order_type=OrderType(
+                order_type_value
+            ),
+            volume=float(volume_value),
+            price=(
+                float(price_value)
+                if price_value is not None
+                else None
+            ),
+            stop_loss=(
+                float(stop_loss_value)
+                if stop_loss_value is not None
+                else None
+            ),
+            take_profit=(
+                float(take_profit_value)
+                if take_profit_value is not None
+                else None
+            ),
+            client_order_id=client_order_id,
+        )
+
+        result = await execution_gateway.execute(
+            order
+        )
+
+        return {
+            "order_id": result.order_id,
+            "client_order_id": (
+                result.client_order_id
+            ),
+            "status": result.status.value,
+            "execution_type": (
+                result.execution_type
+            ),
+            "broker": result.broker,
+            "symbol": result.symbol,
+            "side": result.side,
+            "order_type": result.order_type,
+            "volume": result.volume,
+            "quantity": result.volume,
+            "price": result.price,
+            "stop_loss": result.stop_loss,
+            "take_profit": result.take_profit,
+            "timestamp": result.timestamp,
+            "message": result.message,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid order request: {exc}"
+            ),
+        ) from exc
+
+    except ExecutionGatewayError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
 
 # ============================================================
 # STEP 3 - READ-ONLY MT5 POSITIONS
