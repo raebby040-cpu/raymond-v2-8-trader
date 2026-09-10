@@ -1,28 +1,9 @@
-"""
-RAYMOND v2.8 - MetaTrader 5 Connection Service
-
-Step 1A:
-- Connect to MT5
-- Verify the trading account
-- Read terminal/account information
-- Read market ticks
-- Read open positions
-- Provide connection heartbeat
-
-Step 4B:
-- Read broker-provided symbol specifications
-
-IMPORTANT:
-This module does NOT place, modify, or close trades.
-Trade execution will be added later behind the risk/execution gateway.
-"""
-
-from __future__ import annotations
-
 import asyncio
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Optional
+
 
 try:
     import MetaTrader5 as mt5
@@ -31,416 +12,528 @@ except ImportError:
 
 
 class MT5ServiceError(RuntimeError):
-    """Raised when an MT5 operation fails."""
+    """Raised when an MT5 service operation cannot be completed."""
 
 
+@dataclass
 class MT5ConnectionConfig:
-    def __init__(
-        self,
-        login: Optional[int] = None,
-        password: Optional[str] = None,
-        server: Optional[str] = None,
-        terminal_path: Optional[str] = None,
-        timeout_ms: int = 60000,
-        portable: bool = False,
-    ):
-        self.login = login
-        self.password = password
-        self.server = server
-        self.terminal_path = terminal_path
-        self.timeout_ms = timeout_ms
-        self.portable = portable
+    login: Optional[int] = None
+    password: Optional[str] = None
+    server: Optional[str] = None
+    terminal_path: Optional[str] = None
+    timeout_ms: int = 60000
+    portable: bool = False
 
     @classmethod
     def from_env(cls) -> "MT5ConnectionConfig":
-        raw_login = os.getenv("MT5_LOGIN") or os.getenv("MT5_ACCOUNT")
+        login_value = os.getenv("MT5_LOGIN") or os.getenv("MT5_ACCOUNT")
 
         login = None
+        if login_value:
+            login = int(login_value)
 
-        if raw_login:
-            try:
-                login = int(raw_login)
-            except ValueError as exc:
-                raise ValueError(
-                    "MT5_LOGIN must be a numeric account login"
-                ) from exc
+        timeout_ms = int(
+            os.getenv("MT5_TIMEOUT_MS", "60000")
+        )
+
+        portable_value = os.getenv(
+            "MT5_PORTABLE",
+            "false",
+        ).strip().lower()
+
+        portable = portable_value in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         return cls(
             login=login,
             password=os.getenv("MT5_PASSWORD"),
             server=os.getenv("MT5_SERVER"),
             terminal_path=os.getenv("MT5_TERMINAL_PATH"),
-            timeout_ms=int(
-                os.getenv(
-                    "MT5_TIMEOUT_MS",
-                    "60000",
-                )
-            ),
-            portable=(
-                os.getenv(
-                    "MT5_PORTABLE",
-                    "false",
-                ).lower()
-                == "true"
-            ),
+            timeout_ms=timeout_ms,
+            portable=portable,
         )
 
 
 class MT5Service:
-    """
-    Safe wrapper around the MetaTrader5 Python API.
+    """Broker-neutral MT5 connection and market-data service."""
 
-    This service is broker-neutral.
-
-    It can connect to any broker/account that is available
-    through the MetaTrader 5 terminal.
-
-    No order execution is implemented here.
-    """
+    TIMEFRAME_MAP = {
+        "M1": "TIMEFRAME_M1",
+        "M2": "TIMEFRAME_M2",
+        "M3": "TIMEFRAME_M3",
+        "M4": "TIMEFRAME_M4",
+        "M5": "TIMEFRAME_M5",
+        "M6": "TIMEFRAME_M6",
+        "M10": "TIMEFRAME_M10",
+        "M12": "TIMEFRAME_M12",
+        "M15": "TIMEFRAME_M15",
+        "M20": "TIMEFRAME_M20",
+        "M30": "TIMEFRAME_M30",
+        "H1": "TIMEFRAME_H1",
+        "H2": "TIMEFRAME_H2",
+        "H3": "TIMEFRAME_H3",
+        "H4": "TIMEFRAME_H4",
+        "H6": "TIMEFRAME_H6",
+        "H8": "TIMEFRAME_H8",
+        "H12": "TIMEFRAME_H12",
+        "D1": "TIMEFRAME_D1",
+        "W1": "TIMEFRAME_W1",
+        "MN1": "TIMEFRAME_MN1",
+    }
 
     def __init__(
         self,
         config: Optional[MT5ConnectionConfig] = None,
     ):
         self.config = config or MT5ConnectionConfig.from_env()
-
-        self._connected = False
-        self._last_connected_at: Optional[datetime] = None
-
-    @property
-    def connected(self) -> bool:
-        return self._connected
+        self.connected = False
 
     @staticmethod
-    def _timestamp() -> str:
-        return datetime.now(timezone.utc).isoformat()
-
-    def _require_package(self):
-        if mt5 is None:
-            raise MT5ServiceError(
-                "MetaTrader5 package is not installed. "
-                "Install it in the environment where the MT5 "
-                "terminal runs."
-            )
-
-    def _last_error(self) -> str:
-        if mt5 is None:
-            return "MetaTrader5 package unavailable"
-
-        try:
-            return str(mt5.last_error())
-        except Exception:
-            return "Unknown MetaTrader5 error"
-
-    @staticmethod
-    def _to_dict(value: Any) -> Dict[str, Any]:
+    def _to_dict(value: Any) -> dict:
         if value is None:
             return {}
 
         if hasattr(value, "_asdict"):
             return dict(value._asdict())
 
-        if hasattr(value, "__dict__"):
-            return dict(value.__dict__)
-
-        return {"value": value}
-
-    # ---------------------------------------------------------
-    # INITIALIZE
-    # ---------------------------------------------------------
-
-    def _initialize_sync(self) -> Dict[str, Any]:
-        self._require_package()
-
-        kwargs: Dict[str, Any] = {
-            "timeout": self.config.timeout_ms,
-            "portable": self.config.portable,
-        }
-
-        if self.config.login is not None:
-            kwargs["login"] = self.config.login
-
-        if self.config.password:
-            kwargs["password"] = self.config.password
-
-        if self.config.server:
-            kwargs["server"] = self.config.server
-
-        if self.config.terminal_path:
-            initialized = mt5.initialize(
-                self.config.terminal_path,
-                **kwargs,
-            )
-        else:
-            initialized = mt5.initialize(**kwargs)
-
-        if not initialized:
-            self._connected = False
-
-            raise MT5ServiceError(
-                f"MT5 initialization failed: "
-                f"{self._last_error()}"
-            )
-
-        account = mt5.account_info()
-        terminal = mt5.terminal_info()
-
-        if account is None:
-            self._connected = False
-
-            raise MT5ServiceError(
-                f"MT5 account verification failed: "
-                f"{self._last_error()}"
-            )
-
-        self._connected = True
-        self._last_connected_at = datetime.now(timezone.utc)
-
-        return {
-            "connected": True,
-            "timestamp": self._timestamp(),
-            "account": self._to_dict(account),
-            "terminal": self._to_dict(terminal),
-        }
-
-    async def initialize(self) -> Dict[str, Any]:
-        """
-        Connect to MT5 and verify that an account is available.
-        """
-
-        return await asyncio.to_thread(
-            self._initialize_sync
-        )
-
-    # ---------------------------------------------------------
-    # SHUTDOWN
-    # ---------------------------------------------------------
-
-    def _shutdown_sync(self) -> bool:
-        if mt5 is None:
-            self._connected = False
-            return True
+        if isinstance(value, dict):
+            return dict(value)
 
         try:
-            mt5.shutdown()
-        finally:
-            self._connected = False
+            return dict(value)
+        except (TypeError, ValueError):
+            return {}
 
+    async def initialize(self) -> bool:
+        if mt5 is None:
+            raise MT5ServiceError(
+                "MetaTrader5 package is not installed."
+            )
+
+        def _initialize() -> bool:
+            kwargs = {
+                "timeout": self.config.timeout_ms,
+                "portable": self.config.portable,
+            }
+
+            if self.config.login is not None:
+                kwargs["login"] = self.config.login
+
+            if self.config.password is not None:
+                kwargs["password"] = self.config.password
+
+            if self.config.server is not None:
+                kwargs["server"] = self.config.server
+
+            if self.config.terminal_path:
+                return bool(
+                    mt5.initialize(
+                        self.config.terminal_path,
+                        **kwargs,
+                    )
+                )
+
+            return bool(
+                mt5.initialize(**kwargs)
+            )
+
+        result = await asyncio.to_thread(_initialize)
+
+        if not result:
+            error = mt5.last_error()
+            raise MT5ServiceError(
+                f"MT5 initialization failed: {error}"
+            )
+
+        self.connected = True
         return True
 
     async def shutdown(self) -> bool:
-        """
-        Disconnect from MT5.
-        """
+        if mt5 is None:
+            self.connected = False
+            return True
 
-        return await asyncio.to_thread(
-            self._shutdown_sync
+        await asyncio.to_thread(mt5.shutdown)
+        self.connected = False
+        return True
+
+    async def get_account_info(self) -> dict:
+        if mt5 is None:
+            raise MT5ServiceError(
+                "MetaTrader5 package is not installed."
+            )
+
+        if not self.connected:
+            raise MT5ServiceError(
+                "MT5 is not connected."
+            )
+
+        info = await asyncio.to_thread(
+            mt5.account_info
         )
 
-    # ---------------------------------------------------------
-    # ACCOUNT
-    # ---------------------------------------------------------
-
-    def _account_info_sync(self) -> Dict[str, Any]:
-        self._require_package()
-
-        account = mt5.account_info()
-
-        if account is None:
-            self._connected = False
-
+        if info is None:
             raise MT5ServiceError(
-                f"MT5 account_info failed: "
-                f"{self._last_error()}"
+                f"Unable to read MT5 account info: "
+                f"{mt5.last_error()}"
             )
 
-        return self._to_dict(account)
+        return self._to_dict(info)
 
-    async def get_account_info(self) -> Dict[str, Any]:
-        """
-        Return current MT5 account information.
-        """
+    async def get_terminal_info(self) -> dict:
+        if mt5 is None:
+            raise MT5ServiceError(
+                "MetaTrader5 package is not installed."
+            )
 
-        return await asyncio.to_thread(
-            self._account_info_sync
+        if not self.connected:
+            raise MT5ServiceError(
+                "MT5 is not connected."
+            )
+
+        info = await asyncio.to_thread(
+            mt5.terminal_info
         )
 
-    # ---------------------------------------------------------
-    # TERMINAL
-    # ---------------------------------------------------------
-
-    def _terminal_info_sync(self) -> Dict[str, Any]:
-        self._require_package()
-
-        terminal = mt5.terminal_info()
-
-        if terminal is None:
+        if info is None:
             raise MT5ServiceError(
-                f"MT5 terminal_info failed: "
-                f"{self._last_error()}"
+                f"Unable to read MT5 terminal info: "
+                f"{mt5.last_error()}"
             )
 
-        return self._to_dict(terminal)
-
-    async def get_terminal_info(self) -> Dict[str, Any]:
-        """
-        Return MT5 terminal status.
-        """
-
-        return await asyncio.to_thread(
-            self._terminal_info_sync
-        )
-
-    # ---------------------------------------------------------
-    # MARKET TICK
-    # ---------------------------------------------------------
-
-    def _tick_sync(
-        self,
-        symbol: str,
-    ) -> Dict[str, Any]:
-        self._require_package()
-
-        symbol = symbol.upper()
-
-        if not mt5.symbol_select(symbol, True):
-            raise MT5ServiceError(
-                f"Unable to select symbol {symbol}: "
-                f"{self._last_error()}"
-            )
-
-        tick = mt5.symbol_info_tick(symbol)
-
-        if tick is None:
-            raise MT5ServiceError(
-                f"Unable to read tick for {symbol}: "
-                f"{self._last_error()}"
-            )
-
-        return self._to_dict(tick)
+        return self._to_dict(info)
 
     async def get_symbol_tick(
         self,
         symbol: str,
-    ) -> Dict[str, Any]:
-        """
-        Return the current bid/ask tick.
-        """
+    ) -> dict:
+        if mt5 is None:
+            raise MT5ServiceError(
+                "MetaTrader5 package is not installed."
+            )
+
+        if not self.connected:
+            raise MT5ServiceError(
+                "MT5 is not connected."
+            )
 
         if not symbol:
-            raise ValueError("symbol is required")
+            raise MT5ServiceError(
+                "Symbol is required."
+            )
 
-        return await asyncio.to_thread(
-            self._tick_sync,
-            symbol,
+        def _get_tick():
+            if not mt5.symbol_select(
+                symbol,
+                True,
+            ):
+                return None
+
+            return mt5.symbol_info_tick(
+                symbol
+            )
+
+        tick = await asyncio.to_thread(
+            _get_tick
         )
 
-    # ---------------------------------------------------------
-    # OPEN POSITIONS
-    # ---------------------------------------------------------
+        if tick is None:
+            raise MT5ServiceError(
+                f"Unable to read tick for {symbol}: "
+                f"{mt5.last_error()}"
+            )
 
-    def _positions_sync(
+        return self._to_dict(tick)
+
+    async def get_positions(
         self,
         symbol: Optional[str] = None,
-    ) -> list[Dict[str, Any]]:
-
-        self._require_package()
-
-        if symbol:
-            positions = mt5.positions_get(
-                symbol=symbol.upper()
+    ) -> list[dict]:
+        if mt5 is None:
+            raise MT5ServiceError(
+                "MetaTrader5 package is not installed."
             )
-        else:
-            positions = mt5.positions_get()
+
+        if not self.connected:
+            raise MT5ServiceError(
+                "MT5 is not connected."
+            )
+
+        def _get_positions():
+            if symbol:
+                return mt5.positions_get(
+                    symbol=symbol
+                )
+
+            return mt5.positions_get()
+
+        positions = await asyncio.to_thread(
+            _get_positions
+        )
 
         if positions is None:
-            raise MT5ServiceError(
-                f"MT5 positions_get failed: "
-                f"{self._last_error()}"
-            )
+            error = mt5.last_error()
+
+            if error and error[0] != 1:
+                raise MT5ServiceError(
+                    f"Unable to read MT5 positions: "
+                    f"{error}"
+                )
+
+            return []
 
         return [
             self._to_dict(position)
             for position in positions
         ]
 
-    async def get_positions(
+    async def get_symbols(
         self,
-        symbol: Optional[str] = None,
-    ) -> list[Dict[str, Any]]:
+        query: Optional[str] = None,
+    ) -> list[dict]:
+        if mt5 is None:
+            raise MT5ServiceError(
+                "MetaTrader5 package is not installed."
+            )
 
-        """
-        Read open MT5 positions.
+        if not self.connected:
+            raise MT5ServiceError(
+                "MT5 is not connected."
+            )
 
-        This method does not modify positions.
-        """
-
-        return await asyncio.to_thread(
-            self._positions_sync,
-            symbol,
+        symbols = await asyncio.to_thread(
+            mt5.symbols_get
         )
 
-    # ---------------------------------------------------------
-    # SYMBOL SPECIFICATION
-    # ---------------------------------------------------------
+        if symbols is None:
+            raise MT5ServiceError(
+                f"Unable to read MT5 symbols: "
+                f"{mt5.last_error()}"
+            )
 
-    def _symbol_specification_sync(
+        result = []
+
+        for symbol_info in symbols:
+            data = self._to_dict(
+                symbol_info
+            )
+
+            name = str(
+                data.get("name", "")
+            )
+
+            if query and query.lower() not in name.lower():
+                continue
+
+            result.append(
+                {
+                    "name": name,
+                    "description": data.get(
+                        "description"
+                    ),
+                    "path": data.get("path"),
+                    "visible": data.get(
+                        "visible"
+                    ),
+                    "selected": data.get(
+                        "select"
+                    ),
+                    "currency_base": data.get(
+                        "currency_base"
+                    ),
+                    "currency_profit": data.get(
+                        "currency_profit"
+                    ),
+                    "currency_margin": data.get(
+                        "currency_margin"
+                    ),
+                }
+            )
+
+        return result
+
+    async def find_gold_symbols(self) -> list[dict]:
+        symbols = await self.get_symbols()
+
+        scored = []
+
+        for item in symbols:
+            name = str(
+                item.get("name", "")
+            ).upper()
+
+            score = 0
+
+            if name == "XAUUSD":
+                score = 100
+            elif "XAUUSD" in name:
+                score = 90
+            elif name == "XAU":
+                score = 80
+            elif "XAU" in name:
+                score = 70
+            elif "GOLD" in name:
+                score = 60
+
+            if score > 0:
+                enriched = dict(item)
+                enriched["match_score"] = score
+                scored.append(enriched)
+
+        scored.sort(
+            key=lambda item: (
+                -item["match_score"],
+                item["name"],
+            )
+        )
+
+        return scored
+
+    async def get_candles(
         self,
         symbol: str,
-    ) -> Dict[str, Any]:
-        self._require_package()
-
-        symbol = symbol.upper()
-
-        if not mt5.symbol_select(
-            symbol,
-            True,
-        ):
+        timeframe: str = "M1",
+        limit: int = 100,
+    ) -> list[dict]:
+        if mt5 is None:
             raise MT5ServiceError(
-                f"Unable to select symbol {symbol}: "
-                f"{self._last_error()}"
+                "MetaTrader5 package is not installed."
             )
 
-        info = mt5.symbol_info(symbol)
-
-        if info is None:
+        if not self.connected:
             raise MT5ServiceError(
-                f"Unable to retrieve symbol info "
-                f"for {symbol}: "
-                f"{self._last_error()}"
+                "MT5 is not connected."
             )
 
-        return self._to_dict(info)
+        if not symbol:
+            raise MT5ServiceError(
+                "Symbol is required."
+            )
+
+        if timeframe not in self.TIMEFRAME_MAP:
+            raise MT5ServiceError(
+                f"Unsupported timeframe: {timeframe}"
+            )
+
+        if limit < 1:
+            raise MT5ServiceError(
+                "Limit must be greater than zero."
+            )
+
+        timeframe_name = self.TIMEFRAME_MAP[
+            timeframe
+        ]
+
+        mt5_timeframe = getattr(
+            mt5,
+            timeframe_name,
+            None,
+        )
+
+        if mt5_timeframe is None:
+            raise MT5ServiceError(
+                f"MT5 does not support timeframe "
+                f"{timeframe}"
+            )
+
+        def _get_rates():
+            if not mt5.symbol_select(
+                symbol,
+                True,
+            ):
+                return None
+
+            return mt5.copy_rates_from_pos(
+                symbol,
+                mt5_timeframe,
+                0,
+                limit,
+            )
+
+        rates = await asyncio.to_thread(
+            _get_rates
+        )
+
+        if rates is None:
+            raise MT5ServiceError(
+                f"Unable to read candles for "
+                f"{symbol}: {mt5.last_error()}"
+            )
+
+        candles = []
+
+        for row in rates:
+            candles.append(
+                {
+                    "time": int(row["time"]),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "tick_volume": int(
+                        row["tick_volume"]
+                    ),
+                    "spread": int(
+                        row["spread"]
+                    ),
+                    "volume_real": float(
+                        row["real_volume"]
+                    ),
+                }
+            )
+
+        return candles
 
     async def get_symbol_specification(
         self,
         symbol: str,
-    ) -> Dict[str, Any]:
-        """
-        Return broker-provided trading specifications
-        for a symbol.
-
-        This is READ-ONLY.
-
-        No order is placed.
-        No order is modified.
-        No position is closed.
-        """
-
-        if not symbol:
-            raise ValueError(
-                "symbol is required"
+    ) -> dict:
+        if mt5 is None:
+            raise MT5ServiceError(
+                "MetaTrader5 package is not installed."
             )
 
-        data = await asyncio.to_thread(
-            self._symbol_specification_sync,
-            symbol,
+        if not self.connected:
+            raise MT5ServiceError(
+                "MT5 is not connected."
+            )
+
+        if not symbol:
+            raise MT5ServiceError(
+                "Symbol is required."
+            )
+
+        def _get_specification():
+            if not mt5.symbol_select(
+                symbol,
+                True,
+            ):
+                return None
+
+            return mt5.symbol_info(
+                symbol
+            )
+
+        info = await asyncio.to_thread(
+            _get_specification
         )
+
+        if info is None:
+            raise MT5ServiceError(
+                f"Unable to read symbol specification "
+                f"for {symbol}: {mt5.last_error()}"
+            )
+
+        data = self._to_dict(info)
 
         return {
             "symbol": data.get(
                 "name",
-                symbol.upper(),
+                symbol,
             ),
             "digits": data.get(
                 "digits"
@@ -504,70 +597,54 @@ class MT5Service:
             ),
         }
 
-    # ---------------------------------------------------------
-    # HEARTBEAT
-    # ---------------------------------------------------------
+    async def heartbeat(self) -> dict:
+        timestamp = datetime.now(
+            timezone.utc
+        ).isoformat()
 
-    def _heartbeat_sync(self) -> Dict[str, Any]:
-        self._require_package()
-
-        terminal = mt5.terminal_info()
-        account = mt5.account_info()
-
-        connected = (
-            terminal is not None
-            and account is not None
-        )
-
-        self._connected = connected
-
-        return {
-            "connected": connected,
-            "timestamp": self._timestamp(),
-            "last_error": (
-                None
-                if connected
-                else self._last_error()
-            ),
-            "account_login": (
-                getattr(
-                    account,
-                    "login",
-                    None,
-                )
-            ),
-            "server": (
-                getattr(
-                    account,
-                    "server",
-                    None,
-                )
-            ),
-            "trade_allowed": (
-                getattr(
-                    terminal,
-                    "trade_allowed",
-                    None,
-                )
-            ),
-            "tradeapi_disabled": (
-                getattr(
-                    terminal,
-                    "tradeapi_disabled",
-                    None,
-                )
-            ),
+        result = {
+            "connected": self.connected,
+            "timestamp": timestamp,
         }
 
-    async def heartbeat(self) -> Dict[str, Any]:
-        """
-        Check whether MT5 and the account are reachable.
-        """
+        if mt5 is None:
+            result["last_error"] = (
+                "MetaTrader5 package is not installed."
+            )
+            return result
 
-        return await asyncio.to_thread(
-            self._heartbeat_sync
-        )
+        if not self.connected:
+            result["last_error"] = (
+                "MT5 is not connected."
+            )
+            return result
+
+        try:
+            account = await self.get_account_info()
+            terminal = await self.get_terminal_info()
+
+            result.update(
+                {
+                    "last_error": mt5.last_error(),
+                    "account_login": account.get(
+                        "login"
+                    ),
+                    "server": account.get(
+                        "server"
+                    ),
+                    "trade_allowed": account.get(
+                        "trade_allowed"
+                    ),
+                    "tradeapi_disabled": terminal.get(
+                        "tradeapi_disabled"
+                    ),
+                }
+            )
+
+        except MT5ServiceError as exc:
+            result["last_error"] = str(exc)
+
+        return result
 
 
-# One service instance for the FastAPI application.
 mt5_service = MT5Service()
