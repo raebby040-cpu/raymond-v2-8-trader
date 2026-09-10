@@ -45,7 +45,7 @@ class PipelineResult:
     volume: float
     recommendation: Dict[str, Any]
     risk_decision: RiskDecision
-
+    execution_result: Optional[Any] = None
 
 class AIRiskPipeline:
     """
@@ -234,5 +234,14 @@ class AIRiskPipeline:
                 else None
             ),
         )
+               execution_result = await self.execution_gateway.execute(order)
 
-        return await self.execution_gateway.execute(order)
+        return PipelineResult(
+            allowed=result.allowed,
+            action=result.action,
+            reason=result.reason,
+            volume=result.volume,
+            recommendation=result.recommendation,
+            risk_decision=result.risk_decision,
+            execution_result=execution_result,
+        ) 
