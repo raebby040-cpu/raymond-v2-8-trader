@@ -43,7 +43,7 @@ async def test_dashboard_websocket_streams_read_only_state(
     websocket = FakeWebSocket()
     manager = FakeDashboardManager()
 
-    async def fake_provider():
+    async def fake_provider(**kwargs):
         return {
             "market": {
                 "symbol": "XAUUSD",
@@ -108,7 +108,7 @@ async def test_dashboard_websocket_preserves_safety_state(
     websocket = FakeWebSocket()
     manager = FakeDashboardManager()
 
-    async def fake_provider():
+    async def fake_provider(**kwargs):
         return {
             "market": None,
             "account": None,
@@ -165,7 +165,7 @@ async def test_dashboard_websocket_never_enables_live_trading(
     websocket = FakeWebSocket()
     manager = FakeDashboardManager()
 
-    async def fake_provider():
+    async def fake_provider(**kwargs):
         return {
             "market": None,
             "account": None,
@@ -210,7 +210,7 @@ async def test_dashboard_websocket_disconnects_safely(
     websocket = FakeWebSocket()
     manager = FakeDashboardManager()
 
-    async def fake_provider():
+    async def fake_provider(**kwargs):
         return {
             "market": None,
             "account": None,
