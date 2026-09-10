@@ -56,22 +56,21 @@ except ImportError:
         OrderSide,
         OrderType,
         create_execution_gateway,
-    )
+    safety_manager = EmergencyStopManager()
 
+dashboard_ws_manager = DashboardWebSocketManager(
+    heartbeat_interval_seconds=5.0
+)
+    )
 try:
-    from .dashboard_provider import 
-    build_dashboard_state
-    from .emergency_stop import 
-    EmergencyStopManager
-    from .websocket_handler import 
-    DashboardWebSocketManager
+    from .dashboard_provider import build_dashboard_state
+    from .emergency_stop import EmergencyStopManager
+    from .websocket_handler import DashboardWebSocketManager
 except ImportError:
-    from dashboard_provider import 
-    build_dashboard_state
-    from emergency_stop import 
-    EmergencyStopManager
-    from websocket_handler import 
-    DashboardWebSocketManager
+    from dashboard_provider import build_dashboard_state
+    from emergency_stop import EmergencyStopManager
+    from websocket_handler import DashboardWebSocketManager
+
     
 # ============================================================
 # LOGGING
