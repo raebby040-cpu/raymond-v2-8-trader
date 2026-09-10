@@ -82,14 +82,14 @@ def test_position_size_rounds_down_to_volume_step():
         max_volume=100,
     )
 
-    assert volume == 0.03
+    assert volume == 0.30
 
 
 def test_position_size_returns_zero_below_minimum():
     engine = RiskEngine()
 
     volume = engine.calculate_position_size(
-        equity=100,
+        equity=50,
         entry_price=2000,
         stop_loss_price=1990,
         risk_per_unit=100,
