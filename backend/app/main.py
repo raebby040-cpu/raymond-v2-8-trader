@@ -56,7 +56,8 @@ try:
 except ImportError:
     from dashboard_provider import build_dashboard_state
     from emergency_stop import EmergencyStopManager
-    from websocket_handler import DashboardWebSocketManagerexcept ImportError:
+    from websocket_handler import DashboardWebSocketManager
+except ImportError:
     from execution_gateway import (
         ExecutionGatewayError,
         OrderRequest,
