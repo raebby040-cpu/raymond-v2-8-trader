@@ -86,6 +86,15 @@ except ImportError:
     from emergency_stop import EmergencyStopManager
     from websocket_handler import DashboardWebSocketManager
 
+# ============================================================
+# STEP 10A - DEMO TRADING API
+# ============================================================
+
+try:
+    from .demo_api import router as demo_trading_router
+except ImportError:
+    from demo_api import router as demo_trading_router
+
 
 # ============================================================
 # LOGGING
@@ -119,6 +128,16 @@ app = FastAPI(
         "paper trading and AI decision support."
     ),
     version="2.8.0",
+)
+
+# ============================================================
+# STEP 10A - DEMO TRADING ROUTER
+# ============================================================
+
+app.include_router(
+    demo_trading_router,
+    prefix="/api/demo",
+    tags=["Demo Trading"],
 )
 
 
@@ -381,6 +400,7 @@ async def root():
                 "/api/market/symbol-specification"
             ),
             "trading": "/api/trading",
+            "demo_trading": "/api/demo",
             "strategy": "/api/strategy",
             "admin": "/api/admin",
             "websocket": "/ws/dashboard",
