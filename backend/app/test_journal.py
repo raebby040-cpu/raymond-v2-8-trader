@@ -14,10 +14,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.demo_trading import (
-    DemoTradingEngine,
-    DemoTradingError,
-)
+from app.demo_trading import DemoTradingEngine
 from app.journal import (
     TradeJournal,
     TradeJournalError,
@@ -57,7 +54,7 @@ def demo_engine():
 
     return DemoTradingEngine(
         initial_balance=10_000.0,
-        max_open_trades=3,
+        max_open_trades=5,
         max_daily_loss=300.0,
     )
 
