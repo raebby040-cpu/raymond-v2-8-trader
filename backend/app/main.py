@@ -858,7 +858,7 @@ async def place_order(
         safety_manager.require_trade_permission
         ()
         
-        result = await 
+                result = await 
         execution_gateway.execute(order)
 
         return {
