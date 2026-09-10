@@ -22,7 +22,7 @@ import logging
 import os
 from typing import Optional
 
-from from fastapi import FastAPI, HTTPException, Query, WebSocket
+from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -59,13 +59,19 @@ except ImportError:
     )
 
 try:
-    from .dashboard_provider import build_dashboard_state
-    from .emergency_stop import EmergencyStopManager
-    from .websocket_handler import DashboardWebSocketManager
+    from .dashboard_provider import 
+    build_dashboard_state
+    from .emergency_stop import 
+    EmergencyStopManager
+    from .websocket_handler import 
+    DashboardWebSocketManager
 except ImportError:
-    from dashboard_provider import build_dashboard_state
-    from emergency_stop import EmergencyStopManager
-    from websocket_handler import DashboardWebSocketManager
+    from dashboard_provider import 
+    build_dashboard_state
+    from emergency_stop import 
+    EmergencyStopManager
+    from websocket_handler import 
+    DashboardWebSocketManager
     
 # ============================================================
 # LOGGING
