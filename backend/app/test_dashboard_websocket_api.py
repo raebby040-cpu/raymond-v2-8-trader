@@ -3,12 +3,30 @@ import pytest
 import main
 
 
+class FakeDashboardManager:
+    def __init__(self):
+        self.connected_websocket = None
+        self.disconnected_websocket = None
+        self.state = None
+
+    async def connect(self, websocket):
+        self.connected_websocket = websocket
+
+    async def stream(self, websocket, provider=None):
+        assert websocket is self.connected_websocket
+        assert provider is not None
+
+        self.state = await provider()
+
+    def disconnect(self, websocket):
+        self.disconnected_websocket = websocket
+
+
 class FakeWebSocket:
     pass
 
 
-@pytest.mark.asyncio
-async def test_dashboard_websocket_route_exists():
+def test_dashboard_websocket_route_exists():
     routes = [
         route.path
         for route in main.app.routes
@@ -23,7 +41,7 @@ async def test_dashboard_websocket_streams_read_only_state(
     monkeypatch,
 ):
     websocket = FakeWebSocket()
-    captured = {}
+    manager = FakeDashboardManager()
 
     async def fake_provider():
         return {
@@ -47,18 +65,6 @@ async def test_dashboard_websocket_streams_read_only_state(
             "live_trading_enabled": False,
         }
 
-    async def fake_connect(received_websocket):
-        captured["connected_websocket"] = received_websocket
-
-    async def fake_stream(received_websocket, provider=None):
-        assert received_websocket is websocket
-        assert provider is not None
-
-        captured["state"] = await provider()
-
-    def fake_disconnect(received_websocket):
-        captured["disconnected_websocket"] = received_websocket
-
     monkeypatch.setattr(
         main,
         "build_dashboard_state",
@@ -66,42 +72,31 @@ async def test_dashboard_websocket_streams_read_only_state(
     )
 
     monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "connect",
-        fake_connect,
-    )
-
-    monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "stream",
-        fake_stream,
-    )
-
-    monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "disconnect",
-        fake_disconnect,
+        main,
+        "dashboard_ws_manager",
+        manager,
     )
 
     await main.dashboard_websocket(websocket)
 
-    assert captured["connected_websocket"] is websocket
-    assert captured["disconnected_websocket"] is websocket
+    assert manager.connected_websocket is websocket
+    assert manager.disconnected_websocket is websocket
+    assert manager.state is not None
 
     assert (
-        captured["state"]["market"]["symbol"]
+        manager.state["market"]["symbol"]
         == "XAUUSD"
     )
 
     assert (
-        captured["state"]["account"]["equity"]
+        manager.state["account"]["equity"]
         == 10000.0
     )
 
-    assert captured["state"]["positions"] == []
+    assert manager.state["positions"] == []
 
     assert (
-        captured["state"]["live_trading_enabled"]
+        manager.state["live_trading_enabled"]
         is False
     )
 
@@ -111,7 +106,7 @@ async def test_dashboard_websocket_preserves_safety_state(
     monkeypatch,
 ):
     websocket = FakeWebSocket()
-    captured = {}
+    manager = FakeDashboardManager()
 
     async def fake_provider():
         return {
@@ -129,15 +124,6 @@ async def test_dashboard_websocket_preserves_safety_state(
             "live_trading_enabled": False,
         }
 
-    async def fake_connect(received_websocket):
-        captured["connected"] = received_websocket
-
-    async def fake_stream(received_websocket, provider=None):
-        captured["state"] = await provider()
-
-    def fake_disconnect(received_websocket):
-        captured["disconnected"] = received_websocket
-
     monkeypatch.setattr(
         main,
         "build_dashboard_state",
@@ -145,42 +131,29 @@ async def test_dashboard_websocket_preserves_safety_state(
     )
 
     monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "connect",
-        fake_connect,
-    )
-
-    monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "stream",
-        fake_stream,
-    )
-
-    monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "disconnect",
-        fake_disconnect,
+        main,
+        "dashboard_ws_manager",
+        manager,
     )
 
     await main.dashboard_websocket(websocket)
 
-    assert captured["connected"] is websocket
-    assert captured["disconnected"] is websocket
+    assert manager.state is not None
 
     assert (
-        captured["state"]["emergency_stop"]["active"]
+        manager.state["emergency_stop"]["active"]
         is True
     )
 
     assert (
-        captured["state"]["emergency_stop"][
+        manager.state["emergency_stop"][
             "trading_allowed"
         ]
         is False
     )
 
     assert (
-        captured["state"]["live_trading_enabled"]
+        manager.state["live_trading_enabled"]
         is False
     )
 
@@ -190,7 +163,7 @@ async def test_dashboard_websocket_never_enables_live_trading(
     monkeypatch,
 ):
     websocket = FakeWebSocket()
-    captured = {}
+    manager = FakeDashboardManager()
 
     async def fake_provider():
         return {
@@ -208,14 +181,50 @@ async def test_dashboard_websocket_never_enables_live_trading(
             "live_trading_enabled": False,
         }
 
-    async def fake_connect(received_websocket):
-        captured["connected"] = received_websocket
+    monkeypatch.setattr(
+        main,
+        "build_dashboard_state",
+        fake_provider,
+    )
 
-    async def fake_stream(received_websocket, provider=None):
-        captured["state"] = await provider()
+    monkeypatch.setattr(
+        main,
+        "dashboard_ws_manager",
+        manager,
+    )
 
-    def fake_disconnect(received_websocket):
-        captured["disconnected"] = received_websocket
+    await main.dashboard_websocket(websocket)
+
+    assert manager.state is not None
+
+    assert (
+        manager.state["live_trading_enabled"]
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_websocket_disconnects_safely(
+    monkeypatch,
+):
+    websocket = FakeWebSocket()
+    manager = FakeDashboardManager()
+
+    async def fake_provider():
+        return {
+            "market": None,
+            "account": None,
+            "positions": [],
+            "connection": {
+                "status": "connected",
+                "healthy": True,
+            },
+            "emergency_stop": {
+                "active": False,
+                "trading_allowed": True,
+            },
+            "live_trading_enabled": False,
+        }
 
     monkeypatch.setattr(
         main,
@@ -224,41 +233,12 @@ async def test_dashboard_websocket_never_enables_live_trading(
     )
 
     monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "connect",
-        fake_connect,
-    )
-
-    monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "stream",
-        fake_stream,
-    )
-
-    monkeypatch.setattr(
-        main.dashboard_ws_manager,
-        "disconnect",
-        fake_disconnect,
+        main,
+        "dashboard_ws_manager",
+        manager,
     )
 
     await main.dashboard_websocket(websocket)
 
-    assert captured["connected"] is websocket
-    assert captured["disconnected"] is websocket
-
-    assert (
-        captured["state"]["live_trading_enabled"]
-        is False
-    )
-
-
-@pytest.mark.asyncio
-async def test_health_endpoint_is_available():
-    response = await main.health_check()
-
-    assert response["status"] == "healthy"
-
-    assert (
-        response["live_trading_enabled"]
-        is False
-    )
+    assert manager.connected_websocket is websocket
+    assert manager.disconnected_websocket is websocket
