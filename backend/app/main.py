@@ -22,7 +22,7 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
