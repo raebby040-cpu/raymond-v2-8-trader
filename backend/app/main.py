@@ -1,7 +1,7 @@
 """
 RAYMOND v2.8 Backend - FastAPI Application
 
-Step 4B:
+Step 9A:
 - Broker-neutral MT5 connection
 - Real MT5 market tick data
 - Broker-specific symbol discovery
@@ -11,10 +11,13 @@ Step 4B:
 - Broker-aware symbol specifications
 - Risk-engine-ready market data
 - Paper trading only
+- Emergency-stop safety manager
+- Dashboard WebSocket streaming
 
 IMPORTANT:
 Real order execution is NOT implemented.
 No endpoint places, modifies, or closes a real trade.
+Live trading remains disabled by default.
 """
 
 from datetime import datetime, timezone
@@ -22,10 +25,15 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+
+# ============================================================
+# MT5 SERVICE
+# ============================================================
 
 try:
     from .mt5_service import (
@@ -41,6 +49,12 @@ except ImportError:
         MT5ServiceError,
         mt5_service,
     )
+
+
+# ============================================================
+# EXECUTION GATEWAY
+# ============================================================
+
 try:
     from .execution_gateway import (
         ExecutionGatewayError,
@@ -58,13 +72,41 @@ except ImportError:
         create_execution_gateway,
     )
 
+
+# ============================================================
+# STEP 9A - DASHBOARD / SAFETY
+# ============================================================
+
+try:
+    from .dashboard_provider import build_dashboard_state
+    from .emergency_stop import EmergencyStopManager
+    from .websocket_handler import DashboardWebSocketManager
+except ImportError:
+    from dashboard_provider import build_dashboard_state
+    from emergency_stop import EmergencyStopManager
+    from websocket_handler import DashboardWebSocketManager
+
+
 # ============================================================
 # LOGGING
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# SERVICES
+# ============================================================
+
 execution_gateway = create_execution_gateway()
+
+safety_manager = EmergencyStopManager()
+
+dashboard_ws_manager = DashboardWebSocketManager(
+    heartbeat_interval_seconds=5.0
+)
+
 
 # ============================================================
 # APPLICATION
@@ -193,44 +235,20 @@ def safe_position_response(
     return {
         "ticket": position.get("ticket"),
         "time": position.get("time"),
-        "time_update": position.get(
-            "time_update"
-        ),
-        "symbol": position.get(
-            "symbol"
-        ),
+        "time_update": position.get("time_update"),
+        "symbol": position.get("symbol"),
         "type": position_type,
         "type_name": type_name,
-        "volume": position.get(
-            "volume"
-        ),
-        "price_open": position.get(
-            "price_open"
-        ),
-        "price_current": position.get(
-            "price_current"
-        ),
-        "price_stop_loss": position.get(
-            "sl"
-        ),
-        "price_take_profit": position.get(
-            "tp"
-        ),
-        "profit": position.get(
-            "profit"
-        ),
-        "swap": position.get(
-            "swap"
-        ),
-        "commission": position.get(
-            "commission"
-        ),
-        "magic": position.get(
-            "magic"
-        ),
-        "comment": position.get(
-            "comment"
-        ),
+        "volume": position.get("volume"),
+        "price_open": position.get("price_open"),
+        "price_current": position.get("price_current"),
+        "price_stop_loss": position.get("sl"),
+        "price_take_profit": position.get("tp"),
+        "profit": position.get("profit"),
+        "swap": position.get("swap"),
+        "commission": position.get("commission"),
+        "magic": position.get("magic"),
+        "comment": position.get("comment"),
     }
 
 
@@ -281,9 +299,7 @@ def mt5_error_response(
     return HTTPException(
         status_code=503,
         detail={
-            "error": (
-                "MT5 connection/service unavailable"
-            ),
+            "error": "MT5 connection/service unavailable",
             "message": str(exc),
             "timestamp": utc_timestamp(),
         },
@@ -331,9 +347,7 @@ async def health_check():
         "status": "healthy",
         "timestamp": utc_timestamp(),
         "version": "2.8.0",
-        "live_trading_enabled": (
-            live_trading_enabled()
-        ),
+        "live_trading_enabled": live_trading_enabled(),
     }
 
 
@@ -350,12 +364,8 @@ async def root():
             "and paper trading system"
         ),
         "version": "2.8.0",
-        "broker_support": (
-            "MT5-compatible brokers"
-        ),
-        "live_trading_enabled": (
-            live_trading_enabled()
-        ),
+        "broker_support": "MT5-compatible brokers",
+        "live_trading_enabled": live_trading_enabled(),
         "endpoints": {
             "health": "/health",
             "mt5_connect": "/api/mt5/connect",
@@ -364,21 +374,16 @@ async def root():
             "mt5_account": "/api/mt5/account",
             "mt5_terminal": "/api/mt5/terminal",
             "market_price": "/api/market/price",
-            "market_candles": (
-                "/api/market/candlesticks"
-            ),
-            "market_symbols": (
-                "/api/market/symbols"
-            ),
-            "market_gold": (
-                "/api/market/gold-symbols"
-            ),
+            "market_candles": "/api/market/candlesticks",
+            "market_symbols": "/api/market/symbols",
+            "market_gold": "/api/market/gold-symbols",
             "market_symbol_specification": (
                 "/api/market/symbol-specification"
             ),
             "trading": "/api/trading",
             "strategy": "/api/strategy",
             "admin": "/api/admin",
+            "websocket": "/ws/dashboard",
             "docs": "/docs",
         },
     }
@@ -406,8 +411,6 @@ async def connect_mt5(
     new_service = MT5Service(config)
 
     try:
-        # initialize() returns a boolean.
-        # It does not return account/terminal dictionaries.
         initialized = await new_service.initialize()
 
         if not initialized:
@@ -415,18 +418,9 @@ async def connect_mt5(
                 "MT5 initialization returned false."
             )
 
-        # Read account and terminal information
-        # only after successful initialization.
-        account = (
-            await new_service.get_account_info()
-        )
+        account = await new_service.get_account_info()
+        terminal = await new_service.get_terminal_info()
 
-        terminal = (
-            await new_service.get_terminal_info()
-        )
-
-        # Replace the global service only after
-        # successful initialization and validation.
         mt5_service = new_service
 
         logger.info(
@@ -438,21 +432,11 @@ async def connect_mt5(
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "broker": account.get(
-                "company"
-            ),
-            "server": account.get(
-                "server"
-            ),
-            "account": safe_account_response(
-                account
-            ),
-            "terminal": safe_terminal_response(
-                terminal
-            ),
-            "live_trading_enabled": (
-                live_trading_enabled()
-            ),
+            "broker": account.get("company"),
+            "server": account.get("server"),
+            "account": safe_account_response(account),
+            "terminal": safe_terminal_response(terminal),
+            "live_trading_enabled": live_trading_enabled(),
         }
 
     except MT5ServiceError as exc:
@@ -467,6 +451,8 @@ async def connect_mt5(
 async def disconnect_mt5():
     try:
         await mt5_service.shutdown()
+
+        safety_manager.mark_connection_lost()
 
         return {
             "status": "disconnected",
@@ -485,6 +471,13 @@ async def disconnect_mt5():
 async def get_mt5_status():
     try:
         status = await mt5_service.heartbeat()
+
+        if status.get("connected"):
+            safety_manager.record_heartbeat()
+        else:
+            safety_manager.mark_connection_lost()
+
+        safety_status = safety_manager.status()
 
         return {
             "status": (
@@ -515,28 +508,35 @@ async def get_mt5_status():
             "last_error": status.get(
                 "last_error"
             ),
-            "live_trading_enabled": (
-                live_trading_enabled()
-            ),
+            "live_trading_enabled": live_trading_enabled(),
+            "safety": {
+                "trading_allowed": (
+                    safety_status.trading_allowed
+                ),
+                "emergency_stop_active": (
+                    safety_status.emergency_stop_active
+                ),
+                "connection_healthy": (
+                    safety_status.connection_healthy
+                ),
+                "reason": safety_status.reason,
+            },
         }
 
     except MT5ServiceError as exc:
+        safety_manager.mark_connection_lost()
         raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/mt5/account")
 async def get_mt5_account():
     try:
-        account = (
-            await mt5_service.get_account_info()
-        )
+        account = await mt5_service.get_account_info()
 
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "account": safe_account_response(
-                account
-            ),
+            "account": safe_account_response(account),
         }
 
     except MT5ServiceError as exc:
@@ -546,16 +546,12 @@ async def get_mt5_account():
 @app.get("/api/mt5/terminal")
 async def get_mt5_terminal():
     try:
-        terminal = (
-            await mt5_service.get_terminal_info()
-        )
+        terminal = await mt5_service.get_terminal_info()
 
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "terminal": safe_terminal_response(
-                terminal
-            ),
+            "terminal": safe_terminal_response(terminal),
         }
 
     except MT5ServiceError as exc:
@@ -581,11 +577,7 @@ async def get_current_price(
     """
 
     try:
-        tick = (
-            await mt5_service.get_symbol_tick(
-                symbol
-            )
-        )
+        tick = await mt5_service.get_symbol_tick(symbol)
 
         return {
             "status": "ok",
@@ -595,13 +587,9 @@ async def get_current_price(
             "last": tick["last"],
             "spread": tick["spread"],
             "volume": tick["volume"],
-            "volume_real": tick[
-                "volume_real"
-            ],
+            "volume_real": tick["volume_real"],
             "time": tick["time"],
-            "time_msc": tick[
-                "time_msc"
-            ],
+            "time_msc": tick["time_msc"],
             "timestamp": utc_timestamp(),
             "source": "mt5",
         }
@@ -638,12 +626,10 @@ async def get_candlesticks(
     """
 
     try:
-        candles = (
-            await mt5_service.get_candles(
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=limit,
-            )
+        candles = await mt5_service.get_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
         )
 
         return {
@@ -676,10 +662,8 @@ async def get_market_symbols(
     """
 
     try:
-        symbols = (
-            await mt5_service.get_symbols(
-                query=query
-            )
+        symbols = await mt5_service.get_symbols(
+            query=query
         )
 
         return {
@@ -700,18 +684,10 @@ async def get_gold_symbols():
     """
     Find XAUUSD/gold symbols regardless of
     broker suffix.
-
-    Examples:
-    XAUUSD
-    XAUUSDm
-    XAUUSD.a
-    GOLD
     """
 
     try:
-        symbols = (
-            await mt5_service.find_gold_symbols()
-        )
+        symbols = await mt5_service.find_gold_symbols()
 
         return {
             "status": "ok",
@@ -740,13 +716,7 @@ async def get_symbol_specification(
     """
     Return broker-specific MT5 symbol properties.
 
-    These values are used by the risk engine to
-    calculate broker-aware position sizing.
-
     READ ONLY.
-
-    No order is placed.
-    No position is modified.
     """
 
     try:
@@ -787,13 +757,6 @@ async def get_symbol_specification(
 async def get_indicators(
     symbol: str = "XAUUSD",
 ):
-    """
-    Indicators remain a later step.
-
-    We deliberately do not calculate indicators
-    from fake data anymore.
-    """
-
     return {
         "status": "not_implemented",
         "symbol": symbol,
@@ -808,7 +771,7 @@ async def get_indicators(
 
 
 # ============================================================
-# STEP 5 - TRADE EXECUTION GATEWAY
+# STEP 5 - PAPER TRADE EXECUTION GATEWAY
 # ============================================================
 
 @app.post("/api/trading/place-order")
@@ -818,14 +781,7 @@ async def place_order(
     """
     STEP 5 - PAPER EXECUTION GATEWAY.
 
-    This endpoint validates the order request and sends it
-    to the paper-only execution gateway.
-
-    IMPORTANT:
-    - No MT5 order_send() call exists here.
-    - No real broker order is placed.
-    - No real position is modified.
-    - Live execution remains disabled.
+    No real broker order is placed.
     """
 
     logger.info(
@@ -851,7 +807,6 @@ async def place_order(
             )
         ).strip().lower()
 
-        # Support common strategy terminology.
         if side_value == "long":
             side_value = "buy"
 
@@ -873,28 +828,15 @@ async def place_order(
             ),
         )
 
-        price_value = order_data.get(
-            "price"
-        )
-
-        stop_loss_value = order_data.get(
-            "stop_loss"
-        )
-
-        take_profit_value = order_data.get(
-            "take_profit"
-        )
-
-        client_order_id = order_data.get(
-            "client_order_id"
-        )
+        price_value = order_data.get("price")
+        stop_loss_value = order_data.get("stop_loss")
+        take_profit_value = order_data.get("take_profit")
+        client_order_id = order_data.get("client_order_id")
 
         order = OrderRequest(
             symbol=symbol,
             side=OrderSide(side_value),
-            order_type=OrderType(
-                order_type_value
-            ),
+            order_type=OrderType(order_type_value),
             volume=float(volume_value),
             price=(
                 float(price_value)
@@ -914,19 +856,18 @@ async def place_order(
             client_order_id=client_order_id,
         )
 
-        result = await execution_gateway.execute(
-            order
-        )
+        # SAFETY GATE:
+        # Emergency stop, connection loss, stale heartbeat,
+        # or any other unsafe state blocks execution.
+        safety_manager.require_trade_permission()
+
+        result = await execution_gateway.execute(order)
 
         return {
             "order_id": result.order_id,
-            "client_order_id": (
-                result.client_order_id
-            ),
+            "client_order_id": result.client_order_id,
             "status": result.status.value,
-            "execution_type": (
-                result.execution_type
-            ),
+            "execution_type": result.execution_type,
             "broker": result.broker,
             "symbol": result.symbol,
             "side": result.side,
@@ -943,9 +884,7 @@ async def place_order(
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Invalid order request: {exc}"
-            ),
+            detail=f"Invalid order request: {exc}",
         ) from exc
 
     except ExecutionGatewayError as exc:
@@ -953,6 +892,7 @@ async def place_order(
             status_code=400,
             detail=str(exc),
         ) from exc
+
 
 # ============================================================
 # STEP 3 - READ-ONLY MT5 POSITIONS
@@ -969,11 +909,7 @@ async def get_positions(
     """
     Read real open MT5 positions.
 
-    STEP 3:
-    - Read-only
-    - No position modification
-    - No position closing
-    - No trade execution
+    READ ONLY.
     """
 
     try:
@@ -990,9 +926,7 @@ async def get_positions(
             "status": "ok",
             "symbol": symbol,
             "positions": normalized_positions,
-            "total_positions": len(
-                normalized_positions
-            ),
+            "total_positions": len(normalized_positions),
             "source": "mt5_read_only",
             "timestamp": utc_timestamp(),
             "live_trading_enabled": (
@@ -1085,52 +1019,139 @@ async def get_trade_journal(
 
 
 # ============================================================
-# ADMIN
+# STEP 9A - DASHBOARD WEBSOCKET
+# ============================================================
+
+@app.websocket("/ws/dashboard")
+async def dashboard_websocket(
+    websocket: WebSocket,
+):
+    """
+    Read-only dashboard WebSocket.
+
+    The dashboard receives:
+    - market data
+    - account data
+    - positions
+    - safety status
+    - heartbeat messages
+
+    This endpoint NEVER places or modifies trades.
+    """
+
+    await dashboard_ws_manager.connect(websocket)
+
+    try:
+        async def provider():
+            return await build_dashboard_state(
+                mt5_service=mt5_service,
+                safety_manager=safety_manager,
+                symbol="XAUUSD",
+                live_trading_enabled=live_trading_enabled(),
+            )
+
+        await dashboard_ws_manager.stream(
+            websocket,
+            provider=provider,
+        )
+
+    except Exception as exc:
+        logger.info(
+            "Dashboard WebSocket disconnected: %s",
+            exc,
+        )
+
+    finally:
+        dashboard_ws_manager.disconnect(websocket)
+
+
+# ============================================================
+# ADMIN / SAFETY
 # ============================================================
 
 @app.post("/api/admin/emergency-stop")
 async def emergency_stop():
     """
-    Placeholder only.
+    Activate the RAYMOND emergency stop.
 
-    Full execution lockout comes before live trading.
+    This blocks trading permission through the
+    safety manager.
+
+    It does NOT close existing broker positions.
     """
 
+    status = safety_manager.activate_emergency_stop()
+
     logger.critical(
-        "EMERGENCY STOP REQUEST RECEIVED"
+        "EMERGENCY STOP ACTIVATED"
     )
 
     return {
-        "status": "emergency_stop_requested",
+        "status": "emergency_stop_active",
         "timestamp": utc_timestamp(),
-        "all_positions_closed": False,
-        "new_orders_blocked": False,
-        "note": (
-            "Full execution lockout will be implemented "
-            "before live trading."
+        "trading_allowed": status.trading_allowed,
+        "emergency_stop_active": (
+            status.emergency_stop_active
         ),
+        "connection_healthy": (
+            status.connection_healthy
+        ),
+        "reason": status.reason,
+        "all_positions_closed": False,
+        "new_orders_blocked": True,
+        "live_trading_enabled": live_trading_enabled(),
+    }
+
+
+@app.post("/api/admin/emergency-stop/reset")
+async def reset_emergency_stop():
+    """
+    Reset the emergency stop.
+
+    The safety manager still requires a healthy,
+    non-stale MT5 connection before trading can
+    become permitted.
+    """
+
+    status = safety_manager.reset_emergency_stop()
+
+    return {
+        "status": "emergency_stop_reset",
+        "timestamp": utc_timestamp(),
+        "trading_allowed": status.trading_allowed,
+        "emergency_stop_active": (
+            status.emergency_stop_active
+        ),
+        "connection_healthy": (
+            status.connection_healthy
+        ),
+        "reason": status.reason,
     }
 
 
 @app.get("/api/admin/status")
 async def admin_status():
     try:
-        mt5_status = (
-            await mt5_service.heartbeat()
-        )
+        mt5_status = await mt5_service.heartbeat()
+
+        if mt5_status.get("connected"):
+            safety_manager.record_heartbeat()
+        else:
+            safety_manager.mark_connection_lost()
+
     except Exception:
         mt5_status = {
             "connected": False,
-            "last_error": (
-                "MT5 unavailable"
-            ),
+            "last_error": "MT5 unavailable",
         }
+
+        safety_manager.mark_connection_lost()
+
+    safety_status = safety_manager.status()
 
     return {
         "status": "operational",
-        "live_trading_enabled": (
-            live_trading_enabled()
-        ),
+        "live_trading_enabled": live_trading_enabled(),
         "environment": os.getenv(
             "RAYMOND_ENV",
             "development",
@@ -1142,9 +1163,26 @@ async def admin_status():
                 False,
             )
         ),
-        "mt5_connected": mt5_status.get(
-            "connected",
-            False,
+        "mt5_connected": (
+            mt5_status.get(
+                "connected",
+                False,
+            )
+        ),
+        "safety": {
+            "trading_allowed": (
+                safety_status.trading_allowed
+            ),
+            "emergency_stop_active": (
+                safety_status.emergency_stop_active
+            ),
+            "connection_healthy": (
+                safety_status.connection_healthy
+            ),
+            "reason": safety_status.reason,
+        },
+        "dashboard_websocket_connections": (
+            dashboard_ws_manager.connection_count
         ),
         "timestamp": utc_timestamp(),
     }
