@@ -64,7 +64,7 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+execution_gateway = create_execution_gateway()
 
 # ============================================================
 # APPLICATION
