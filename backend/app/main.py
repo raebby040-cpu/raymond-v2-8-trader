@@ -1,13 +1,15 @@
 """
 RAYMOND v2.8 Backend - FastAPI Application
 
-Step 3:
+Step 4B:
 - Broker-neutral MT5 connection
 - Real MT5 market tick data
 - Broker-specific symbol discovery
 - Real MT5 OHLC candles
 - MT5 account information
 - MT5 read-only position synchronization
+- Broker-aware symbol specifications
+- Risk-engine-ready market data
 - Paper trading only
 
 IMPORTANT:
@@ -217,6 +219,47 @@ def safe_position_response(
     }
 
 
+def safe_symbol_specification_response(
+    specification: dict,
+) -> dict:
+    """
+    Return broker-specific symbol information
+    required by the RAYMOND risk engine.
+
+    This is READ ONLY.
+    """
+
+    allowed_fields = [
+        "symbol",
+        "digits",
+        "point",
+        "spread",
+        "spread_float",
+        "tick_size",
+        "tick_value",
+        "tick_value_profit",
+        "tick_value_loss",
+        "contract_size",
+        "volume_min",
+        "volume_max",
+        "volume_step",
+        "volume_limit",
+        "trade_mode",
+        "trade_execution_mode",
+        "trade_stops_level",
+        "trade_freeze_level",
+        "currency_base",
+        "currency_profit",
+        "currency_margin",
+    ]
+
+    return {
+        field: specification.get(field)
+        for field in allowed_fields
+        if field in specification
+    }
+
+
 def mt5_error_response(
     exc: Exception,
 ) -> HTTPException:
@@ -315,6 +358,9 @@ async def root():
             "market_gold": (
                 "/api/market/gold-symbols"
             ),
+            "market_symbol_specification": (
+                "/api/market/symbol-specification"
+            ),
             "trading": "/api/trading",
             "strategy": "/api/strategy",
             "admin": "/api/admin",
@@ -345,19 +391,28 @@ async def connect_mt5(
     new_service = MT5Service(config)
 
     try:
-        result = await new_service.initialize()
+        # initialize() returns a boolean.
+        # It does not return account/terminal dictionaries.
+        initialized = await new_service.initialize()
 
+        if not initialized:
+            raise MT5ServiceError(
+                "MT5 initialization returned false."
+            )
+
+        # Read account and terminal information
+        # only after successful initialization.
+        account = (
+            await new_service.get_account_info()
+        )
+
+        terminal = (
+            await new_service.get_terminal_info()
+        )
+
+        # Replace the global service only after
+        # successful initialization and validation.
         mt5_service = new_service
-
-        account = result.get(
-            "account",
-            {},
-        )
-
-        terminal = result.get(
-            "terminal",
-            {},
-        )
 
         logger.info(
             "MT5 connected: server=%s login=%s",
@@ -652,6 +707,60 @@ async def get_gold_symbols():
         }
 
     except MT5ServiceError as exc:
+        raise mt5_error_response(exc) from exc
+
+
+# ============================================================
+# STEP 4B - SYMBOL SPECIFICATION
+# ============================================================
+
+@app.get("/api/market/symbol-specification")
+async def get_symbol_specification(
+    symbol: str = Query(
+        default="XAUUSD",
+        min_length=1,
+        max_length=64,
+    ),
+):
+    """
+    Return broker-specific MT5 symbol properties.
+
+    These values are used by the risk engine to
+    calculate broker-aware position sizing.
+
+    READ ONLY.
+
+    No order is placed.
+    No position is modified.
+    """
+
+    try:
+        specification = (
+            await mt5_service.get_symbol_specification(
+                symbol
+            )
+        )
+
+        return {
+            "status": "ok",
+            "symbol": specification.get(
+                "symbol",
+                symbol,
+            ),
+            "specification": (
+                safe_symbol_specification_response(
+                    specification
+                )
+            ),
+            "timestamp": utc_timestamp(),
+            "source": "mt5",
+            "read_only": True,
+        }
+
+    except (
+        MT5ServiceError,
+        ValueError,
+    ) as exc:
         raise mt5_error_response(exc) from exc
 
 
