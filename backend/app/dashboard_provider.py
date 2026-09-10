@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .emergency_stop import EmergencyStopManager
-from .mt5_service import MT5Service, MT5ServiceError
+try:
+    from .emergency_stop import EmergencyStopManager
+    from .mt5_service import MT5Service, MT5ServiceError
+except ImportError:
+    from emergency_stop import EmergencyStopManager
+    from mt5_service import MT5Service, MT5ServiceError
 
 
 async def build_dashboard_state(
