@@ -4,9 +4,7 @@ import sys
 import pytest
 
 
-APP_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
@@ -47,28 +45,16 @@ class FakeMT5Service:
 
 @pytest.mark.asyncio
 async def test_symbol_specification_endpoint():
-    original_service = app.state.__dict__.get(
-        "test_mt5_service"
-    )
-
     import main as main_module
 
-    original_global_service = (
-        main_module.mt5_service
-    )
+    original_service = main_module.mt5_service
 
-    fake_service = FakeMT5Service()
-    main_module.mt5_service = fake_service
+    main_module.mt5_service = FakeMT5Service()
 
     try:
-        from httpx import (
-            ASGITransport,
-            AsyncClient,
-        )
+        from httpx import ASGITransport, AsyncClient
 
-        transport = ASGITransport(
-            app=app
-        )
+        transport = ASGITransport(app=app)
 
         async with AsyncClient(
             transport=transport,
@@ -77,7 +63,7 @@ async def test_symbol_specification_endpoint():
             response = await client.get(
                 "/api/market/symbol-specification",
                 params={
-                    "symbol": "XAUUSD"
+                    "symbol": "XAUUSD",
                 },
             )
 
@@ -90,70 +76,39 @@ async def test_symbol_specification_endpoint():
         assert data["source"] == "mt5"
         assert data["read_only"] is True
 
-        specification = data[
-            "specification"
-        ]
+        specification = data["specification"]
 
-        assert specification[
-            "symbol"
-        ] == "XAUUSD"
-
-        assert specification[
-            "tick_size"
-        ] == 0.01
-
-        assert specification[
-            "tick_value_loss"
-        ] == 1.0
-
-        assert specification[
-            "volume_min"
-        ] == 0.01
-
-        assert specification[
-            "volume_max"
-        ] == 100.0
-
-        assert specification[
-            "volume_step"
-        ] == 0.01
-
-        assert specification[
-            "currency_profit"
-        ] == "USD"
+        assert specification["symbol"] == "XAUUSD"
+        assert specification["digits"] == 2
+        assert specification["point"] == 0.01
+        assert specification["tick_size"] == 0.01
+        assert specification["tick_value"] == 1.0
+        assert specification["tick_value_profit"] == 1.0
+        assert specification["tick_value_loss"] == 1.0
+        assert specification["contract_size"] == 100.0
+        assert specification["volume_min"] == 0.01
+        assert specification["volume_max"] == 100.0
+        assert specification["volume_step"] == 0.01
+        assert specification["currency_base"] == "XAU"
+        assert specification["currency_profit"] == "USD"
+        assert specification["currency_margin"] == "XAU"
 
     finally:
-        main_module.mt5_service = (
-            original_global_service
-        )
-
-        if original_service is not None:
-            app.state.test_mt5_service = (
-                original_service
-            )
+        main_module.mt5_service = original_service
 
 
 @pytest.mark.asyncio
 async def test_symbol_specification_endpoint_uses_requested_symbol():
     import main as main_module
 
-    original_global_service = (
-        main_module.mt5_service
-    )
+    original_service = main_module.mt5_service
 
-    main_module.mt5_service = (
-        FakeMT5Service()
-    )
+    main_module.mt5_service = FakeMT5Service()
 
     try:
-        from httpx import (
-            ASGITransport,
-            AsyncClient,
-        )
+        from httpx import ASGITransport, AsyncClient
 
-        transport = ASGITransport(
-            app=app
-        )
+        transport = ASGITransport(app=app)
 
         async with AsyncClient(
             transport=transport,
@@ -162,7 +117,7 @@ async def test_symbol_specification_endpoint_uses_requested_symbol():
             response = await client.get(
                 "/api/market/symbol-specification",
                 params={
-                    "symbol": "XAUUSDm"
+                    "symbol": "XAUUSDm",
                 },
             )
 
@@ -171,11 +126,47 @@ async def test_symbol_specification_endpoint_uses_requested_symbol():
         data = response.json()
 
         assert data["symbol"] == "XAUUSDm"
-        assert data[
-            "specification"
-        ]["symbol"] == "XAUUSDm"
+
+        assert (
+            data["specification"]["symbol"]
+            == "XAUUSDm"
+        )
 
     finally:
-        main_module.mt5_service = (
-            original_global_service
-      )
+        main_module.mt5_service = original_service
+
+
+@pytest.mark.asyncio
+async def test_symbol_specification_endpoint_is_read_only():
+    import main as main_module
+
+    original_service = main_module.mt5_service
+
+    fake_service = FakeMT5Service()
+
+    main_module.mt5_service = fake_service
+
+    try:
+        from httpx import ASGITransport, AsyncClient
+
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/api/market/symbol-specification",
+                params={
+                    "symbol": "XAUUSD",
+                },
+            )
+
+        assert response.status_code == 200
+
+        data = response.json()
+
+        assert data["read_only"] is True
+
+    finally:
+        main_module.mt5_service = original_service
