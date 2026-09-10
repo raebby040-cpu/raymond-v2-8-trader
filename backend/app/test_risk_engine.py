@@ -1,4 +1,4 @@
-from backend.app.risk_engine import (
+from app.risk_engine import (
     RiskConfig,
     RiskEngine,
     RiskEngineError,
