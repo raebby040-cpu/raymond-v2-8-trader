@@ -855,8 +855,10 @@ async def place_order(
             ),
             client_order_id=client_order_id,
         )
-
-        result = await execution_gateway.execute(order)
+        safety_manager.require_trade_permission
+        ()
+        result = await 
+        execution_gateway.execute(order)
 
         return {
             "order_id": result.order_id,
