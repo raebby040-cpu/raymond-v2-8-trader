@@ -1,8 +1,14 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 import main
+
+
+@pytest.fixture
+def client():
+    return TestClient(main.app)
 
 
 def test_dashboard_websocket_route_exists():
@@ -130,8 +136,16 @@ def test_dashboard_websocket_provider_is_read_only(
         message = websocket.receive_json()
 
         assert message["type"] == "dashboard_state"
-        assert message["data"]["live_trading_enabled"] is False
-        assert message["data"]["emergency_stop"]["trading_allowed"] is False
+        assert (
+            message["data"]["live_trading_enabled"]
+            is False
+        )
+        assert (
+            message["data"]["emergency_stop"][
+                "trading_allowed"
+            ]
+            is False
+        )
 
     assert execution_called is False
 
@@ -185,7 +199,10 @@ def test_dashboard_websocket_never_enables_live_trading(
     ) as websocket:
         message = websocket.receive_json()
 
-        assert message["data"]["live_trading_enabled"] is False
+        assert (
+            message["data"]["live_trading_enabled"]
+            is False
+        )
 
 
 def test_dashboard_websocket_sends_valid_json(
@@ -257,7 +274,7 @@ def test_dashboard_websocket_has_no_trade_endpoint():
     ]
 
 
-def test_client_fixture():
+def test_health_endpoint():
     client = TestClient(main.app)
 
     response = client.get("/health")
