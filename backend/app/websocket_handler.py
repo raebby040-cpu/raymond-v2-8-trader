@@ -34,9 +34,7 @@ class DashboardWebSocketManager:
                 "heartbeat_interval_seconds must be greater than zero."
             )
 
-        self.heartbeat_interval_seconds = (
-            heartbeat_interval_seconds
-        )
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._connections: set[WebSocket] = set()
 
     @property
@@ -203,4 +201,4 @@ async def empty_dashboard_provider() -> dict[str, Any]:
             "active": False,
         },
         "live_trading_enabled": False,
-              }
+    }
