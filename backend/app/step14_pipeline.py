@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from app.ai_trading_decision import (
     AIDirection,
@@ -13,6 +13,7 @@ from app.execution_gateway import (
     OrderRequest,
     OrderSide,
     OrderType,
+    PaperExecutionGateway,
 )
 from app.risk_engine import (
     RiskDecision,
@@ -45,14 +46,14 @@ class Step14Pipeline:
     - Risk rejection never reaches execution.
     - Live execution is always rejected.
     - Position size comes from the Risk Engine.
-    - Paper execution only.
+    - Only PaperExecutionGateway is accepted.
     """
 
     def __init__(
         self,
         ai_engine: AITradingDecisionEngine,
         risk_engine: RiskEngine,
-        execution_gateway: Any | None = None,
+        execution_gateway: PaperExecutionGateway | None = None,
     ) -> None:
         self.ai_engine = ai_engine
         self.risk_engine = risk_engine
@@ -180,14 +181,24 @@ class Step14Pipeline:
             )
 
         # --------------------------------------------------
-        # Hard live-trading safety gate.
+        # HARD SAFETY GATE:
+        # Step 14 may only execute through the real
+        # PaperExecutionGateway implementation.
         # --------------------------------------------------
 
-        if getattr(
+        if not isinstance(
             self.execution_gateway,
-            "live_trading_enabled",
-            False,
+            PaperExecutionGateway,
         ):
+            raise Step14PipelineError(
+                "Step 14 requires the paper execution gateway."
+            )
+
+        # --------------------------------------------------
+        # HARD LIVE-TRADING SAFETY GATE.
+        # --------------------------------------------------
+
+        if self.execution_gateway.live_trading_enabled:
             raise Step14PipelineError(
                 "Live trading is not permitted by Step 14."
             )
@@ -281,11 +292,3 @@ class Step14Pipeline:
             position_size=result.position_size,
             execution_result=execution_result,
         )
-
-
-def _context_from_mapping(
-    data: Mapping[str, Any],
-) -> TechnicalContext:
-    """Build a technical context from mapping-like API input."""
-
-    return TechnicalContext(**dict(data))
