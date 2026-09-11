@@ -13,7 +13,10 @@ from app.advanced_trade_management import (
 )
 
 
-def _manager():
+def _manager(
+    *,
+    partial_close_enabled=True,
+):
     return AdvancedTradeManager(
         TradeManagementConfig(
             break_even_trigger_r=1.0,
@@ -21,7 +24,7 @@ def _manager():
             trailing_enabled=True,
             trailing_distance=5.0,
             trailing_step=1.0,
-            partial_close_enabled=True,
+            partial_close_enabled=partial_close_enabled,
             partial_close_percent=50.0,
             partial_close_trigger_r=2.0,
         )
@@ -77,7 +80,9 @@ def test_sell_break_even_trigger():
 
 
 def test_buy_trailing_stop_improves_protection():
-    manager = _manager()
+    manager = _manager(
+        partial_close_enabled=False,
+    )
 
     position = PositionSnapshot(
         trade_id="PAPER-12-003",
@@ -86,7 +91,7 @@ def test_buy_trailing_stop_improves_protection():
         entry_price=2300.0,
         current_price=2320.0,
         quantity=0.10,
-        stop_loss=2305.0,
+        stop_loss=2290.0,
         take_profit=2340.0,
         break_even_applied=True,
     )
@@ -100,7 +105,9 @@ def test_buy_trailing_stop_improves_protection():
 
 
 def test_sell_trailing_stop_improves_protection():
-    manager = _manager()
+    manager = _manager(
+        partial_close_enabled=False,
+    )
 
     position = PositionSnapshot(
         trade_id="PAPER-12-004",
@@ -109,7 +116,7 @@ def test_sell_trailing_stop_improves_protection():
         entry_price=2300.0,
         current_price=2280.0,
         quantity=0.10,
-        stop_loss=2290.0,
+        stop_loss=2310.0,
         take_profit=2260.0,
         break_even_applied=True,
     )
@@ -123,7 +130,9 @@ def test_sell_trailing_stop_improves_protection():
 
 
 def test_trailing_stop_never_worsens_buy_stop():
-    manager = _manager()
+    manager = _manager(
+        partial_close_enabled=False,
+    )
 
     position = PositionSnapshot(
         trade_id="PAPER-12-005",
@@ -144,7 +153,9 @@ def test_trailing_stop_never_worsens_buy_stop():
 
 
 def test_trailing_stop_never_worsens_sell_stop():
-    manager = _manager()
+    manager = _manager(
+        partial_close_enabled=False,
+    )
 
     position = PositionSnapshot(
         trade_id="PAPER-12-006",
@@ -198,7 +209,7 @@ def test_partial_close_only_happens_once():
         entry_price=2300.0,
         current_price=2320.0,
         quantity=0.10,
-        stop_loss=2300.0,
+        stop_loss=2290.0,
         take_profit=2340.0,
         break_even_applied=True,
         partial_close_applied=True,
@@ -209,6 +220,7 @@ def test_partial_close_only_happens_once():
     assert decision.action == (
         ManagementAction.TRAIL_STOP
     )
+    assert decision.new_stop_loss == 2315.0
     assert decision.partial_close_quantity == 0.0
 
 
@@ -463,5 +475,14 @@ def test_partial_close_never_closes_entire_position():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == ManagementAction.HOLD
-    assert decision.partial_close_quantity == 0.0
+    assert decision.action == (
+        ManagementAction.PARTIAL_CLOSE
+    )
+    assert (
+        decision.partial_close_quantity
+        < position.quantity
+    )
+    assert (
+        decision.partial_close_quantity
+        > 0.0
+    )
