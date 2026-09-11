@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'api_service.dart';
+
 void main() {
   runApp(const RaymondApp());
 }
@@ -26,15 +28,112 @@ class RaymondApp extends StatelessWidget {
   }
 }
 
-class HomePage extends StatelessWidget {
+class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
   static const gold = Color(0xFFF5B82E);
   static const green = Color(0xFF00E59B);
+  static const red = Color(0xFFFF5C6C);
   static const background = Color(0xFF030B14);
   static const card = Color(0xFF091724);
   static const border = Color(0xFF17334D);
   static const muted = Color(0xFF8EA4B8);
+
+  final ApiService api = ApiService();
+
+  int selectedIndex = 0;
+
+  bool loading = true;
+  bool backendOnline = false;
+
+  String errorMessage = '';
+
+  double balance = 10000.0;
+  double totalPnl = 0.0;
+  int openTrades = 0;
+  int totalTrades = 0;
+
+  List<Map<String, dynamic>> trades = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    setState(() {
+      loading = true;
+      errorMessage = '';
+    });
+
+    try {
+      final health = await api.health();
+
+      Map<String, dynamic> status = {};
+      Map<String, dynamic> performance = {};
+      List<Map<String, dynamic>> fetchedTrades = [];
+
+      try {
+        status = await api.demoStatus();
+      } catch (_) {}
+
+      try {
+        performance = await api.demoPerformance();
+      } catch (_) {}
+
+      try {
+        fetchedTrades = await api.demoTrades();
+      } catch (_) {}
+
+      if (!mounted) return;
+
+      setState(() {
+        backendOnline = health['status'] == 'healthy';
+
+        final balanceValue = status['balance'];
+        if (balanceValue is num) {
+          balance = balanceValue.toDouble();
+        }
+
+        final pnlValue = performance['total_pnl'];
+        if (pnlValue is num) {
+          totalPnl = pnlValue.toDouble();
+        }
+
+        final openValue = performance['open_trades'];
+        if (openValue is num) {
+          openTrades = openValue.toInt();
+        } else {
+          final statusOpen = status['open_trades'];
+          if (statusOpen is num) {
+            openTrades = statusOpen.toInt();
+          }
+        }
+
+        final totalValue = performance['total_trades'];
+        if (totalValue is num) {
+          totalTrades = totalValue.toInt();
+        }
+
+        trades = fetchedTrades;
+        loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        backendOnline = false;
+        loading = false;
+        errorMessage = 'Backend unavailable';
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -43,10 +142,6 @@ class HomePage extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: background,
         elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.menu, color: Colors.white),
-          onPressed: () {},
-        ),
         title: const Row(
           children: [
             Text(
@@ -67,222 +162,23 @@ class HomePage extends StatelessWidget {
           ],
         ),
         actions: [
-          Container(
-            margin: const EdgeInsets.only(right: 8),
-            padding: const EdgeInsets.symmetric(
-              horizontal: 9,
-              vertical: 5,
-            ),
-            decoration: BoxDecoration(
-              color: green.withOpacity(.12),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: green.withOpacity(.35)),
-            ),
-            child: const Row(
-              children: [
-                Icon(Icons.circle, size: 8, color: green),
-                SizedBox(width: 5),
-                Text(
-                  'ONLINE',
-                  style: TextStyle(
-                    color: green,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ),
+          _connectionBadge(),
           IconButton(
-            icon: const Icon(Icons.notifications_none),
-            onPressed: () {},
+            icon: const Icon(Icons.refresh),
+            onPressed: loading ? null : _refresh,
           ),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'XAUUSD',
-              style: TextStyle(
-                color: muted,
-                fontSize: 13,
-              ),
-            ),
-            const SizedBox(height: 4),
-
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                const Text(
-                  '3428.73',
-                  style: TextStyle(
-                    fontSize: 34,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: green.withOpacity(.12),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Text(
-                    '+0.42%',
-                    style: TextStyle(
-                      color: green,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 18),
-
-            _card(
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text(
-                        '5 MIN',
-                        style: TextStyle(
-                          color: muted,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      Row(
-                        children: const [
-                          Text(
-                            'BUY',
-                            style: TextStyle(
-                              color: green,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          SizedBox(width: 8),
-                          Text(
-                            'Strong Momentum',
-                            style: TextStyle(color: muted),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-
-                  SizedBox(
-                    height: 180,
-                    child: CustomPaint(
-                      painter: ChartPainter(),
-                      size: Size.infinite,
-                    ),
-                  ),
-
-                  const SizedBox(height: 12),
-
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: const [
-                      Text('Technical Score'),
-                      Text(
-                        '78 / 100',
-                        style: TextStyle(
-                          color: gold,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 14),
-
-            Row(
-              children: [
-                Expanded(
-                  child: _metricCard(
-                    'RSI',
-                    '56.4',
-                    'Neutral',
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _metricCard(
-                    'ATR',
-                    '12.8',
-                    'Volatility',
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 14),
-
-            _card(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'PAPER TRADING',
-                        style: TextStyle(
-                          color: gold,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      Icon(
-                        Icons.account_balance_wallet_outlined,
-                        color: gold,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 18),
-                  const Text(
-                    '\$10,000.00',
-                    style: TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: const [
-                      _SmallStat(
-                        label: 'OPEN POSITIONS',
-                        value: '1',
-                      ),
-                      _SmallStat(
-                        label: 'TOTAL P&L',
-                        value: '+\$48.32',
-                        positive: true,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
+      body: _buildBody(),
       bottomNavigationBar: NavigationBar(
         backgroundColor: const Color(0xFF06111C),
-        selectedIndex: 0,
+        selectedIndex: selectedIndex,
         indicatorColor: gold.withOpacity(.16),
+        onDestinationSelected: (index) {
+          setState(() {
+            selectedIndex = index;
+          });
+        },
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.home_outlined),
@@ -310,16 +206,283 @@ class HomePage extends StatelessWidget {
     );
   }
 
-  Widget _card({required Widget child}) {
+  Widget _connectionBadge() {
     return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: border),
+      margin: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 9,
+        vertical: 5,
       ),
-      child: child,
+      decoration: BoxDecoration(
+        color: (backendOnline ? green : red).withOpacity(.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: (backendOnline ? green : red).withOpacity(.35),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.circle,
+            size: 8,
+            color: backendOnline ? green : red,
+          ),
+          const SizedBox(width: 5),
+          Text(
+            backendOnline ? 'ONLINE' : 'OFFLINE',
+            style: TextStyle(
+              color: backendOnline ? green : red,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    if (selectedIndex != 0) {
+      return _placeholderPage();
+    }
+
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (errorMessage.isNotEmpty)
+              _errorCard(),
+
+            const Text(
+              'XAUUSD',
+              style: TextStyle(
+                color: muted,
+                fontSize: 13,
+              ),
+            ),
+
+            const SizedBox(height: 4),
+
+            const Text(
+              'Live market connection',
+              style: TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+
+            const SizedBox(height: 16),
+
+            _paperCard(),
+
+            const SizedBox(height: 14),
+
+            Row(
+              children: [
+                Expanded(
+                  child: _metricCard(
+                    'OPEN',
+                    '$openTrades',
+                    'Positions',
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _metricCard(
+                    'TRADES',
+                    '$totalTrades',
+                    'Total',
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 14),
+
+            _performanceCard(),
+
+            const SizedBox(height: 14),
+
+            _tradesCard(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _paperCard() {
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'PAPER TRADING',
+                style: TextStyle(
+                  color: gold,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Icon(
+                Icons.account_balance_wallet_outlined,
+                color: gold,
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          loading
+              ? const LinearProgressIndicator()
+              : Text(
+                  '\$${balance.toStringAsFixed(2)}',
+                  style: const TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+          const SizedBox(height: 12),
+          const Text(
+            'Real-money trading is disabled.',
+            style: TextStyle(color: muted),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _performanceCard() {
+    final positive = totalPnl >= 0;
+
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'PERFORMANCE',
+            style: TextStyle(
+              color: gold,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Total P&L',
+                style: TextStyle(color: muted),
+              ),
+              Text(
+                '${positive ? '+' : ''}\$${totalPnl.toStringAsFixed(2)}',
+                style: TextStyle(
+                  color: positive ? green : red,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tradesCard() {
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'RECENT PAPER TRADES',
+            style: TextStyle(
+              color: gold,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (loading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(20),
+                child: CircularProgressIndicator(),
+              ),
+            )
+          else if (trades.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 20),
+              child: Center(
+                child: Text(
+                  'No paper trades yet.',
+                  style: TextStyle(color: muted),
+                ),
+              ),
+            )
+          else
+            ...trades.take(5).map(_tradeRow),
+        ],
+      ),
+    );
+  }
+
+  Widget _tradeRow(Map<String, dynamic> trade) {
+    final direction =
+        '${trade['direction'] ?? ''}'.toUpperCase();
+
+    final pnlValue = trade['pnl'];
+    final pnl = pnlValue is num ? pnlValue.toDouble() : 0.0;
+
+    final positive = pnl >= 0;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF06111C),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            direction == 'BUY'
+                ? Icons.arrow_upward
+                : Icons.arrow_downward,
+            color: direction == 'BUY' ? green : red,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${trade['symbol'] ?? 'XAUUSD'} $direction',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                Text(
+                  '${trade['status'] ?? 'unknown'}',
+                  style: const TextStyle(
+                    color: muted,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '${positive ? '+' : ''}\$${pnl.toStringAsFixed(2)}',
+            style: TextStyle(
+              color: positive ? green : red,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -338,7 +501,10 @@ class HomePage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: const TextStyle(color: muted)),
+          Text(
+            title,
+            style: const TextStyle(color: muted),
+          ),
           const SizedBox(height: 8),
           Text(
             value,
@@ -359,85 +525,67 @@ class HomePage extends StatelessWidget {
       ),
     );
   }
-}
 
-class _SmallStat extends StatelessWidget {
-  final String label;
-  final String value;
-  final bool positive;
-
-  const _SmallStat({
-    required this.label,
-    required this.value,
-    this.positive = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(
-            color: Color(0xFF8EA4B8),
-            fontSize: 10,
-          ),
-        ),
-        const SizedBox(height: 5),
-        Text(
-          value,
-          style: TextStyle(
-            color: positive ? const Color(0xFF00E59B) : Colors.white,
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      ],
+  Widget _card({required Widget child}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: border),
+      ),
+      child: child,
     );
   }
-}
 
-class ChartPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final gridPaint = Paint()
-      ..color = const Color(0xFF17334D)
-      ..strokeWidth = 1;
-
-    final linePaint = Paint()
-      ..color = const Color(0xFF00E59B)
-      ..strokeWidth = 2
-      ..style = PaintingStyle.stroke;
-
-    for (int i = 1; i < 5; i++) {
-      final y = size.height * i / 5;
-      canvas.drawLine(
-        Offset(0, y),
-        Offset(size.width, y),
-        gridPaint,
-      );
-    }
-
-    final path = Path();
-
-    path.moveTo(0, size.height * .72);
-    path.lineTo(size.width * .08, size.height * .65);
-    path.lineTo(size.width * .16, size.height * .69);
-    path.lineTo(size.width * .24, size.height * .52);
-    path.lineTo(size.width * .32, size.height * .57);
-    path.lineTo(size.width * .40, size.height * .43);
-    path.lineTo(size.width * .48, size.height * .49);
-    path.lineTo(size.width * .56, size.height * .34);
-    path.lineTo(size.width * .64, size.height * .40);
-    path.lineTo(size.width * .72, size.height * .27);
-    path.lineTo(size.width * .80, size.height * .32);
-    path.lineTo(size.width * .88, size.height * .18);
-    path.lineTo(size.width, size.height * .23);
-
-    canvas.drawPath(path, linePaint);
+  Widget _errorCard() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: red.withOpacity(.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: red.withOpacity(.30),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            color: red,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '$errorMessage. Pull down to retry.',
+              style: const TextStyle(color: red),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  Widget _placeholderPage() {
+    const names = [
+      'Home',
+      'Chart',
+      'Analysis',
+      'Positions',
+      'Settings',
+    ];
+
+    return Center(
+      child: Text(
+        '${names[selectedIndex]} screen — Step 10B',
+        style: const TextStyle(
+          color: muted,
+          fontSize: 18,
+        ),
+      ),
+    );
+  }
 }

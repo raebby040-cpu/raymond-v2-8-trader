@@ -95,6 +95,23 @@ try:
 except ImportError:
     from demo_api import router as demo_trading_router
 
+# ============================================================
+# TECHNICAL INDICATORS
+# ============================================================
+
+try:
+    from .technical_indicators import (
+        TechnicalIndicatorError,
+        calculate_indicators,
+        indicator_result_to_dict,
+    )
+except ImportError:
+    from technical_indicators import (
+        TechnicalIndicatorError,
+        calculate_indicators,
+        indicator_result_to_dict,
+    )
+
 
 # ============================================================
 # LOGGING
@@ -775,19 +792,62 @@ async def get_symbol_specification(
 
 @app.get("/api/market/indicators")
 async def get_indicators(
-    symbol: str = "XAUUSD",
+    symbol: str = Query(
+        default="XAUUSD",
+        min_length=1,
+        max_length=64,
+    ),
+    timeframe: str = Query(
+        default="H1",
+        min_length=2,
+        max_length=4,
+    ),
+    limit: int = Query(
+        default=200,
+        ge=50,
+        le=5000,
+    ),
 ):
-    return {
-        "status": "not_implemented",
-        "symbol": symbol,
-        "message": (
-            "Real indicators will be calculated "
-            "from MT5 candles in the next market-data "
-            "stage."
-        ),
-        "timestamp": utc_timestamp(),
-        "source": "none",
-    }
+    """
+    Calculate real technical indicators from MT5 OHLC candles.
+
+    Indicators are calculated locally from read-only market data.
+    No order is placed, modified, or closed by this endpoint.
+    """
+
+    try:
+        candles = await mt5_service.get_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
+        )
+
+        result = calculate_indicators(
+            symbol=symbol,
+            timeframe=timeframe,
+            candles=candles,
+        )
+
+        response = indicator_result_to_dict(result)
+        response["timestamp"] = utc_timestamp()
+        response["source"] = "mt5"
+        return response
+
+    except MT5ServiceError as exc:
+        raise mt5_error_response(exc) from exc
+
+    except (
+        TechnicalIndicatorError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Technical indicator calculation failed",
+                "message": str(exc),
+                "timestamp": utc_timestamp(),
+            },
+        ) from exc
 
 
 # ============================================================
