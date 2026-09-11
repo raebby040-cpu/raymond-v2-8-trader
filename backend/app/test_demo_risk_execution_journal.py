@@ -107,7 +107,10 @@ def test_full_demo_risk_execution_journal_flow():
     )
 
     assert decision.allowed is True
-    assert decision.reason == "Risk checks passed."
+
+    # IMPORTANT:
+    # RiskEngine actually returns this exact lowercase string.
+    assert decision.reason == "risk checks passed"
 
     gateway = PaperExecutionGateway(
         live_trading_enabled=False,
