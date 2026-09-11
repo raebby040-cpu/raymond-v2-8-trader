@@ -85,9 +85,9 @@ class DemoTradingEngine:
                 "max_open_trades must be greater than zero."
             )
 
-        if max_daily_loss < 0:
+        if max_daily_loss <= 0:
             raise DemoTradingError(
-                "max_daily_loss cannot be negative."
+                "max_daily_loss must be greater than zero."
             )
 
         self.initial_balance = float(initial_balance)
@@ -497,6 +497,8 @@ class DemoTradingEngine:
             "execution_type": "paper",
             "live_trading_enabled": False,
             "real_orders_allowed": False,
+            "max_open_trades": self.max_open_trades,
+            "max_daily_loss": self.max_daily_loss,
             "open_trades": performance.open_trades,
             "total_trades": performance.total_trades,
             "winning_trades": performance.winning_trades,
