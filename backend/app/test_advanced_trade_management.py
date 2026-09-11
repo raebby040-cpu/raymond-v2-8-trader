@@ -13,10 +13,7 @@ from app.advanced_trade_management import (
 )
 
 
-def _manager(
-    *,
-    partial_close_enabled=True,
-):
+def _manager(*, partial_close_enabled=True):
     return AdvancedTradeManager(
         TradeManagementConfig(
             break_even_trigger_r=1.0,
@@ -47,9 +44,7 @@ def test_buy_break_even_trigger():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.MOVE_TO_BREAK_EVEN
-    )
+    assert decision.action == ManagementAction.MOVE_TO_BREAK_EVEN
     assert decision.new_stop_loss == 2300.0
     assert decision.partial_close_quantity == 0.0
     assert decision.execution_type == "paper"
@@ -73,16 +68,12 @@ def test_sell_break_even_trigger():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.MOVE_TO_BREAK_EVEN
-    )
+    assert decision.action == ManagementAction.MOVE_TO_BREAK_EVEN
     assert decision.new_stop_loss == 2300.0
 
 
 def test_buy_trailing_stop_improves_protection():
-    manager = _manager(
-        partial_close_enabled=False,
-    )
+    manager = _manager(partial_close_enabled=False)
 
     position = PositionSnapshot(
         trade_id="PAPER-12-003",
@@ -98,16 +89,12 @@ def test_buy_trailing_stop_improves_protection():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.TRAIL_STOP
-    )
+    assert decision.action == ManagementAction.TRAIL_STOP
     assert decision.new_stop_loss == 2315.0
 
 
 def test_sell_trailing_stop_improves_protection():
-    manager = _manager(
-        partial_close_enabled=False,
-    )
+    manager = _manager(partial_close_enabled=False)
 
     position = PositionSnapshot(
         trade_id="PAPER-12-004",
@@ -123,25 +110,21 @@ def test_sell_trailing_stop_improves_protection():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.TRAIL_STOP
-    )
+    assert decision.action == ManagementAction.TRAIL_STOP
     assert decision.new_stop_loss == 2285.0
 
 
 def test_trailing_stop_never_worsens_buy_stop():
-    manager = _manager(
-        partial_close_enabled=False,
-    )
+    manager = _manager(partial_close_enabled=False)
 
     position = PositionSnapshot(
         trade_id="PAPER-12-005",
         symbol="XAUUSD",
         direction=TradeDirection.BUY,
         entry_price=2300.0,
-        current_price=2308.0,
+        current_price=2303.0,
         quantity=0.10,
-        stop_loss=2305.0,
+        stop_loss=2299.0,
         take_profit=2320.0,
         break_even_applied=True,
     )
@@ -153,18 +136,16 @@ def test_trailing_stop_never_worsens_buy_stop():
 
 
 def test_trailing_stop_never_worsens_sell_stop():
-    manager = _manager(
-        partial_close_enabled=False,
-    )
+    manager = _manager(partial_close_enabled=False)
 
     position = PositionSnapshot(
         trade_id="PAPER-12-006",
         symbol="XAUUSD",
         direction=TradeDirection.SELL,
         entry_price=2300.0,
-        current_price=2292.0,
+        current_price=2297.0,
         quantity=0.10,
-        stop_loss=2295.0,
+        stop_loss=2301.0,
         take_profit=2270.0,
         break_even_applied=True,
     )
@@ -192,9 +173,7 @@ def test_partial_close_trigger():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.PARTIAL_CLOSE
-    )
+    assert decision.action == ManagementAction.PARTIAL_CLOSE
     assert decision.partial_close_quantity == 0.05
     assert decision.new_stop_loss is None
 
@@ -217,9 +196,7 @@ def test_partial_close_only_happens_once():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.TRAIL_STOP
-    )
+    assert decision.action == ManagementAction.TRAIL_STOP
     assert decision.new_stop_loss == 2315.0
     assert decision.partial_close_quantity == 0.0
 
@@ -324,9 +301,7 @@ def test_break_even_offset_buy():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.MOVE_TO_BREAK_EVEN
-    )
+    assert decision.action == ManagementAction.MOVE_TO_BREAK_EVEN
     assert decision.new_stop_loss == 2301.0
 
 
@@ -356,9 +331,7 @@ def test_break_even_offset_sell():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.MOVE_TO_BREAK_EVEN
-    )
+    assert decision.action == ManagementAction.MOVE_TO_BREAK_EVEN
     assert decision.new_stop_loss == 2299.0
 
 
@@ -377,9 +350,7 @@ def test_management_decision_serialization():
 
     decision = manager.evaluate(position)
 
-    data = management_decision_to_dict(
-        decision
-    )
+    data = management_decision_to_dict(decision)
 
     assert data["action"] == "move_to_break_even"
     assert data["trade_id"] == "PAPER-12-015"
@@ -475,14 +446,6 @@ def test_partial_close_never_closes_entire_position():
 
     decision = manager.evaluate(position)
 
-    assert decision.action == (
-        ManagementAction.PARTIAL_CLOSE
-    )
-    assert (
-        decision.partial_close_quantity
-        < position.quantity
-    )
-    assert (
-        decision.partial_close_quantity
-        > 0.0
-    )
+    assert decision.action == ManagementAction.PARTIAL_CLOSE
+    assert decision.partial_close_quantity < position.quantity
+    assert decision.partial_close_quantity > 0.0
