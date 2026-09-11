@@ -116,7 +116,7 @@ async def test_step13_buy_flows_into_step14_risk_and_paper_execution():
 
 
 @pytest.mark.asyncio
-async def test_conflicting_ai_context_stops_before_risk_and_execution():
+async def test_step13_sell_flows_into_step14_risk_and_paper_execution():
     pipeline = make_pipeline()
 
     result = await pipeline.evaluate_and_execute_paper(
@@ -131,7 +131,12 @@ async def test_conflicting_ai_context_stops_before_risk_and_execution():
 
     assert result.decision.direction is AIDirection.SELL
     assert result.risk_decision is not None
+    assert result.risk_decision.allowed is True
+    assert result.position_size is not None
+    assert result.position_size > 0
     assert result.execution_result is not None
+    assert result.execution_result.execution_type == "paper"
+    assert result.execution_result.status.value == "accepted"
 
 
 @pytest.mark.asyncio
@@ -178,6 +183,29 @@ async def test_live_enabled_gateway_is_rejected_by_step14():
     with pytest.raises(
         Step14PipelineError,
         match="Live trading",
+    ):
+        await pipeline.evaluate_and_execute_paper(
+            context(),
+            specification(),
+            account_equity=10_000.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_paper_gateway_is_rejected():
+    class FakeGateway:
+        async def execute(self, order):
+            return "danger"
+
+    pipeline = Step14Pipeline(
+        ai_engine=AITradingDecisionEngine(),
+        risk_engine=RiskEngine(),
+        execution_gateway=FakeGateway(),
+    )
+
+    with pytest.raises(
+        Step14PipelineError,
+        match="paper execution gateway",
     ):
         await pipeline.evaluate_and_execute_paper(
             context(),
