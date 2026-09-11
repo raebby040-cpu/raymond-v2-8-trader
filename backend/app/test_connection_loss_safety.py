@@ -339,12 +339,14 @@ def test_reset_after_connection_recovery_allows_trading():
     manager.activate_emergency_stop()
     manager.mark_connection_lost()
 
+    recovered_heartbeat = heartbeat + timedelta(seconds=5)
+
     manager.record_heartbeat(
-        heartbeat + timedelta(seconds=5)
+        recovered_heartbeat
     )
 
     stopped = manager.status(
-        now=heartbeat + timedelta(seconds=5)
+        now=recovered_heartbeat
     )
 
     assert stopped.trading_allowed is False
@@ -353,8 +355,18 @@ def test_reset_after_connection_recovery_allows_trading():
 
     assert reset.emergency_stop_active is False
     assert reset.connection_healthy is True
-    assert reset.connection_stale is False
-    assert reset.trading_allowed is True
+
+    reset_status = manager.status(
+        now=recovered_heartbeat
+    )
+
+    assert reset_status.connection_stale is False
+    assert reset_status.trading_allowed is True
+    assert reset_status.reason == "Trading safety checks passed."
+
+    manager.require_trade_permission(
+        now=recovered_heartbeat
+    )
 
 
 def test_naive_timestamp_is_normalized_to_utc():
