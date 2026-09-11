@@ -34,62 +34,45 @@ class ApiService {
 
   Future<List<Map<String, dynamic>>> demoTrades() async {
     final response = await _dio.get('/api/demo/trades');
-
     final data = response.data;
-
-    if (data is List) {
-      return data
-          .whereType<Map>()
-          .map(
-            (item) => Map<String, dynamic>.from(item),
-          )
-          .toList();
-    }
 
     if (data is Map && data['trades'] is List) {
       return (data['trades'] as List)
           .whereType<Map>()
-          .map(
-            (item) => Map<String, dynamic>.from(item),
-          )
+          .map((item) => Map<String, dynamic>.from(item))
           .toList();
     }
 
-    return <Map<String, dynamic>>[];
+    return [];
+  }
+
+  Future<Map<String, dynamic>> marketPrice({
+    String symbol = 'XAUUSD',
+  }) async {
+    final response = await _dio.get(
+      '/api/market/price',
+      queryParameters: {'symbol': symbol},
+    );
+
+    return _asMap(response.data);
   }
 
   Future<Map<String, dynamic>> openDemoTrade({
     required String symbol,
-    required String side,
+    required String direction,
     required double entryPrice,
     required double quantity,
-    String? tradeId,
     double? stopLoss,
     double? takeProfit,
-    String? notes,
   }) async {
-    final payload = <String, dynamic>{
+    final payload = {
       'symbol': symbol,
-      'side': side,
+      'direction': direction,
       'entry_price': entryPrice,
       'quantity': quantity,
+      'stop_loss': stopLoss,
+      'take_profit': takeProfit,
     };
-
-    if (tradeId != null) {
-      payload['trade_id'] = tradeId;
-    }
-
-    if (stopLoss != null) {
-      payload['stop_loss'] = stopLoss;
-    }
-
-    if (takeProfit != null) {
-      payload['take_profit'] = takeProfit;
-    }
-
-    if (notes != null) {
-      payload['notes'] = notes;
-    }
 
     final response = await _dio.post(
       '/api/demo/trades',
@@ -115,19 +98,6 @@ class ApiService {
 
   Future<Map<String, dynamic>> resetDemo() async {
     final response = await _dio.post('/api/demo/reset');
-    return _asMap(response.data);
-  }
-
-  Future<Map<String, dynamic>> marketData({
-    String symbol = 'XAUUSD',
-  }) async {
-    final response = await _dio.get(
-      '/market-data',
-      queryParameters: {
-        'symbol': symbol,
-      },
-    );
-
     return _asMap(response.data);
   }
 
