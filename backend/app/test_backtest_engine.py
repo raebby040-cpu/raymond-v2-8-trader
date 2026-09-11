@@ -6,9 +6,12 @@ Deterministic tests for the production backtesting engine.
 Safety coverage:
 - insufficient historical data is rejected
 - invalid candles are rejected
+- non-chronological candles are rejected
 - symbol mismatch is rejected
 - WAIT decisions do not create trades
-- BUY/SELL decisions execute only on the next candle open
+- BUY decisions execute only on the next candle open
+- stop-loss is respected
+- take-profit is respected
 - stop-loss is preferred when SL and TP are both touched
 - Risk Engine rejection prevents entries
 - broker-aware position sizing is used
@@ -18,14 +21,13 @@ Safety coverage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 import pytest
 
 from app.ai_trading_decision import (
-    AIDirection,
     AIDecision,
+    AIDirection,
     AITradeProposal,
 )
 from app.backtest_engine import (
@@ -36,7 +38,6 @@ from app.backtest_engine import (
 from app.risk_engine import (
     RiskDecision,
     RiskEngine,
-    RiskEngineError,
     SymbolSpecification,
 )
 
@@ -125,6 +126,8 @@ def make_buy_decision(
 
     return AIDecision(
         direction=AIDirection.BUY,
+        symbol="XAUUSD",
+        timeframe="H1",
         confidence=80.0,
         technical_score=80,
         trend="Bullish",
@@ -160,6 +163,8 @@ def make_sell_decision(
 
     return AIDecision(
         direction=AIDirection.SELL,
+        symbol="XAUUSD",
+        timeframe="H1",
         confidence=80.0,
         technical_score=20,
         trend="Bearish",
@@ -172,6 +177,8 @@ def make_sell_decision(
 def make_wait_decision() -> AIDecision:
     return AIDecision(
         direction=AIDirection.WAIT,
+        symbol="XAUUSD",
+        timeframe="H1",
         confidence=50.0,
         technical_score=50,
         trend="Neutral",
@@ -185,8 +192,8 @@ class FakePipeline:
     """
     Minimal deterministic pipeline replacement.
 
-    It allows the backtest tests to isolate simulator behavior
-    without depending on market-indicator calculations.
+    It isolates backtest simulator behavior from the real
+    technical-indicator calculation path.
     """
 
     def __init__(
@@ -284,7 +291,10 @@ def test_rejects_insufficient_candles() -> None:
 
     candles = make_candles(50)
 
-    with pytest.raises(BacktestEngineError, match="Insufficient"):
+    with pytest.raises(
+        BacktestEngineError,
+        match="Insufficient",
+    ):
         engine.run(
             candles=candles,
             specification=make_specification(),
@@ -360,6 +370,7 @@ def test_wait_decision_creates_no_trade() -> None:
     assert result.total_trades == 0
     assert result.winning_trades == 0
     assert result.losing_trades == 0
+    assert result.breakeven_trades == 0
 
 
 def test_signal_uses_only_past_and_current_candles() -> None:
@@ -393,7 +404,6 @@ def test_signal_uses_only_past_and_current_candles() -> None:
     first_call = pipeline.calls[0]
 
     assert len(first_call) == 51
-
     assert first_call == candles[:51]
 
 
@@ -412,7 +422,6 @@ def test_buy_entry_occurs_on_next_candle_open() -> None:
 
     candles = make_candles(52)
 
-    # Signal candle.
     candles[50] = {
         "time": "2026-01-01T00:50:00",
         "open": 2000.0,
@@ -421,7 +430,6 @@ def test_buy_entry_occurs_on_next_candle_open() -> None:
         "close": 2005.0,
     }
 
-    # Next candle is deliberately different.
     candles[51] = {
         "time": "2026-01-01T00:51:00",
         "open": 2010.0,
@@ -435,12 +443,11 @@ def test_buy_entry_occurs_on_next_candle_open() -> None:
         specification=make_specification(),
     )
 
-    # With only one signal candle and no later candle after the
-    # entry candle, the open position is closed at end of data.
     assert result.total_trades == 1
     assert result.trades[0]["entry_price"] == pytest.approx(
         2010.0
     )
+    assert result.trades[0]["exit_reason"] == "end_of_data"
 
 
 def test_buy_stop_loss_is_respected() -> None:
@@ -489,6 +496,9 @@ def test_buy_stop_loss_is_respected() -> None:
 
     assert result.total_trades == 1
     assert result.trades[0]["exit_reason"] == "stop_loss"
+    assert result.trades[0]["exit_price"] == pytest.approx(
+        1999.0
+    )
     assert result.trades[0]["pnl"] < 0
 
 
@@ -538,6 +548,9 @@ def test_buy_take_profit_is_respected() -> None:
 
     assert result.total_trades == 1
     assert result.trades[0]["exit_reason"] == "take_profit"
+    assert result.trades[0]["exit_price"] == pytest.approx(
+        2002.0
+    )
     assert result.trades[0]["pnl"] > 0
 
 
@@ -579,6 +592,9 @@ def test_stop_loss_wins_when_both_sl_and_tp_are_touched() -> None:
 
     assert result.total_trades == 1
     assert result.trades[0]["exit_reason"] == "stop_loss"
+    assert result.trades[0]["exit_price"] == pytest.approx(
+        1999.0
+    )
     assert result.trades[0]["pnl"] < 0
 
 
@@ -686,6 +702,9 @@ def test_open_position_can_be_closed_at_end_of_data() -> None:
 
     assert result.total_trades == 1
     assert result.trades[0]["exit_reason"] == "end_of_data"
+    assert result.trades[0]["exit_price"] == pytest.approx(
+        2005.0
+    )
 
 
 def test_result_contains_equity_curve() -> None:
@@ -705,9 +724,11 @@ def test_result_contains_equity_curve() -> None:
 
     assert result.equity_curve
     assert result.bars_processed == 60
+
     assert result.starting_balance == pytest.approx(
         10_000.0
     )
+
     assert result.ending_balance == pytest.approx(
         10_000.0
     )
