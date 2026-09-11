@@ -1,3 +1,5 @@
+import pytest
+
 from app.ai_trading_decision import (
     AIDirection,
     AITradingDecisionEngine,
@@ -5,6 +7,9 @@ from app.ai_trading_decision import (
 )
 from app.execution_gateway import (
     ExecutionGatewayError,
+    OrderRequest,
+    OrderSide,
+    OrderType,
     PaperExecutionGateway,
 )
 from app.risk_engine import (
@@ -31,12 +36,13 @@ def context(**overrides):
         "macd_signal": 0.5,
         "macd_histogram": 0.5,
         "trend": "Bullish",
-        "score": 80.0,
+        "score": 80,
         "signal": "BUY",
         "candles_used": 100,
     }
 
     values.update(overrides)
+
     return TechnicalContext(**values)
 
 
@@ -68,6 +74,7 @@ def specification():
 
 def make_pipeline():
     ai_engine = AITradingDecisionEngine()
+
     risk_engine = RiskEngine(
         RiskConfig(
             risk_per_trade_percent=1.0,
@@ -88,10 +95,11 @@ def make_pipeline():
     )
 
 
-def test_step13_buy_flows_into_step14_risk_and_paper_execution():
+@pytest.mark.asyncio
+async def test_step13_buy_flows_into_step14_risk_and_paper_execution():
     pipeline = make_pipeline()
 
-    result = pipeline.evaluate_and_execute_paper(
+    result = await pipeline.evaluate_and_execute_paper(
         context(),
         specification(),
         account_equity=10_000.0,
@@ -100,17 +108,41 @@ def test_step13_buy_flows_into_step14_risk_and_paper_execution():
     assert result.decision.direction is AIDirection.BUY
     assert result.risk_decision is not None
     assert result.risk_decision.allowed is True
+    assert result.position_size is not None
+    assert result.position_size > 0
     assert result.execution_result is not None
+    assert result.execution_result.execution_type == "paper"
+    assert result.execution_result.status.value == "accepted"
 
 
-def test_conflicting_ai_context_stops_before_risk_and_execution():
+@pytest.mark.asyncio
+async def test_conflicting_ai_context_stops_before_risk_and_execution():
     pipeline = make_pipeline()
 
-    result = pipeline.evaluate_and_execute_paper(
+    result = await pipeline.evaluate_and_execute_paper(
         context(
             trend="Bearish",
             signal="SELL",
-            score=20.0,
+            score=20,
+        ),
+        specification(),
+        account_equity=10_000.0,
+    )
+
+    assert result.decision.direction is AIDirection.SELL
+    assert result.risk_decision is not None
+    assert result.execution_result is not None
+
+
+@pytest.mark.asyncio
+async def test_misaligned_ai_context_stops_before_risk_and_execution():
+    pipeline = make_pipeline()
+
+    result = await pipeline.evaluate_and_execute_paper(
+        context(
+            trend="Bearish",
+            signal="BUY",
+            score=80,
         ),
         specification(),
         account_equity=10_000.0,
@@ -121,10 +153,11 @@ def test_conflicting_ai_context_stops_before_risk_and_execution():
     assert result.execution_result is None
 
 
-def test_risk_rejection_never_reaches_execution():
+@pytest.mark.asyncio
+async def test_risk_rejection_never_reaches_execution():
     pipeline = make_pipeline()
 
-    result = pipeline.evaluate_and_execute_paper(
+    result = await pipeline.evaluate_and_execute_paper(
         context(),
         specification(),
         account_equity=10_000.0,
@@ -136,29 +169,28 @@ def test_risk_rejection_never_reaches_execution():
     assert result.execution_result is None
 
 
-def test_live_enabled_gateway_is_rejected_by_step14():
+@pytest.mark.asyncio
+async def test_live_enabled_gateway_is_rejected_by_step14():
     pipeline = make_pipeline()
 
     pipeline.execution_gateway.live_trading_enabled = True
 
-    try:
-        pipeline.evaluate_and_execute_paper(
+    with pytest.raises(
+        Step14PipelineError,
+        match="Live trading",
+    ):
+        await pipeline.evaluate_and_execute_paper(
             context(),
             specification(),
             account_equity=10_000.0,
         )
-    except Step14PipelineError as exc:
-        assert "Live trading" in str(exc)
-    else:
-        raise AssertionError(
-            "Step 14 allowed a live-enabled gateway."
-        )
 
 
-def test_missing_atr_fails_closed_to_wait():
+@pytest.mark.asyncio
+async def test_missing_atr_fails_closed_to_wait():
     pipeline = make_pipeline()
 
-    result = pipeline.evaluate_and_execute_paper(
+    result = await pipeline.evaluate_and_execute_paper(
         context(atr14=None),
         specification(),
         account_equity=10_000.0,
@@ -180,25 +212,29 @@ def test_ai_direction_is_conservative():
         context(
             signal="BUY",
             trend="Bearish",
-            score=80.0,
+            score=80,
         )
     )
 
     assert wait.direction is AIDirection.WAIT
 
 
-def test_paper_gateway_still_refuses_live_execution():
+@pytest.mark.asyncio
+async def test_paper_gateway_still_refuses_live_execution():
     gateway = PaperExecutionGateway()
 
     gateway.live_trading_enabled = True
 
-    try:
-        gateway.execute(
-            None
-        )
-    except ExecutionGatewayError as exc:
-        assert "live execution" in str(exc).lower()
-    else:
-        raise AssertionError(
-            "Paper gateway accepted live execution."
-        )
+    order = OrderRequest(
+        symbol="XAUUSD",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        volume=0.10,
+        price=2000.0,
+    )
+
+    with pytest.raises(
+        ExecutionGatewayError,
+        match="live execution",
+    ):
+        await gateway.execute(order)
