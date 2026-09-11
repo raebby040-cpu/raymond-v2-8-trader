@@ -17,11 +17,13 @@ SAFETY:
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+
 
 try:
     from .demo_trading import (
@@ -116,6 +118,22 @@ class DemoTradeCloseRequest(BaseModel):
 # SERIALIZATION
 # ============================================================
 
+def _json_safe_float(value: float) -> Optional[float]:
+    """
+    Return a JSON-safe float.
+
+    Python can represent infinity and NaN, but strict JSON cannot.
+    Non-finite values are therefore returned as None.
+    """
+
+    numeric = float(value)
+
+    if not math.isfinite(numeric):
+        return None
+
+    return numeric
+
+
 def serialize_demo_trade(trade) -> dict:
     """Convert a DemoTrade into a JSON-safe response."""
 
@@ -123,12 +141,36 @@ def serialize_demo_trade(trade) -> dict:
         "trade_id": trade.trade_id,
         "symbol": trade.symbol,
         "direction": trade.direction,
-        "entry_price": trade.entry_price,
-        "quantity": trade.quantity,
-        "stop_loss": trade.stop_loss,
-        "take_profit": trade.take_profit,
-        "exit_price": trade.exit_price,
-        "pnl": trade.pnl,
+        "entry_price": _json_safe_float(
+            trade.entry_price
+        ),
+        "quantity": _json_safe_float(
+            trade.quantity
+        ),
+        "stop_loss": (
+            _json_safe_float(
+                trade.stop_loss
+            )
+            if trade.stop_loss is not None
+            else None
+        ),
+        "take_profit": (
+            _json_safe_float(
+                trade.take_profit
+            )
+            if trade.take_profit is not None
+            else None
+        ),
+        "exit_price": (
+            _json_safe_float(
+                trade.exit_price
+            )
+            if trade.exit_price is not None
+            else None
+        ),
+        "pnl": _json_safe_float(
+            trade.pnl
+        ),
         "status": trade.status,
         "execution_type": trade.execution_type,
         "opened_at": (
@@ -152,14 +194,56 @@ def serialize_performance(performance) -> dict:
         "winning_trades": performance.winning_trades,
         "losing_trades": performance.losing_trades,
         "open_trades": performance.open_trades,
-        "win_rate": performance.win_rate,
-        "total_pnl": performance.total_pnl,
-        "gross_profit": performance.gross_profit,
-        "gross_loss": performance.gross_loss,
-        "profit_factor": performance.profit_factor,
-        "max_drawdown": performance.max_drawdown,
-        "expectancy": performance.expectancy,
+        "win_rate": _json_safe_float(
+            performance.win_rate
+        ),
+        "total_pnl": _json_safe_float(
+            performance.total_pnl
+        ),
+        "gross_profit": _json_safe_float(
+            performance.gross_profit
+        ),
+        "gross_loss": _json_safe_float(
+            performance.gross_loss
+        ),
+        "profit_factor": _json_safe_float(
+            performance.profit_factor
+        ),
+        "max_drawdown": _json_safe_float(
+            performance.max_drawdown
+        ),
+        "expectancy": _json_safe_float(
+            performance.expectancy
+        ),
     }
+
+
+def serialize_status(status: dict) -> dict:
+    """Convert demo engine status into JSON-safe values."""
+
+    result = dict(status)
+
+    float_fields = {
+        "win_rate",
+        "total_pnl",
+        "gross_profit",
+        "gross_loss",
+        "profit_factor",
+        "max_drawdown",
+        "expectancy",
+        "daily_closed_pnl",
+    }
+
+    for field_name in float_fields:
+        if (
+            field_name in result
+            and result[field_name] is not None
+        ):
+            result[field_name] = _json_safe_float(
+                result[field_name]
+            )
+
+    return result
 
 
 # ============================================================
@@ -195,7 +279,9 @@ def open_demo_trade(
         try:
             journal.save_demo_trade(trade)
         except Exception:
-            demo_engine.cancel_trade(trade.trade_id)
+            demo_engine.cancel_trade(
+                trade.trade_id
+            )
             raise
 
         return {
@@ -204,7 +290,9 @@ def open_demo_trade(
             "execution_type": "paper",
             "live_trading_enabled": False,
             "real_orders_allowed": False,
-            "trade": serialize_demo_trade(trade),
+            "trade": serialize_demo_trade(
+                trade
+            ),
         }
 
     except DemoTradingError as exc:
@@ -266,7 +354,9 @@ def close_demo_trade(
             "execution_type": "paper",
             "live_trading_enabled": False,
             "real_orders_allowed": False,
-            "trade": serialize_demo_trade(trade),
+            "trade": serialize_demo_trade(
+                trade
+            ),
         }
 
     except DemoTradingError as exc:
@@ -314,7 +404,7 @@ def list_demo_trades(
     journal = TradeJournal(db)
 
     try:
-        trades = journal.list_trades(
+        trades, total = journal.list_trades(
             limit=limit,
             offset=offset,
             execution_type="paper",
@@ -332,6 +422,7 @@ def list_demo_trades(
             "live_trading_enabled": False,
             "trades": serialized,
             "count": len(serialized),
+            "total": total,
             "limit": limit,
             "offset": offset,
         }
@@ -380,7 +471,9 @@ def demo_status():
     Return demo engine safety and status information.
     """
 
-    return demo_engine.status()
+    return serialize_status(
+        demo_engine.status()
+    )
 
 
 # ============================================================
