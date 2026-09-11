@@ -18,7 +18,6 @@ class _AnalysisPageState extends State<AnalysisPage> {
   static const gold = Color(0xFFF5B82E);
   static const green = Color(0xFF00E59B);
   static const red = Color(0xFFFF5C6C);
-  static const background = Color(0xFF030B14);
   static const card = Color(0xFF091724);
   static const border = Color(0xFF17334D);
   static const muted = Color(0xFF8EA4B8);
@@ -72,25 +71,55 @@ class _AnalysisPageState extends State<AnalysisPage> {
         timeframe = '${data['timeframe'] ?? timeframe}';
 
         close = _number(data['close']);
-        ema20 = _number(indicators is Map ? indicators['ema20'] : null);
-        ema50 = _number(indicators is Map ? indicators['ema50'] : null);
-        rsi14 = _number(indicators is Map ? indicators['rsi14'] : null);
-        atr14 = _number(indicators is Map ? indicators['atr14'] : null);
-        macd = _number(indicators is Map ? indicators['macd'] : null);
-        macdSignal =
-            _number(indicators is Map ? indicators['macd_signal'] : null);
-        macdHistogram =
-            _number(indicators is Map ? indicators['macd_histogram'] : null);
 
-        trend = '${analysis is Map ? analysis['trend'] : 'Neutral'}';
-        signal = '${analysis is Map ? analysis['signal'] : 'WAIT'}';
+        ema20 = _number(
+          indicators is Map ? indicators['ema20'] : null,
+        );
 
-        final scoreValue = analysis is Map ? analysis['score'] : null;
-        score = scoreValue is num ? scoreValue.toInt() : 50;
+        ema50 = _number(
+          indicators is Map ? indicators['ema50'] : null,
+        );
+
+        rsi14 = _number(
+          indicators is Map ? indicators['rsi14'] : null,
+        );
+
+        atr14 = _number(
+          indicators is Map ? indicators['atr14'] : null,
+        );
+
+        macd = _number(
+          indicators is Map ? indicators['macd'] : null,
+        );
+
+        macdSignal = _number(
+          indicators is Map ? indicators['macd_signal'] : null,
+        );
+
+        macdHistogram = _number(
+          indicators is Map ? indicators['macd_histogram'] : null,
+        );
+
+        trend = analysis is Map
+            ? '${analysis['trend'] ?? 'Neutral'}'
+            : 'Neutral';
+
+        signal = analysis is Map
+            ? '${analysis['signal'] ?? 'WAIT'}'
+            : 'WAIT';
+
+        final scoreValue =
+            analysis is Map ? analysis['score'] : null;
+
+        score = scoreValue is num
+            ? scoreValue.toInt().clamp(0, 100)
+            : 50;
 
         final candlesValue = data['candles_used'];
-        candlesUsed =
-            candlesValue is num ? candlesValue.toInt() : 0;
+
+        candlesUsed = candlesValue is num
+            ? candlesValue.toInt()
+            : 0;
 
         loading = false;
       });
@@ -136,56 +165,83 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: background,
-      appBar: AppBar(
-        backgroundColor: background,
-        elevation: 0,
-        title: const Text(
-          'MARKET ANALYSIS',
-          style: TextStyle(
-            fontWeight: FontWeight.w800,
-            letterSpacing: 1.0,
-          ),
+    return RefreshIndicator(
+      onRefresh: _loadAnalysis,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(
+          16,
+          8,
+          16,
+          24,
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: loading ? null : _loadAnalysis,
-          ),
-        ],
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _pageHeader(),
+
+            const SizedBox(height: 14),
+
+            if (errorMessage.isNotEmpty) _errorCard(),
+
+            _marketHeader(),
+
+            const SizedBox(height: 14),
+
+            _signalCard(),
+
+            const SizedBox(height: 14),
+
+            _indicatorCard(),
+
+            const SizedBox(height: 14),
+
+            _trendCard(),
+
+            const SizedBox(height: 14),
+
+            _safetyCard(),
+          ],
+        ),
       ),
-      body: RefreshIndicator(
-        onRefresh: _loadAnalysis,
-        child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+    );
+  }
+
+  Widget _pageHeader() {
+    return Row(
+      children: [
+        const Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (errorMessage.isNotEmpty) _errorCard(),
-
-              _marketHeader(),
-
-              const SizedBox(height: 14),
-
-              _signalCard(),
-
-              const SizedBox(height: 14),
-
-              _indicatorCard(),
-
-              const SizedBox(height: 14),
-
-              _trendCard(),
-
-              const SizedBox(height: 14),
-
-              _safetyCard(),
+              Text(
+                'MARKET ANALYSIS',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.0,
+                ),
+              ),
+              SizedBox(height: 3),
+              Text(
+                'Technical market intelligence',
+                style: TextStyle(
+                  color: muted,
+                  fontSize: 12,
+                ),
+              ),
             ],
           ),
         ),
-      ),
+        IconButton(
+          tooltip: 'Refresh analysis',
+          onPressed: loading ? null : _loadAnalysis,
+          icon: const Icon(
+            Icons.refresh,
+            color: gold,
+          ),
+        ),
+      ],
     );
   }
 
@@ -279,10 +335,11 @@ class _AnalysisPageState extends State<AnalysisPage> {
           ),
           const SizedBox(height: 14),
           LinearProgressIndicator(
-            value: score.clamp(0, 100) / 100,
+            value: score / 100.0,
             minHeight: 7,
             backgroundColor: border,
-            valueColor: AlwaysStoppedAnimation<Color>(color),
+            valueColor:
+                AlwaysStoppedAnimation<Color>(color),
           ),
         ],
       ),
@@ -350,6 +407,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
   ) {
     final color = positive ? green : red;
 
+    final neutralIndicator =
+        name == 'ATR 14' || name == 'MACD Signal';
+
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.symmetric(
@@ -374,9 +434,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
           Text(
             loading ? '--' : value.toStringAsFixed(4),
             style: TextStyle(
-              color: name == 'ATR 14' || name == 'MACD Signal'
-                  ? Colors.white
-                  : color,
+              color: neutralIndicator ? Colors.white : color,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -388,22 +446,25 @@ class _AnalysisPageState extends State<AnalysisPage> {
   Widget _trendCard() {
     final color = _trendColor();
 
+    final trendIcon = trend.toLowerCase() == 'bullish'
+        ? Icons.trending_up
+        : trend.toLowerCase() == 'bearish'
+            ? Icons.trending_down
+            : Icons.trending_flat;
+
     return _card(
       child: Row(
         children: [
           Icon(
-            trend.toLowerCase() == 'bullish'
-                ? Icons.trending_up
-                : trend.toLowerCase() == 'bearish'
-                    ? Icons.trending_down
-                    : Icons.trending_flat,
+            trendIcon,
             color: color,
             size: 34,
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
                 const Text(
                   'MARKET TREND',
@@ -449,7 +510,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
           SizedBox(width: 12),
           Expanded(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
                 Text(
                   'READ-ONLY ANALYSIS',
@@ -460,8 +522,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 ),
                 SizedBox(height: 5),
                 Text(
-                  'This screen only reads market data and technical indicators. '
-                  'It does not place, modify, or close trades.',
+                  'This screen only reads market data and '
+                  'technical indicators. It does not place, '
+                  'modify, or close trades.',
                   style: TextStyle(
                     color: muted,
                     fontSize: 13,
@@ -498,7 +561,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
           Expanded(
             child: Text(
               '$errorMessage. Pull down to retry.',
-              style: const TextStyle(color: red),
+              style: const TextStyle(
+                color: red,
+              ),
             ),
           ),
         ],
