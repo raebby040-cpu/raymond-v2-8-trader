@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'analysis_page.dart';
 import 'api_service.dart';
 
 void main() {
@@ -124,7 +125,7 @@ class _HomePageState extends State<HomePage> {
         trades = fetchedTrades;
         loading = false;
       });
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
 
       setState(() {
@@ -191,6 +192,7 @@ class _HomePageState extends State<HomePage> {
           ),
           NavigationDestination(
             icon: Icon(Icons.analytics_outlined),
+            selectedIcon: Icon(Icons.analytics, color: gold),
             label: 'Analysis',
           ),
           NavigationDestination(
@@ -242,10 +244,17 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildBody() {
+    // Analysis tab
+    if (selectedIndex == 2) {
+      return AnalysisPage(api: api);
+    }
+
+    // Other tabs remain placeholders for now.
     if (selectedIndex != 0) {
       return _placeholderPage();
     }
 
+    // Home tab
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
@@ -254,8 +263,7 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (errorMessage.isNotEmpty)
-              _errorCard(),
+            if (errorMessage.isNotEmpty) _errorCard(),
 
             const Text(
               'XAUUSD',
