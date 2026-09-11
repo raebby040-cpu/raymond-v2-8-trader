@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.demo_api import demo_engine, router
 from app.models import Base, get_db
@@ -26,6 +27,7 @@ def test_app():
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
 
     Base.metadata.create_all(engine)
@@ -54,6 +56,8 @@ def test_app():
     yield app
 
     demo_engine.reset()
+    app.dependency_overrides.clear()
+    engine.dispose()
 
 
 @pytest.fixture
