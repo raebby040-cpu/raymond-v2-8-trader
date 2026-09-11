@@ -401,14 +401,8 @@ def build_paper_risk_state() -> PaperRiskState:
     """
     Build the current paper-trading risk state.
 
-    Step 15 deliberately uses the existing DemoTradingEngine
-    as the paper-state source.
-
-    It does NOT use real MT5 positions as paper positions.
-
-    This keeps the Step 15 pipeline paper-only and prevents
-    real broker positions from being mixed with simulated
-    paper positions.
+    Paper exposure is calculated from currently open simulated
+    trades only. Real MT5 positions are deliberately excluded.
     """
 
     try:
@@ -416,9 +410,11 @@ def build_paper_risk_state() -> PaperRiskState:
             demo_engine.daily_closed_pnl()
         )
 
-        open_positions = len(
+        open_trades = list(
             demo_engine.open_trades
         )
+
+        open_positions = len(open_trades)
 
         # RiskEngine expects daily_loss to be a positive
         # loss amount, not a negative P&L number.
@@ -427,11 +423,44 @@ def build_paper_risk_state() -> PaperRiskState:
             -daily_closed_pnl,
         )
 
+        # Calculate notional exposure from actual open
+        # paper trades instead of a hard-coded zero.
+        total_exposure = 0.0
+
+        for trade in open_trades:
+            try:
+                entry_price = float(
+                    trade.entry_price
+                )
+                quantity = float(
+                    trade.quantity
+                )
+            except (TypeError, ValueError) as exc:
+                raise TradingPipelineServiceError(
+                    "Invalid open paper trade values while "
+                    f"calculating exposure: {exc}"
+                ) from exc
+
+            if entry_price <= 0:
+                raise TradingPipelineServiceError(
+                    "Open paper trade has an invalid entry price."
+                )
+
+            if quantity <= 0:
+                raise TradingPipelineServiceError(
+                    "Open paper trade has an invalid quantity."
+                )
+
+            total_exposure += entry_price * quantity
+
         return PaperRiskState(
             daily_loss=daily_loss,
             open_positions=open_positions,
-            total_exposure=0.0,
+            total_exposure=total_exposure,
         )
+
+    except TradingPipelineServiceError:
+        raise
 
     except Exception as exc:
         raise TradingPipelineServiceError(
@@ -1175,119 +1204,42 @@ async def place_order(
     order_data: dict,
 ):
     """
-    STEP 5 - PAPER EXECUTION GATEWAY.
+    Legacy direct-order endpoint.
 
-    No real broker order is placed.
+    Direct client-supplied orders are intentionally disabled.
+
+    All strategy-driven paper trades MUST use:
+
+        POST /api/strategy/paper-trade
+
+    That canonical path runs the AI decision and Risk Engine
+    before paper execution, so the client cannot bypass risk
+    controls by supplying its own position size.
+
+    No live broker order is ever placed here.
     """
 
-    logger.info(
-        "Trade execution request received "
-        "through Step 5 execution gateway."
+    logger.warning(
+        "Rejected legacy direct order request. "
+        "Use /api/strategy/paper-trade instead."
     )
 
-    try:
-        symbol = str(
-            order_data.get(
-                "symbol",
-                "",
-            )
-        ).strip()
-
-        side_value = str(
-            order_data.get(
-                "side",
-                order_data.get(
-                    "direction",
-                    "",
-                ),
-            )
-        ).strip().lower()
-
-        if side_value == "long":
-            side_value = "buy"
-
-        elif side_value == "short":
-            side_value = "sell"
-
-        order_type_value = str(
-            order_data.get(
-                "order_type",
-                "market",
-            )
-        ).strip().lower()
-
-        volume_value = order_data.get(
-            "volume",
-            order_data.get(
-                "quantity",
-                0.1,
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": "Direct order endpoint disabled",
+            "message": (
+                "Direct client-supplied orders are disabled. "
+                "Use /api/strategy/paper-trade so the AI "
+                "decision and Risk Engine can validate and "
+                "calculate the paper position size."
             ),
-        )
-
-        price_value = order_data.get("price")
-        stop_loss_value = order_data.get("stop_loss")
-        take_profit_value = order_data.get("take_profit")
-        client_order_id = order_data.get("client_order_id")
-
-        order = OrderRequest(
-            symbol=symbol,
-            side=OrderSide(side_value),
-            order_type=OrderType(order_type_value),
-            volume=float(volume_value),
-            price=(
-                float(price_value)
-                if price_value is not None
-                else None
-            ),
-            stop_loss=(
-                float(stop_loss_value)
-                if stop_loss_value is not None
-                else None
-            ),
-            take_profit=(
-                float(take_profit_value)
-                if take_profit_value is not None
-                else None
-            ),
-            client_order_id=client_order_id,
-        )
-
-        # SAFETY GATE:
-        # Emergency stop, connection loss, stale heartbeat,
-        # or any other unsafe state blocks execution.
-        safety_manager.require_trade_permission()
-
-        result = await execution_gateway.execute(order)
-
-        return {
-            "order_id": result.order_id,
-            "client_order_id": result.client_order_id,
-            "status": result.status.value,
-            "execution_type": result.execution_type,
-            "broker": result.broker,
-            "symbol": result.symbol,
-            "side": result.side,
-            "order_type": result.order_type,
-            "volume": result.volume,
-            "quantity": result.volume,
-            "price": result.price,
-            "stop_loss": result.stop_loss,
-            "take_profit": result.take_profit,
-            "timestamp": result.timestamp,
-            "message": result.message,
-        }
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid order request: {exc}",
-        ) from exc
-
-    except ExecutionGatewayError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
+            "canonical_endpoint": "/api/strategy/paper-trade",
+            "execution_mode": "paper_only",
+            "live_trading_enabled": False,
+            "risk_engine_required": True,
+        },
+    )
 
 
 # ============================================================
