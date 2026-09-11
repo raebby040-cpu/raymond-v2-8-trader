@@ -1,0 +1,143 @@
+import 'package:dio/dio.dart';
+
+class ApiService {
+  ApiService({String? baseUrl})
+      : _dio = Dio(
+          BaseOptions(
+            baseUrl: baseUrl ?? 'http://10.0.2.2:8000',
+            connectTimeout: const Duration(seconds: 5),
+            receiveTimeout: const Duration(seconds: 10),
+            sendTimeout: const Duration(seconds: 10),
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+            },
+          ),
+        );
+
+  final Dio _dio;
+
+  Future<Map<String, dynamic>> health() async {
+    final response = await _dio.get('/health');
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> demoStatus() async {
+    final response = await _dio.get('/api/demo/status');
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> demoPerformance() async {
+    final response = await _dio.get('/api/demo/performance');
+    return _asMap(response.data);
+  }
+
+  Future<List<Map<String, dynamic>>> demoTrades() async {
+    final response = await _dio.get('/api/demo/trades');
+
+    final data = response.data;
+
+    if (data is List) {
+      return data
+          .whereType<Map>()
+          .map(
+            (item) => Map<String, dynamic>.from(item),
+          )
+          .toList();
+    }
+
+    if (data is Map && data['trades'] is List) {
+      return (data['trades'] as List)
+          .whereType<Map>()
+          .map(
+            (item) => Map<String, dynamic>.from(item),
+          )
+          .toList();
+    }
+
+    return <Map<String, dynamic>>[];
+  }
+
+  Future<Map<String, dynamic>> openDemoTrade({
+    required String symbol,
+    required String side,
+    required double entryPrice,
+    required double quantity,
+    String? tradeId,
+    double? stopLoss,
+    double? takeProfit,
+    String? notes,
+  }) async {
+    final payload = <String, dynamic>{
+      'symbol': symbol,
+      'side': side,
+      'entry_price': entryPrice,
+      'quantity': quantity,
+    };
+
+    if (tradeId != null) {
+      payload['trade_id'] = tradeId;
+    }
+
+    if (stopLoss != null) {
+      payload['stop_loss'] = stopLoss;
+    }
+
+    if (takeProfit != null) {
+      payload['take_profit'] = takeProfit;
+    }
+
+    if (notes != null) {
+      payload['notes'] = notes;
+    }
+
+    final response = await _dio.post(
+      '/api/demo/trades',
+      data: payload,
+    );
+
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> closeDemoTrade({
+    required String tradeId,
+    required double exitPrice,
+  }) async {
+    final response = await _dio.post(
+      '/api/demo/trades/$tradeId/close',
+      data: {
+        'exit_price': exitPrice,
+      },
+    );
+
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> resetDemo() async {
+    final response = await _dio.post('/api/demo/reset');
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> marketData({
+    String symbol = 'XAUUSD',
+  }) async {
+    final response = await _dio.get(
+      '/market-data',
+      queryParameters: {
+        'symbol': symbol,
+      },
+    );
+
+    return _asMap(response.data);
+  }
+
+  Map<String, dynamic> _asMap(dynamic data) {
+    if (data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+
+    throw const FormatException(
+      'Expected a JSON object from the API.',
+    );
+  }
+}
