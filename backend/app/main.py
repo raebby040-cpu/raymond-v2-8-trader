@@ -79,11 +79,17 @@ except ImportError:
 
 try:
     from .dashboard_provider import build_dashboard_state
-    from .emergency_stop import EmergencyStopManager
+    from .emergency_stop import (
+        EmergencyStopError,
+        EmergencyStopManager,
+    )
     from .websocket_handler import DashboardWebSocketManager
 except ImportError:
     from dashboard_provider import build_dashboard_state
-    from emergency_stop import EmergencyStopManager
+    from emergency_stop import (
+        EmergencyStopError,
+        EmergencyStopManager,
+    )
     from websocket_handler import DashboardWebSocketManager
 
 # ============================================================
@@ -1281,6 +1287,25 @@ async def http_exception_handler(
         status_code=exc.status_code,
         content={
             "detail": exc.detail,
+            "timestamp": utc_timestamp(),
+        },
+    )
+
+
+@app.exception_handler(EmergencyStopError)
+async def emergency_stop_exception_handler(
+    request,
+    exc,
+):
+    logger.warning(
+        "Trading blocked by safety gate: %s",
+        exc,
+    )
+
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": str(exc),
             "timestamp": utc_timestamp(),
         },
     )
