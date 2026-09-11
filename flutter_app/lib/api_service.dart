@@ -57,6 +57,17 @@ class ApiService {
     return _asMap(response.data);
   }
 
+  Future<Map<String, dynamic>> marketIndicators({
+    String symbol = 'XAUUSD',
+  }) async {
+    final response = await _dio.get(
+      '/api/market/indicators',
+      queryParameters: {'symbol': symbol},
+    );
+
+    return _asMap(response.data);
+  }
+
   Future<Map<String, dynamic>> openDemoTrade({
     required String symbol,
     required String direction,
