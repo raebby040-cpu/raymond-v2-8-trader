@@ -1,23 +1,18 @@
 """
 RAYMOND v2.8 Backend - FastAPI Application
 
-Step 9A:
-- Broker-neutral MT5 connection
-- Real MT5 market tick data
-- Broker-specific symbol discovery
-- Real MT5 OHLC candles
-- MT5 account information
-- MT5 read-only position synchronization
-- Broker-aware symbol specifications
-- Risk-engine-ready market data
-- Paper trading only
-- Emergency-stop safety manager
-- Dashboard WebSocket streaming
+Step 15:
+- Connect existing MT5 market data to the validated trading pipeline.
+- Real MT5 candles -> technical indicators -> Step 13 AI
+  -> Step 14 Risk -> Paper Execution Gateway.
+- Paper trading only.
+- Live trading remains disabled.
+- Existing market, dashboard, demo, safety and read-only endpoints
+  remain available.
 
 IMPORTANT:
-Real order execution is NOT implemented.
-No endpoint places, modifies, or closes a real trade.
-Live trading remains disabled by default.
+Real broker order execution is NOT implemented.
+Step 15 never sends an order to MT5 or Exness.
 """
 
 from datetime import datetime, timezone
@@ -92,14 +87,22 @@ except ImportError:
     )
     from websocket_handler import DashboardWebSocketManager
 
+
 # ============================================================
 # STEP 10A - DEMO TRADING API
 # ============================================================
 
 try:
-    from .demo_api import router as demo_trading_router
+    from .demo_api import (
+        demo_engine,
+        router as demo_trading_router,
+    )
 except ImportError:
-    from demo_api import router as demo_trading_router
+    from demo_api import (
+        demo_engine,
+        router as demo_trading_router,
+    )
+
 
 # ============================================================
 # TECHNICAL INDICATORS
@@ -120,6 +123,26 @@ except ImportError:
 
 
 # ============================================================
+# STEP 15 - APPLICATION TRADING PIPELINE
+# ============================================================
+
+try:
+    from .risk_engine import SymbolSpecification
+    from .trading_pipeline_service import (
+        PaperRiskState,
+        TradingPipelineService,
+        TradingPipelineServiceError,
+    )
+except ImportError:
+    from risk_engine import SymbolSpecification
+    from trading_pipeline_service import (
+        PaperRiskState,
+        TradingPipelineService,
+        TradingPipelineServiceError,
+    )
+
+
+# ============================================================
 # LOGGING
 # ============================================================
 
@@ -131,13 +154,34 @@ logger = logging.getLogger(__name__)
 # SERVICES
 # ============================================================
 
+# Existing generic execution gateway.
+# This remains paper-only.
 execution_gateway = create_execution_gateway()
 
+# Existing emergency-stop safety manager.
 safety_manager = EmergencyStopManager()
 
+# Existing dashboard WebSocket manager.
 dashboard_ws_manager = DashboardWebSocketManager(
     heartbeat_interval_seconds=5.0
 )
+
+# Step 15 application pipeline.
+#
+# This internally connects:
+#
+# MT5 candles
+#     ->
+# Technical Indicators
+#     ->
+# Step 13 AI
+#     ->
+# Step 14 Risk
+#     ->
+# PaperExecutionGateway
+#
+# It never enables live execution.
+trading_pipeline_service = TradingPipelineService()
 
 
 # ============================================================
@@ -152,6 +196,7 @@ app = FastAPI(
     ),
     version="2.8.0",
 )
+
 
 # ============================================================
 # STEP 10A - DEMO TRADING ROUTER
@@ -349,6 +394,221 @@ def mt5_error_response(
 
 
 # ============================================================
+# STEP 15 - PAPER RISK STATE
+# ============================================================
+
+def build_paper_risk_state() -> PaperRiskState:
+    """
+    Build the current paper-trading risk state.
+
+    Step 15 deliberately uses the existing DemoTradingEngine
+    as the paper-state source.
+
+    It does NOT use real MT5 positions as paper positions.
+
+    This keeps the Step 15 pipeline paper-only and prevents
+    real broker positions from being mixed with simulated
+    paper positions.
+    """
+
+    try:
+        daily_closed_pnl = float(
+            demo_engine.daily_closed_pnl()
+        )
+
+        open_positions = len(
+            demo_engine.open_trades
+        )
+
+        # RiskEngine expects daily_loss to be a positive
+        # loss amount, not a negative P&L number.
+        daily_loss = max(
+            0.0,
+            -daily_closed_pnl,
+        )
+
+        return PaperRiskState(
+            daily_loss=daily_loss,
+            open_positions=open_positions,
+            total_exposure=0.0,
+        )
+
+    except Exception as exc:
+        raise TradingPipelineServiceError(
+            f"Unable to build paper risk state: {exc}"
+        ) from exc
+
+
+def get_paper_equity() -> float:
+    """
+    Return current simulated paper equity.
+
+    The demo engine starts with a paper balance of 10,000.
+    Closed paper P&L is applied to that balance.
+
+    Real MT5 account equity is intentionally NOT used for
+    paper-trade position sizing.
+    """
+
+    try:
+        performance = demo_engine.performance()
+
+        equity = (
+            float(demo_engine.initial_balance)
+            + float(performance.total_pnl)
+        )
+
+    except Exception as exc:
+        raise TradingPipelineServiceError(
+            f"Unable to determine paper equity: {exc}"
+        ) from exc
+
+    if equity <= 0:
+        raise TradingPipelineServiceError(
+            "Paper equity is not greater than zero."
+        )
+
+    return equity
+
+
+def build_symbol_specification(
+    specification: dict,
+) -> SymbolSpecification:
+    """
+    Convert the MT5 symbol specification dictionary into
+    the exact Risk Engine SymbolSpecification object.
+    """
+
+    required_fields = [
+        "symbol",
+        "digits",
+        "point",
+        "tick_size",
+        "tick_value",
+        "tick_value_profit",
+        "tick_value_loss",
+        "contract_size",
+        "volume_min",
+        "volume_max",
+        "volume_step",
+        "volume_limit",
+        "trade_mode",
+        "trade_execution_mode",
+        "trade_stops_level",
+        "trade_freeze_level",
+        "currency_base",
+        "currency_profit",
+        "currency_margin",
+        "spread",
+        "spread_float",
+    ]
+
+    missing = [
+        field
+        for field in required_fields
+        if field not in specification
+    ]
+
+    if missing:
+        raise TradingPipelineServiceError(
+            "MT5 symbol specification is missing required "
+            f"fields: {', '.join(missing)}"
+        )
+
+    try:
+        result = SymbolSpecification(
+            symbol=str(
+                specification["symbol"]
+            ),
+            digits=int(
+                specification["digits"]
+            ),
+            point=float(
+                specification["point"]
+            ),
+            tick_size=float(
+                specification["tick_size"]
+            ),
+            tick_value=float(
+                specification["tick_value"]
+            ),
+            tick_value_profit=float(
+                specification["tick_value_profit"]
+            ),
+            tick_value_loss=float(
+                specification["tick_value_loss"]
+            ),
+            contract_size=float(
+                specification["contract_size"]
+            ),
+            volume_min=float(
+                specification["volume_min"]
+            ),
+            volume_max=float(
+                specification["volume_max"]
+            ),
+            volume_step=float(
+                specification["volume_step"]
+            ),
+            volume_limit=float(
+                specification["volume_limit"]
+            ),
+            trade_mode=int(
+                specification["trade_mode"]
+            ),
+            trade_execution_mode=int(
+                specification[
+                    "trade_execution_mode"
+                ]
+            ),
+            trade_stops_level=int(
+                specification[
+                    "trade_stops_level"
+                ]
+            ),
+            trade_freeze_level=int(
+                specification[
+                    "trade_freeze_level"
+                ]
+            ),
+            currency_base=str(
+                specification["currency_base"]
+            ),
+            currency_profit=str(
+                specification["currency_profit"]
+            ),
+            currency_margin=str(
+                specification["currency_margin"]
+            ),
+            spread=int(
+                specification["spread"]
+            ),
+            spread_float=bool(
+                specification["spread_float"]
+            ),
+        )
+
+    except (
+        TypeError,
+        ValueError,
+        KeyError,
+    ) as exc:
+        raise TradingPipelineServiceError(
+            "Invalid MT5 symbol specification: "
+            f"{exc}"
+        ) from exc
+
+    try:
+        result.validate()
+    except Exception as exc:
+        raise TradingPipelineServiceError(
+            f"MT5 symbol specification failed validation: {exc}"
+        ) from exc
+
+    return result
+
+
+# ============================================================
 # REQUEST MODELS
 # ============================================================
 
@@ -379,6 +639,34 @@ class MT5ConnectRequest(BaseModel):
     portable: bool = False
 
 
+class StrategyPaperTradeRequest(BaseModel):
+    """
+    Request for the complete Step 15 paper pipeline.
+
+    No volume is accepted from the client.
+
+    Step 14 / Risk Engine calculates the position size.
+    """
+
+    symbol: str = Field(
+        default="XAUUSD",
+        min_length=1,
+        max_length=64,
+    )
+
+    timeframe: str = Field(
+        default="H1",
+        min_length=2,
+        max_length=4,
+    )
+
+    limit: int = Field(
+        default=200,
+        ge=50,
+        le=5000,
+    )
+
+
 # ============================================================
 # HEALTH
 # ============================================================
@@ -390,6 +678,8 @@ async def health_check():
         "timestamp": utc_timestamp(),
         "version": "2.8.0",
         "live_trading_enabled": live_trading_enabled(),
+        "step15_pipeline": True,
+        "execution_mode": "paper_only",
     }
 
 
@@ -408,6 +698,15 @@ async def root():
         "version": "2.8.0",
         "broker_support": "MT5-compatible brokers",
         "live_trading_enabled": live_trading_enabled(),
+        "execution_mode": "paper_only",
+        "step15_pipeline": {
+            "enabled": True,
+            "path": (
+                "MT5 candles -> indicators -> "
+                "Step 13 AI -> Step 14 Risk -> "
+                "PaperExecutionGateway"
+            ),
+        },
         "endpoints": {
             "health": "/health",
             "mt5_connect": "/api/mt5/connect",
@@ -422,9 +721,16 @@ async def root():
             "market_symbol_specification": (
                 "/api/market/symbol-specification"
             ),
+            "market_indicators": "/api/market/indicators",
             "trading": "/api/trading",
             "demo_trading": "/api/demo",
             "strategy": "/api/strategy",
+            "strategy_decision": (
+                "/api/strategy/decision"
+            ),
+            "strategy_paper_trade": (
+                "/api/strategy/paper-trade"
+            ),
             "admin": "/api/admin",
             "websocket": "/ws/dashboard",
             "docs": "/docs",
@@ -479,7 +785,9 @@ async def connect_mt5(
             "server": account.get("server"),
             "account": safe_account_response(account),
             "terminal": safe_terminal_response(terminal),
-            "live_trading_enabled": live_trading_enabled(),
+            "live_trading_enabled": (
+                live_trading_enabled()
+            ),
         }
 
     except MT5ServiceError as exc:
@@ -551,7 +859,9 @@ async def get_mt5_status():
             "last_error": status.get(
                 "last_error"
             ),
-            "live_trading_enabled": live_trading_enabled(),
+            "live_trading_enabled": (
+                live_trading_enabled()
+            ),
             "safety": {
                 "trading_allowed": (
                     safety_status.trading_allowed
@@ -1012,7 +1322,9 @@ async def get_positions(
             "status": "ok",
             "symbol": symbol,
             "positions": normalized_positions,
-            "total_positions": len(normalized_positions),
+            "total_positions": len(
+                normalized_positions
+            ),
             "source": "mt5_read_only",
             "timestamp": utc_timestamp(),
             "live_trading_enabled": (
@@ -1044,25 +1356,234 @@ async def close_position(
 
 
 # ============================================================
-# STRATEGY / AI
+# STEP 15 - STRATEGY / AI DECISION
 # ============================================================
 
 @app.get("/api/strategy/decision")
 async def get_strategy_decision(
-    symbol: str = "XAUUSD",
+    symbol: str = Query(
+        default="XAUUSD",
+        min_length=1,
+        max_length=64,
+    ),
+    timeframe: str = Query(
+        default="H1",
+        min_length=2,
+        max_length=4,
+    ),
+    limit: int = Query(
+        default=200,
+        ge=50,
+        le=5000,
+    ),
 ):
-    return {
-        "symbol": symbol,
-        "timestamp": utc_timestamp(),
-        "decision": "hold",
-        "confidence": 0.0,
-        "reason": (
-            "AI execution layer is waiting for "
-            "validated real market-data pipeline."
-        ),
-        "source": "placeholder",
-    }
+    """
+    Run the real Step 13 AI decision pipeline.
 
+    Path:
+
+        MT5 candles
+            ->
+        Technical Indicators
+            ->
+        TechnicalContext
+            ->
+        Step 13 AI
+
+    This endpoint does NOT execute a trade.
+    """
+
+    try:
+        candles = await mt5_service.get_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
+        )
+
+        decision = (
+            trading_pipeline_service.evaluate_decision(
+                symbol=symbol,
+                timeframe=timeframe,
+                candles=candles,
+            )
+        )
+
+        response = (
+            trading_pipeline_service.serialize_decision(
+                decision
+            )
+        )
+
+        response.update(
+            {
+                "timestamp": utc_timestamp(),
+                "source": "step15_step13_ai",
+                "execution": "none",
+                "read_only": True,
+                "live_trading_enabled": (
+                    live_trading_enabled()
+                ),
+            }
+        )
+
+        return response
+
+    except MT5ServiceError as exc:
+        raise mt5_error_response(exc) from exc
+
+    except TradingPipelineServiceError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Strategy decision pipeline failed",
+                "message": str(exc),
+                "timestamp": utc_timestamp(),
+            },
+        ) from exc
+
+
+# ============================================================
+# STEP 15 - COMPLETE PAPER TRADE PIPELINE
+# ============================================================
+
+@app.post("/api/strategy/paper-trade")
+async def run_strategy_paper_trade(
+    request: StrategyPaperTradeRequest,
+):
+    """
+    Run the complete Step 15 paper-trading pipeline.
+
+    Path:
+
+        MT5 candles
+            ->
+        Technical Indicators
+            ->
+        Step 13 AI
+            ->
+        Step 14 Risk Engine
+            ->
+        PaperExecutionGateway
+
+    IMPORTANT:
+    - The client cannot choose the position size.
+    - Risk Engine calculates the position size.
+    - WAIT never reaches execution.
+    - Risk rejection never reaches execution.
+    - Live execution is impossible through this endpoint.
+    """
+
+    if live_trading_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    "Step 15 refuses to run while "
+                    "LIVE_TRADING_ENABLED=true."
+                ),
+                "timestamp": utc_timestamp(),
+            },
+        )
+
+    try:
+        # ----------------------------------------------------
+        # 1. Read real market candles from MT5.
+        # ----------------------------------------------------
+
+        candles = await mt5_service.get_candles(
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            limit=request.limit,
+        )
+
+        # ----------------------------------------------------
+        # 2. Read broker symbol specification.
+        # ----------------------------------------------------
+
+        raw_specification = (
+            await mt5_service.get_symbol_specification(
+                request.symbol
+            )
+        )
+
+        specification = (
+            build_symbol_specification(
+                raw_specification
+            )
+        )
+
+        # ----------------------------------------------------
+        # 3. Build paper-only risk state.
+        # ----------------------------------------------------
+
+        risk_state = build_paper_risk_state()
+
+        paper_equity = get_paper_equity()
+
+        # ----------------------------------------------------
+        # 4. Execute Step 13 -> Step 14 -> Paper Gateway.
+        # ----------------------------------------------------
+
+        result = (
+            await trading_pipeline_service.execute_paper(
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                candles=candles,
+                specification=specification,
+                account_equity=paper_equity,
+                risk_state=risk_state,
+            )
+        )
+
+        # ----------------------------------------------------
+        # 5. Serialize the complete pipeline result.
+        # ----------------------------------------------------
+
+        response = (
+            trading_pipeline_service.serialize_step14_result(
+                result
+            )
+        )
+
+        response.update(
+            {
+                "status": "ok",
+                "timestamp": utc_timestamp(),
+                "source": "step15",
+                "execution_mode": "paper_only",
+                "paper_equity": paper_equity,
+                "risk_state": {
+                    "daily_loss": risk_state.daily_loss,
+                    "open_positions": (
+                        risk_state.open_positions
+                    ),
+                    "total_exposure": (
+                        risk_state.total_exposure
+                    ),
+                },
+                "live_trading_enabled": False,
+            }
+        )
+
+        return response
+
+    except MT5ServiceError as exc:
+        raise mt5_error_response(exc) from exc
+
+    except TradingPipelineServiceError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Paper trading pipeline failed safely",
+                "message": str(exc),
+                "timestamp": utc_timestamp(),
+            },
+        ) from exc
+
+
+# ============================================================
+# BACKTEST
+# ============================================================
 
 @app.post("/api/strategy/backtest")
 async def run_backtest(
@@ -1133,7 +1654,9 @@ async def dashboard_websocket(
                 mt5_service=mt5_service,
                 safety_manager=safety_manager,
                 symbol="XAUUSD",
-                live_trading_enabled=live_trading_enabled(),
+                live_trading_enabled=(
+                    live_trading_enabled()
+                ),
             )
 
         await dashboard_ws_manager.stream(
@@ -1185,7 +1708,9 @@ async def emergency_stop():
         "reason": status.reason,
         "all_positions_closed": False,
         "new_orders_blocked": True,
-        "live_trading_enabled": live_trading_enabled(),
+        "live_trading_enabled": (
+            live_trading_enabled()
+        ),
     }
 
 
@@ -1237,7 +1762,9 @@ async def admin_status():
 
     return {
         "status": "operational",
-        "live_trading_enabled": live_trading_enabled(),
+        "live_trading_enabled": (
+            live_trading_enabled()
+        ),
         "environment": os.getenv(
             "RAYMOND_ENV",
             "development",
@@ -1255,6 +1782,10 @@ async def admin_status():
                 False,
             )
         ),
+        "step15_pipeline": {
+            "enabled": True,
+            "execution_mode": "paper_only",
+        },
         "safety": {
             "trading_allowed": (
                 safety_status.trading_allowed
