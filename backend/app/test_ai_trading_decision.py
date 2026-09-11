@@ -89,9 +89,12 @@ def test_bullish_context_produces_buy_proposal():
 
     assert proposal.direction == AIDirection.BUY
     assert proposal.entry_price == 2300.0
+
+    # ATR = 10 and minimum RR = 1.5.
+    # BUY TP = 2300 + (10 * 1.5) = 2315.
     assert proposal.stop_loss == 2290.0
-    assert proposal.take_profit == 2320.0
-    assert proposal.risk_reward == 2.0
+    assert proposal.take_profit == 2315.0
+    assert proposal.risk_reward == 1.5
 
     assert proposal.execution_type == "paper"
     assert proposal.read_only is True
@@ -118,9 +121,12 @@ def test_bearish_context_produces_sell_proposal():
 
     assert proposal.direction == AIDirection.SELL
     assert proposal.entry_price == 2300.0
+
+    # ATR = 10 and minimum RR = 1.5.
+    # SELL TP = 2300 - (10 * 1.5) = 2285.
     assert proposal.stop_loss == 2310.0
-    assert proposal.take_profit == 2280.0
-    assert proposal.risk_reward == 2.0
+    assert proposal.take_profit == 2285.0
+    assert proposal.risk_reward == 1.5
 
     assert proposal.execution_type == "paper"
     assert proposal.read_only is True
