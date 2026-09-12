@@ -18,23 +18,58 @@ void main() {
       expect(find.text('XAUUSD'), findsOneWidget);
 
       // Current dashboard.
-      expect(find.text('Live market connection'), findsOneWidget);
-      expect(find.text('PAPER TRADING'), findsOneWidget);
+      expect(
+        find.text('Live market connection'),
+        findsOneWidget,
+      );
+
+      expect(
+        find.text('PAPER TRADING'),
+        findsOneWidget,
+      );
+
       expect(
         find.text('Real-money trading is disabled.'),
         findsOneWidget,
       );
 
       // Dashboard sections.
-      expect(find.text('PERFORMANCE'), findsOneWidget);
-      expect(find.text('RECENT PAPER TRADES'), findsOneWidget);
+      expect(
+        find.text('PERFORMANCE'),
+        findsOneWidget,
+      );
+
+      expect(
+        find.text('RECENT PAPER TRADES'),
+        findsOneWidget,
+      );
 
       // Navigation.
-      expect(find.text('Home'), findsOneWidget);
-      expect(find.text('Chart'), findsOneWidget);
-      expect(find.text('Analysis'), findsOneWidget);
-      expect(find.text('Positions'), findsOneWidget);
-      expect(find.text('Settings'), findsOneWidget);
+      expect(
+        find.text('Home'),
+        findsOneWidget,
+      );
+
+      expect(
+        find.text('Chart'),
+        findsOneWidget,
+      );
+
+      expect(
+        find.text('Analysis'),
+        findsOneWidget,
+      );
+
+      // Positions appears more than once in the current UI.
+      expect(
+        find.text('Positions'),
+        findsWidgets,
+      );
+
+      expect(
+        find.text('Settings'),
+        findsOneWidget,
+      );
     },
   );
 }
