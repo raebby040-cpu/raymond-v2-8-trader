@@ -49,6 +49,7 @@ class ApiService {
         'offset': offset,
       },
     );
+
     return _asMap(response.data);
   }
 
@@ -57,7 +58,9 @@ class ApiService {
   }) async {
     final response = await _dio.get(
       '/api/market/price',
-      queryParameters: {'symbol': symbol},
+      queryParameters: {
+        'symbol': symbol,
+      },
     );
 
     return _asMap(response.data);
@@ -68,7 +71,41 @@ class ApiService {
   }) async {
     final response = await _dio.get(
       '/api/market/indicators',
-      queryParameters: {'symbol': symbol},
+      queryParameters: {
+        'symbol': symbol,
+      },
+    );
+
+    return _asMap(response.data);
+  }
+
+  // Step 10B-2: functional XAUUSD candlestick chart.
+  Future<Map<String, dynamic>> marketCandlesticks({
+    String symbol = 'XAUUSD',
+    String timeframe = 'H1',
+    int limit = 60,
+  }) async {
+    final response = await _dio.get(
+      '/api/market/candlesticks',
+      queryParameters: {
+        'symbol': symbol,
+        'timeframe': timeframe,
+        'limit': limit,
+      },
+    );
+
+    return _asMap(response.data);
+  }
+
+  // Step 10B-3: read-only current MT5 positions.
+  Future<Map<String, dynamic>> marketPositions({
+    String? symbol,
+  }) async {
+    final response = await _dio.get(
+      '/api/trading/positions',
+      queryParameters: {
+        if (symbol != null && symbol.isNotEmpty) 'symbol': symbol,
+      },
     );
 
     return _asMap(response.data);
@@ -122,7 +159,9 @@ class ApiService {
     if (data is Map && data['trades'] is List) {
       return (data['trades'] as List)
           .whereType<Map>()
-          .map((item) => Map<String, dynamic>.from(item))
+          .map(
+            (item) => Map<String, dynamic>.from(item),
+          )
           .toList();
     }
 
