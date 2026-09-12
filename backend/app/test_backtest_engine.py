@@ -628,7 +628,7 @@ def test_sell_stop_loss_is_respected() -> None:
         "time": "2026-01-01T00:52:00",
         "open": 2000.0,
         "high": 2011.0,
-        "low": 2009.0,
+        "low": 1989.0,
         "close": 2010.0,
     }
 
@@ -991,8 +991,8 @@ def test_position_sizing_is_positive_and_within_symbol_limits() -> None:
 
     trade = result.trades[0]
 
-    assert trade["volume"] > 0
-    assert trade["volume"] <= 100.0
+    assert trade["position_size"] > 0
+    assert trade["position_size"] <= 100.0
 
 
 def test_open_trade_is_closed_at_end_of_data() -> None:
@@ -1041,7 +1041,7 @@ def test_equity_curve_is_recorded() -> None:
     )
 
     assert result.equity_curve
-    assert result.equity_curve[0] == pytest.approx(10_000.0)
+    assert result.equity_curve[0]["equity"] == pytest.approx(10_000.0)
 
 
 def test_metrics_are_consistent_for_no_trade_run() -> None:
@@ -1060,7 +1060,7 @@ def test_metrics_are_consistent_for_no_trade_run() -> None:
     assert result.total_trades == 0
     assert result.net_profit == pytest.approx(0.0)
     assert result.starting_balance == pytest.approx(10_000.0)
-    assert result.final_balance == pytest.approx(10_000.0)
+    assert result.ending_balance == pytest.approx(10_000.0)
 
 
 def test_negative_execution_cost_reduces_profit() -> None:
@@ -1248,8 +1248,8 @@ def test_backtest_is_deterministic() -> None:
 
     assert result1.total_trades == result2.total_trades
     assert result1.net_profit == pytest.approx(result2.net_profit)
-    assert result1.final_balance == pytest.approx(
-        result2.final_balance
+    assert result1.ending_balance == pytest.approx(
+        result2.ending_balance
     )
 
 
@@ -1276,7 +1276,7 @@ def test_buy_trade_mode_long_only_is_allowed() -> None:
         "time": "2026-01-01T00:52:00",
         "open": 2000.0,
         "high": 2021.0,
-        "low": 2019.0,
+        "low": 1989.0,
         "close": 2020.0,
     }
 
