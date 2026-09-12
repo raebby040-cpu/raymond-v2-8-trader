@@ -120,6 +120,20 @@ except ImportError:
 
 
 # ============================================================
+# STEP 11B-4 - MT5 AI DECISION BRIDGE
+# ============================================================
+
+try:
+    from .mt5_decision_bridge import (
+        router as mt5_decision_router,
+    )
+except ImportError:
+    from mt5_decision_bridge import (
+        router as mt5_decision_router,
+    )
+
+
+# ============================================================
 # STEP 3C - DATABASE / TRADE JOURNAL
 # ============================================================
 
@@ -196,33 +210,14 @@ logger = logging.getLogger(__name__)
 # SERVICES
 # ============================================================
 
-# Existing generic execution gateway.
-# This remains paper-only.
 execution_gateway = create_execution_gateway()
 
-# Existing emergency-stop safety manager.
 safety_manager = EmergencyStopManager()
 
-# Existing dashboard WebSocket manager.
 dashboard_ws_manager = DashboardWebSocketManager(
     heartbeat_interval_seconds=5.0
 )
 
-# Step 15 application pipeline.
-#
-# This internally connects:
-#
-# MT5 candles
-#     ->
-# Technical Indicators
-#     ->
-# Step 13 AI
-#     ->
-# Step 14 Risk
-#     ->
-# PaperExecutionGateway
-#
-# It never enables live execution.
 trading_pipeline_service = TradingPipelineService()
 
 
@@ -261,6 +256,15 @@ app.include_router(
 
 
 # ============================================================
+# STEP 11B-4 - MT5 AI DECISION ROUTER
+# ============================================================
+
+app.include_router(
+    mt5_decision_router,
+)
+
+
+# ============================================================
 # CORS
 # ============================================================
 
@@ -269,9 +273,6 @@ def configured_cors_origins() -> list[str]:
     Return explicitly configured CORS origins.
 
     CORS_ORIGINS may contain comma-separated origins.
-
-    Example:
-        CORS_ORIGINS=http://localhost:3000,http://localhost:8080
 
     A wildcard is intentionally not used together with
     allow_credentials=True.
@@ -289,13 +290,11 @@ def configured_cors_origins() -> list[str]:
             "http://localhost:5000",
         ]
 
-    origins = [
+    return [
         origin.strip()
         for origin in configured.split(",")
         if origin.strip()
     ]
-
-    return origins
 
 
 origins = configured_cors_origins()
@@ -319,19 +318,14 @@ def utc_timestamp() -> str:
 
 def live_trading_enabled() -> bool:
     """
-    Read the configured live-trading flag.
-
-    IMPORTANT:
-    The current Step 15 backend does not implement live
-    broker execution. This flag must remain false while
-    the project is in the paper/demo development stages.
+    Live trading is deliberately disabled during Step 15.
     """
 
     return (
         os.getenv(
             "LIVE_TRADING_ENABLED",
             "false",
-        ).lower()
+        ).strip().lower()
         == "true"
     )
 
@@ -396,7 +390,7 @@ def safe_position_response(
     Convert a raw MT5 position into the stable
     RAYMOND position format.
 
-    This endpoint is READ ONLY.
+    READ ONLY.
     """
 
     position_type = position.get("type")
@@ -431,13 +425,6 @@ def safe_position_response(
 def safe_symbol_specification_response(
     specification: dict,
 ) -> dict:
-    """
-    Return broker-specific symbol information
-    required by the RAYMOND risk engine.
-
-    This is READ ONLY.
-    """
-
     allowed_fields = [
         "symbol",
         "digits",
@@ -490,8 +477,7 @@ def build_paper_risk_state() -> PaperRiskState:
     """
     Build the current paper-trading risk state.
 
-    Paper exposure is calculated from currently open simulated
-    trades only. Real MT5 positions are deliberately excluded.
+    Real MT5 positions are deliberately excluded.
     """
 
     try:
@@ -505,15 +491,11 @@ def build_paper_risk_state() -> PaperRiskState:
 
         open_positions = len(open_trades)
 
-        # RiskEngine expects daily_loss to be a positive
-        # loss amount, not a negative P&L number.
         daily_loss = max(
             0.0,
             -daily_closed_pnl,
         )
 
-        # Calculate notional exposure from actual open
-        # paper trades instead of a hard-coded zero.
         total_exposure = 0.0
 
         for trade in open_trades:
@@ -540,7 +522,9 @@ def build_paper_risk_state() -> PaperRiskState:
                     "Open paper trade has an invalid quantity."
                 )
 
-            total_exposure += entry_price * quantity
+            total_exposure += (
+                entry_price * quantity
+            )
 
         return PaperRiskState(
             daily_loss=daily_loss,
@@ -560,12 +544,6 @@ def build_paper_risk_state() -> PaperRiskState:
 def get_paper_equity() -> float:
     """
     Return current simulated paper equity.
-
-    The demo engine starts with a paper balance of 10,000.
-    Closed paper P&L is applied to that balance.
-
-    Real MT5 account equity is intentionally NOT used for
-    paper-trade position sizing.
     """
 
     try:
@@ -593,8 +571,8 @@ def build_symbol_specification(
     specification: dict,
 ) -> SymbolSpecification:
     """
-    Convert the MT5 symbol specification dictionary into
-    the exact Risk Engine SymbolSpecification object.
+    Convert the MT5 specification dictionary into
+    the Risk Engine SymbolSpecification object.
     """
 
     required_fields = [
@@ -730,13 +708,13 @@ def build_symbol_specification(
 # STEP 3C - PAPER TRADE PERSISTENCE
 # ============================================================
 
-def persist_step15_paper_execution(result) -> Optional[dict]:
+def persist_step15_paper_execution(
+    result,
+) -> Optional[dict]:
     """
-    Persist a successful Step 15 paper execution into the
-    existing Trade journal.
+    Persist a successful Step 15 paper execution.
 
-    This function only accepts paper executions. It never sends
-    anything to MT5, Exness, or another live broker.
+    Only paper executions are accepted.
     """
 
     execution = getattr(
@@ -769,7 +747,10 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
         )
     ).lower().strip()
 
-    if status not in {"accepted", "filled"}:
+    if status not in {
+        "accepted",
+        "filled",
+    }:
         return None
 
     proposal = getattr(
@@ -780,7 +761,8 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
 
     if proposal is None:
         raise TradingPipelineServiceError(
-            "Paper execution cannot be journaled without a trade proposal."
+            "Paper execution cannot be journaled without "
+            "a trade proposal."
         )
 
     order_id = str(
@@ -811,7 +793,10 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
             side
         ).lower().strip()
 
-    if direction not in {"buy", "sell"}:
+    if direction not in {
+        "buy",
+        "sell",
+    }:
         raise TradingPipelineServiceError(
             "Paper execution returned an invalid trade direction."
         )
@@ -893,9 +878,14 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
 
     try:
         journal = TradeJournal(db)
-        row = journal.save_demo_trade(trade)
 
-        return TradeJournal.serialize_trade(row)
+        row = journal.save_demo_trade(
+            trade
+        )
+
+        return TradeJournal.serialize_trade(
+            row
+        )
 
     except Exception as exc:
         db.rollback()
@@ -944,8 +934,7 @@ class StrategyPaperTradeRequest(BaseModel):
     Request for the complete Step 15 paper pipeline.
 
     No volume is accepted from the client.
-
-    Step 14 / Risk Engine calculates the position size.
+    Risk Engine calculates position size.
     """
 
     symbol: str = Field(
@@ -981,6 +970,7 @@ async def health_check():
         "step15_pipeline": True,
         "execution_mode": "paper_only",
         "mt5_telemetry": True,
+        "mt5_ai_decision_bridge": True,
     }
 
 
@@ -1013,6 +1003,12 @@ async def root():
             "endpoint": "/api/mt5/telemetry",
             "mode": "READ_ONLY",
         },
+        "mt5_ai_decision_bridge": {
+            "enabled": True,
+            "endpoint": "/api/mt5/decision",
+            "mode": "READ_ONLY",
+            "execution_authorized": False,
+        },
         "endpoints": {
             "health": "/health",
             "mt5_connect": "/api/mt5/connect",
@@ -1021,6 +1017,7 @@ async def root():
             "mt5_account": "/api/mt5/account",
             "mt5_terminal": "/api/mt5/terminal",
             "mt5_telemetry": "/api/mt5/telemetry",
+            "mt5_decision": "/api/mt5/decision",
             "market_price": "/api/market/price",
             "market_candles": "/api/market/candlesticks",
             "market_symbols": "/api/market/symbols",
@@ -1090,8 +1087,12 @@ async def connect_mt5(
             "timestamp": utc_timestamp(),
             "broker": account.get("company"),
             "server": account.get("server"),
-            "account": safe_account_response(account),
-            "terminal": safe_terminal_response(terminal),
+            "account": safe_account_response(
+                account
+            ),
+            "terminal": safe_terminal_response(
+                terminal
+            ),
             "live_trading_enabled": (
                 live_trading_enabled()
             ),
@@ -1103,7 +1104,9 @@ async def connect_mt5(
             exc,
         )
 
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 @app.post("/api/mt5/disconnect")
@@ -1124,7 +1127,9 @@ async def disconnect_mt5():
             exc,
         )
 
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 @app.get("/api/mt5/status")
@@ -1188,7 +1193,9 @@ async def get_mt5_status():
     except MT5ServiceError as exc:
         safety_manager.mark_connection_lost()
 
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 @app.get("/api/mt5/account")
@@ -1199,11 +1206,15 @@ async def get_mt5_account():
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "account": safe_account_response(account),
+            "account": safe_account_response(
+                account
+            ),
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 @app.get("/api/mt5/terminal")
@@ -1214,11 +1225,15 @@ async def get_mt5_terminal():
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "terminal": safe_terminal_response(terminal),
+            "terminal": safe_terminal_response(
+                terminal
+            ),
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 # ============================================================
@@ -1233,14 +1248,10 @@ async def get_current_price(
         max_length=64,
     ),
 ):
-    """
-    Return the real current MT5 tick.
-
-    No trade is placed.
-    """
-
     try:
-        tick = await mt5_service.get_symbol_tick(symbol)
+        tick = await mt5_service.get_symbol_tick(
+            symbol
+        )
 
         return {
             "status": "ok",
@@ -1261,7 +1272,9 @@ async def get_current_price(
         MT5ServiceError,
         ValueError,
     ) as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 @app.get("/api/market/candlesticks")
@@ -1282,12 +1295,6 @@ async def get_candlesticks(
         le=5000,
     ),
 ):
-    """
-    Return real OHLC candles from MT5.
-
-    MT5 supplies bar data in UTC.
-    """
-
     try:
         candles = await mt5_service.get_candles(
             symbol=symbol,
@@ -1309,7 +1316,9 @@ async def get_candlesticks(
         MT5ServiceError,
         ValueError,
     ) as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 @app.get("/api/market/symbols")
@@ -1319,11 +1328,6 @@ async def get_market_symbols(
         max_length=32,
     ),
 ):
-    """
-    Discover instruments available from the
-    connected MT5 broker.
-    """
-
     try:
         symbols = await mt5_service.get_symbols(
             query=query
@@ -1339,16 +1343,13 @@ async def get_market_symbols(
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 @app.get("/api/market/gold-symbols")
 async def get_gold_symbols():
-    """
-    Find XAUUSD/gold symbols regardless of
-    broker suffix.
-    """
-
     try:
         symbols = await mt5_service.find_gold_symbols()
 
@@ -1361,7 +1362,9 @@ async def get_gold_symbols():
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 # ============================================================
@@ -1376,12 +1379,6 @@ async def get_symbol_specification(
         max_length=64,
     ),
 ):
-    """
-    Return broker-specific MT5 symbol properties.
-
-    READ ONLY.
-    """
-
     try:
         specification = (
             await mt5_service.get_symbol_specification(
@@ -1409,7 +1406,9 @@ async def get_symbol_specification(
         MT5ServiceError,
         ValueError,
     ) as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 # ============================================================
@@ -1434,13 +1433,6 @@ async def get_indicators(
         le=5000,
     ),
 ):
-    """
-    Calculate real technical indicators from MT5 OHLC candles.
-
-    Indicators are calculated locally from read-only market data.
-    No order is placed, modified, or closed by this endpoint.
-    """
-
     try:
         candles = await mt5_service.get_candles(
             symbol=symbol,
@@ -1454,14 +1446,19 @@ async def get_indicators(
             candles=candles,
         )
 
-        response = indicator_result_to_dict(result)
+        response = indicator_result_to_dict(
+            result
+        )
+
         response["timestamp"] = utc_timestamp()
         response["source"] = "mt5"
 
         return response
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
     except (
         TechnicalIndicatorError,
@@ -1470,7 +1467,9 @@ async def get_indicators(
         raise HTTPException(
             status_code=422,
             detail={
-                "error": "Technical indicator calculation failed",
+                "error": (
+                    "Technical indicator calculation failed"
+                ),
                 "message": str(exc),
                 "timestamp": utc_timestamp(),
             },
@@ -1485,25 +1484,8 @@ async def get_indicators(
 async def place_order(
     order_data: dict,
 ):
-    """
-    Legacy direct-order endpoint.
-
-    Direct client-supplied orders are intentionally disabled.
-
-    All strategy-driven paper trades MUST use:
-
-        POST /api/strategy/paper-trade
-
-    That canonical path runs the AI decision and Risk Engine
-    before paper execution, so the client cannot bypass risk
-    controls by supplying its own position size.
-
-    No live broker order is ever placed here.
-    """
-
     logger.warning(
-        "Rejected legacy direct order request. "
-        "Use /api/strategy/paper-trade instead."
+        "Rejected legacy direct order request."
     )
 
     raise HTTPException(
@@ -1516,7 +1498,9 @@ async def place_order(
                 "decision and Risk Engine can validate and "
                 "calculate the paper position size."
             ),
-            "canonical_endpoint": "/api/strategy/paper-trade",
+            "canonical_endpoint": (
+                "/api/strategy/paper-trade"
+            ),
             "execution_mode": "paper_only",
             "live_trading_enabled": False,
             "risk_engine_required": True,
@@ -1536,12 +1520,6 @@ async def get_positions(
         max_length=64,
     ),
 ):
-    """
-    Read real open MT5 positions.
-
-    READ ONLY.
-    """
-
     try:
         positions = await mt5_service.get_positions(
             symbol=symbol
@@ -1567,17 +1545,15 @@ async def get_positions(
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
 
 @app.post("/api/trading/close-position")
 async def close_position(
     position_id: str,
 ):
-    """
-    Real position closing is intentionally disabled.
-    """
-
     return {
         "position_id": position_id,
         "status": "disabled",
@@ -1611,22 +1587,6 @@ async def get_strategy_decision(
         le=5000,
     ),
 ):
-    """
-    Run the real Step 13 AI decision pipeline.
-
-    Path:
-
-        MT5 candles
-            ->
-        Technical Indicators
-            ->
-        TechnicalContext
-            ->
-        Step 13 AI
-
-    This endpoint does NOT execute a trade.
-    """
-
     try:
         candles = await mt5_service.get_candles(
             symbol=symbol,
@@ -1663,13 +1623,17 @@ async def get_strategy_decision(
         return response
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
     except TradingPipelineServiceError as exc:
         raise HTTPException(
             status_code=422,
             detail={
-                "error": "Strategy decision pipeline failed",
+                "error": (
+                    "Strategy decision pipeline failed"
+                ),
                 "message": str(exc),
                 "timestamp": utc_timestamp(),
             },
@@ -1684,29 +1648,6 @@ async def get_strategy_decision(
 async def run_strategy_paper_trade(
     request: StrategyPaperTradeRequest,
 ):
-    """
-    Run the complete Step 15 paper-trading pipeline.
-
-    Path:
-
-        MT5 candles
-            ->
-        Technical Indicators
-            ->
-        Step 13 AI
-            ->
-        Step 14 Risk Engine
-            ->
-        PaperExecutionGateway
-
-    IMPORTANT:
-    - The client cannot choose the position size.
-    - Risk Engine calculates the position size.
-    - WAIT never reaches execution.
-    - Risk rejection never reaches execution.
-    - Live execution is impossible through this endpoint.
-    """
-
     if live_trading_enabled():
         raise HTTPException(
             status_code=503,
@@ -1720,19 +1661,11 @@ async def run_strategy_paper_trade(
         )
 
     try:
-        # ----------------------------------------------------
-        # 1. Read real market candles from MT5.
-        # ----------------------------------------------------
-
         candles = await mt5_service.get_candles(
             symbol=request.symbol,
             timeframe=request.timeframe,
             limit=request.limit,
         )
-
-        # ----------------------------------------------------
-        # 2. Read broker symbol specification.
-        # ----------------------------------------------------
 
         raw_specification = (
             await mt5_service.get_symbol_specification(
@@ -1746,17 +1679,9 @@ async def run_strategy_paper_trade(
             )
         )
 
-        # ----------------------------------------------------
-        # 3. Build paper-only risk state.
-        # ----------------------------------------------------
-
         risk_state = build_paper_risk_state()
 
         paper_equity = get_paper_equity()
-
-        # ----------------------------------------------------
-        # 4. Execute Step 13 -> Step 14 -> Paper Gateway.
-        # ----------------------------------------------------
 
         result = (
             await trading_pipeline_service.execute_paper(
@@ -1769,27 +1694,17 @@ async def run_strategy_paper_trade(
             )
         )
 
-        # ----------------------------------------------------
-        # 5. Serialize the complete pipeline result.
-        # ----------------------------------------------------
-
         response = (
             trading_pipeline_service.serialize_step14_result(
                 result
             )
         )
 
-        # ----------------------------------------------------
-        # 5. Persist successful paper execution.
-        # ----------------------------------------------------
-
-        persisted_trade = persist_step15_paper_execution(
-            result
+        persisted_trade = (
+            persist_step15_paper_execution(
+                result
+            )
         )
-
-        # ----------------------------------------------------
-        # 6. Add persistence information to the response.
-        # ----------------------------------------------------
 
         if persisted_trade is not None:
             response["journal"] = {
@@ -1825,13 +1740,17 @@ async def run_strategy_paper_trade(
         return response
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
     except TradingPipelineServiceError as exc:
         raise HTTPException(
             status_code=422,
             detail={
-                "error": "Paper trading pipeline failed safely",
+                "error": (
+                    "Paper trading pipeline failed safely"
+                ),
                 "message": str(exc),
                 "timestamp": utc_timestamp(),
             },
@@ -1846,22 +1765,17 @@ async def run_strategy_paper_trade(
 async def run_backtest(
     backtest_config: dict,
 ):
-    """
-    Run the production deterministic backtest engine.
-
-    Safety:
-    - Historical candles are read from MT5 only.
-    - The BacktestEngine is simulation-only.
-    - No MT5/Exness/live order is ever submitted.
-    - The existing RiskEngine and trading pipeline are reused.
-    """
-
-    if not isinstance(backtest_config, dict):
+    if not isinstance(
+        backtest_config,
+        dict,
+    ):
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "Invalid backtest configuration",
-                "message": "backtest_config must be a JSON object.",
+                "message": (
+                    "backtest_config must be a JSON object."
+                ),
                 "timestamp": utc_timestamp(),
             },
         )
@@ -1950,12 +1864,17 @@ async def run_backtest(
         candle_limit = int(
             backtest_config.get(
                 "candle_limit",
-                max(500, warmup_candles + 1),
+                max(
+                    500,
+                    warmup_candles + 1,
+                ),
             )
         )
 
         if candle_limit < warmup_candles + 1:
-            candle_limit = warmup_candles + 1
+            candle_limit = (
+                warmup_candles + 1
+            )
 
         candles = await mt5_service.get_candles(
             symbol=symbol,
@@ -1971,7 +1890,8 @@ async def run_backtest(
                     "message": (
                         f"Backtest requires at least "
                         f"{warmup_candles + 1} candles, "
-                        f"but MT5 returned {len(candles)}."
+                        f"but MT5 returned "
+                        f"{len(candles)}."
                     ),
                     "symbol": symbol,
                     "timeframe": timeframe,
@@ -1980,17 +1900,16 @@ async def run_backtest(
                 },
             )
 
-        # Use the broker's real read-only MT5 symbol specification.
-        # This keeps position sizing and risk calculations aligned
-        # with the connected instrument while remaining simulation-only.
         raw_specification = (
             await mt5_service.get_symbol_specification(
                 symbol
             )
         )
 
-        specification = build_symbol_specification(
-            raw_specification
+        specification = (
+            build_symbol_specification(
+                raw_specification
+            )
         )
 
         config = BacktestConfig(
@@ -1999,18 +1918,24 @@ async def run_backtest(
             starting_balance=starting_balance,
             warmup_candles=warmup_candles,
             max_open_positions=max_open_positions,
-            execute_on_next_open=execute_on_next_open,
+            execute_on_next_open=(
+                execute_on_next_open
+            ),
             close_open_position_at_end=(
                 close_open_position_at_end
             ),
             spread=spread,
             slippage=slippage,
-            commission_per_unit=commission_per_unit,
+            commission_per_unit=(
+                commission_per_unit
+            ),
         )
 
         engine = BacktestEngine(
             config=config,
-            pipeline_service=trading_pipeline_service,
+            pipeline_service=(
+                trading_pipeline_service
+            ),
         )
 
         result = engine.run(
@@ -2024,18 +1949,33 @@ async def run_backtest(
                 getattr(
                     result,
                     "backtest_id",
-                    f"BT-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
+                    (
+                        "BT-"
+                        + datetime.now(
+                            timezone.utc
+                        ).strftime(
+                            "%Y%m%d%H%M%S%f"
+                        )
+                    ),
                 )
             ),
-            "execution_mode": "simulation_only",
+            "execution_mode": (
+                "simulation_only"
+            ),
             "live_trading_enabled": False,
             "source": "mt5_historical_data",
             "config": {
                 "symbol": config.symbol,
                 "timeframe": config.timeframe,
-                "starting_balance": config.starting_balance,
-                "warmup_candles": config.warmup_candles,
-                "max_open_positions": config.max_open_positions,
+                "starting_balance": (
+                    config.starting_balance
+                ),
+                "warmup_candles": (
+                    config.warmup_candles
+                ),
+                "max_open_positions": (
+                    config.max_open_positions
+                ),
                 "execute_on_next_open": (
                     config.execute_on_next_open
                 ),
@@ -2061,44 +2001,76 @@ async def run_backtest(
                 "timeframe": result.timeframe,
                 "start_time": result.start_time,
                 "end_time": result.end_time,
-                "starting_balance": result.starting_balance,
-                "ending_balance": result.ending_balance,
+                "starting_balance": (
+                    result.starting_balance
+                ),
+                "ending_balance": (
+                    result.ending_balance
+                ),
                 "net_profit": result.net_profit,
                 "net_profit_percent": (
                     result.net_profit_percent
                 ),
-                "total_trades": result.total_trades,
-                "winning_trades": result.winning_trades,
-                "losing_trades": result.losing_trades,
+                "total_trades": (
+                    result.total_trades
+                ),
+                "winning_trades": (
+                    result.winning_trades
+                ),
+                "losing_trades": (
+                    result.losing_trades
+                ),
                 "breakeven_trades": (
                     result.breakeven_trades
                 ),
                 "win_rate_percent": (
                     result.win_rate_percent
                 ),
-                "gross_profit": result.gross_profit,
-                "gross_loss": result.gross_loss,
-                "profit_factor": result.profit_factor,
+                "gross_profit": (
+                    result.gross_profit
+                ),
+                "gross_loss": (
+                    result.gross_loss
+                ),
+                "profit_factor": (
+                    result.profit_factor
+                ),
                 "total_execution_cost": (
                     result.total_execution_cost
                 ),
-                "max_drawdown": result.max_drawdown,
+                "max_drawdown": (
+                    result.max_drawdown
+                ),
                 "max_drawdown_percent": (
                     result.max_drawdown_percent
                 ),
-                "average_trade": result.average_trade,
-                "average_win": result.average_win,
-                "average_loss": result.average_loss,
-                "bars_processed": result.bars_processed,
-                "warmup_candles": result.warmup_candles,
+                "average_trade": (
+                    result.average_trade
+                ),
+                "average_win": (
+                    result.average_win
+                ),
+                "average_loss": (
+                    result.average_loss
+                ),
+                "bars_processed": (
+                    result.bars_processed
+                ),
+                "warmup_candles": (
+                    result.warmup_candles
+                ),
                 "trades": result.trades,
-                "equity_curve": result.equity_curve,
+                "equity_curve": (
+                    result.equity_curve
+                ),
             },
             "timestamp": utc_timestamp(),
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(exc) from exc
+        raise mt5_error_response(
+            exc
+        ) from exc
 
     except BacktestEngineError as exc:
         raise HTTPException(
@@ -2119,7 +2091,10 @@ async def run_backtest(
         raise HTTPException(
             status_code=422,
             detail={
-                "error": "Backtest configuration or pipeline failed",
+                "error": (
+                    "Backtest configuration or "
+                    "pipeline failed"
+                ),
                 "message": str(exc),
                 "timestamp": utc_timestamp(),
             },
@@ -2155,7 +2130,9 @@ async def get_trade_journal(
 
         return {
             "trades": [
-                TradeJournal.serialize_trade(row)
+                TradeJournal.serialize_trade(
+                    row
+                )
                 for row in rows
             ],
             "total": total,
@@ -2196,17 +2173,12 @@ async def dashboard_websocket(
     """
     Read-only dashboard WebSocket.
 
-    The dashboard receives:
-    - market data
-    - account data
-    - positions
-    - safety status
-    - heartbeat messages
-
-    This endpoint NEVER places or modifies trades.
+    Never places or modifies trades.
     """
 
-    await dashboard_ws_manager.connect(websocket)
+    await dashboard_ws_manager.connect(
+        websocket
+    )
 
     try:
         async def provider():
@@ -2231,7 +2203,9 @@ async def dashboard_websocket(
         )
 
     finally:
-        dashboard_ws_manager.disconnect(websocket)
+        dashboard_ws_manager.disconnect(
+            websocket
+        )
 
 
 # ============================================================
@@ -2240,16 +2214,9 @@ async def dashboard_websocket(
 
 @app.post("/api/admin/emergency-stop")
 async def emergency_stop():
-    """
-    Activate the RAYMOND emergency stop.
-
-    This blocks trading permission through the
-    safety manager.
-
-    It does NOT close existing broker positions.
-    """
-
-    status = safety_manager.activate_emergency_stop()
+    status = (
+        safety_manager.activate_emergency_stop()
+    )
 
     logger.critical(
         "EMERGENCY STOP ACTIVATED"
@@ -2258,7 +2225,9 @@ async def emergency_stop():
     return {
         "status": "emergency_stop_active",
         "timestamp": utc_timestamp(),
-        "trading_allowed": status.trading_allowed,
+        "trading_allowed": (
+            status.trading_allowed
+        ),
         "emergency_stop_active": (
             status.emergency_stop_active
         ),
@@ -2276,20 +2245,16 @@ async def emergency_stop():
 
 @app.post("/api/admin/emergency-stop/reset")
 async def reset_emergency_stop():
-    """
-    Reset the emergency stop.
-
-    The safety manager still requires a healthy,
-    non-stale MT5 connection before trading can
-    become permitted.
-    """
-
-    status = safety_manager.reset_emergency_stop()
+    status = (
+        safety_manager.reset_emergency_stop()
+    )
 
     return {
         "status": "emergency_stop_reset",
         "timestamp": utc_timestamp(),
-        "trading_allowed": status.trading_allowed,
+        "trading_allowed": (
+            status.trading_allowed
+        ),
         "emergency_stop_active": (
             status.emergency_stop_active
         ),
@@ -2303,7 +2268,9 @@ async def reset_emergency_stop():
 @app.get("/api/admin/status")
 async def admin_status():
     try:
-        mt5_status = await mt5_service.heartbeat()
+        mt5_status = (
+            await mt5_service.heartbeat()
+        )
 
         if mt5_status.get("connected"):
             safety_manager.record_heartbeat()
@@ -2326,6 +2293,7 @@ async def admin_status():
         db.execute(
             sqlalchemy_text("SELECT 1")
         )
+
         db_connected = True
 
     except Exception as exc:
@@ -2369,6 +2337,12 @@ async def admin_status():
             "enabled": True,
             "endpoint": "/api/mt5/telemetry",
             "mode": "READ_ONLY",
+        },
+        "mt5_ai_decision_bridge": {
+            "enabled": True,
+            "endpoint": "/api/mt5/decision",
+            "mode": "READ_ONLY",
+            "execution_authorized": False,
         },
         "safety": {
             "trading_allowed": (
@@ -2458,3 +2432,6 @@ if __name__ == "__main__":
         port=8000,
         reload=True,
     )
+
+
+
