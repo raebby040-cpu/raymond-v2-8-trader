@@ -282,8 +282,7 @@ class _HomePageState extends State<HomePage> {
       return AnalysisPage(api: api);
     }
 
-    // Chart, Positions and Settings will be connected in later Step 10B
-    // phases. Keep them explicit rather than displaying fake live data.
+    // Other tabs remain placeholders for now.
     if (selectedIndex != 0) {
       return _placeholderPage();
     }

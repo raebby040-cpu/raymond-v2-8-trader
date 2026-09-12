@@ -1,6 +1,6 @@
 import pytest
 
-from dashboard_schema import (
+from app.dashboard_schema import (
     DashboardStateError,
     normalize_dashboard_state,
     safe_dashboard_state,
