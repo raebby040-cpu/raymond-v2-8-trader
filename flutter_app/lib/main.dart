@@ -4,6 +4,7 @@ import 'analysis_page.dart';
 import 'api_service.dart';
 import 'chart_page.dart';
 import 'positions_page.dart';
+import 'settings_page.dart';
 
 void main() {
   runApp(const RaymondApp());
@@ -11,27 +12,6 @@ void main() {
 
 class RaymondApp extends StatelessWidget {
   const RaymondApp({super.key});
-
-  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
-    final response = await api.paperJournalTrades(
-      limit: 50,
-      offset: 0,
-    );
-
-    final data = response;
-    final rawTrades = data['trades'];
-
-    if (rawTrades is! List) {
-      throw const FormatException(
-        'Expected a trades list from the paper journal API.',
-      );
-    }
-
-    return rawTrades
-        .whereType<Map>()
-        .map((item) => Map<String, dynamic>.from(item))
-        .toList();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -113,14 +93,11 @@ class _HomePageState extends State<HomePage> {
         performance = await api.demoPerformance();
       } catch (_) {}
 
-      // Step 10B-1: use the persistent paper-trade journal first.
       try {
         final journalResponse = await _loadPaperJournal();
         fetchedTrades = journalResponse;
         fetchedJournal = true;
       } catch (_) {
-        // Keep the older demo endpoint as a safe fallback while the
-        // backend is being upgraded.
         try {
           fetchedTrades = await api.demoTrades();
         } catch (_) {}
@@ -244,19 +221,34 @@ class _HomePageState extends State<HomePage> {
           ),
           NavigationDestination(
             icon: Icon(Icons.candlestick_chart_outlined),
+            selectedIcon: Icon(
+              Icons.candlestick_chart,
+              color: gold,
+            ),
             label: 'Chart',
           ),
           NavigationDestination(
             icon: Icon(Icons.analytics_outlined),
-            selectedIcon: Icon(Icons.analytics, color: gold),
+            selectedIcon: Icon(
+              Icons.analytics,
+              color: gold,
+            ),
             label: 'Analysis',
           ),
           NavigationDestination(
             icon: Icon(Icons.swap_vert),
+            selectedIcon: Icon(
+              Icons.swap_vert,
+              color: gold,
+            ),
             label: 'Positions',
           ),
           NavigationDestination(
             icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(
+              Icons.settings,
+              color: gold,
+            ),
             label: 'Settings',
           ),
         ],
@@ -300,27 +292,22 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildBody() {
-    // Step 10B-2: functional XAUUSD chart.
     if (selectedIndex == 1) {
       return ChartPage(api: api);
     }
 
-    // Analysis tab.
     if (selectedIndex == 2) {
       return AnalysisPage(api: api);
     }
 
-    // Step 10B-3: functional read-only MT5 positions.
     if (selectedIndex == 3) {
       return PositionsPage(api: api);
     }
 
-    // Settings remains a placeholder for now.
-    if (selectedIndex != 0) {
-      return _placeholderPage();
+    if (selectedIndex == 4) {
+      return SettingsPage(api: api);
     }
 
-    // Home tab.
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
@@ -653,26 +640,6 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _placeholderPage() {
-    const names = [
-      'Home',
-      'Chart',
-      'Analysis',
-      'Positions',
-      'Settings',
-    ];
-
-    return Center(
-      child: Text(
-        '${names[selectedIndex]} screen — next Step 10B phase',
-        style: const TextStyle(
-          color: muted,
-          fontSize: 18,
-        ),
       ),
     );
   }
