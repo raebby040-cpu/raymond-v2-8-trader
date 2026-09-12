@@ -4,14 +4,10 @@
 //| STEP 11B-7: SAFETY + DEMO EXECUTION + POSITION MANAGEMENT        |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "0.7.0"
+#property version   "0.7.1"
 #property description "RAYMOND v2.8 broker-agnostic MT5 bridge"
 #property description "Telemetry, safety, DEMO execution and position protection"
 #property description "LIVE TRADING HARD-LOCKED OFF"
-
-// -------------------------------------------------------------------
-// RAYMOND MODULES
-// -------------------------------------------------------------------
 
 #include "RaymondBridge.mqh"
 #include "RaymondSafety.mqh"
@@ -22,103 +18,58 @@
 // INPUTS
 // -------------------------------------------------------------------
 
-// Main market symbol.
-// Broker-specific symbols can be entered here, for example:
-// XAUUSD, XAUUSDm, GOLD, etc.
 input string InpSymbol = "XAUUSD";
-
-// Analysis / monitoring timeframe.
 input ENUM_TIMEFRAMES InpTimeframe = PERIOD_M15;
-
-// Main monitoring interval.
 input int InpTimerSeconds = 5;
 
-// Raymond backend URL.
-// Example:
-// http://YOUR_SERVER:8000
-//
-// Leave blank until the backend is deployed and reachable.
 input string InpBackendUrl = "";
-
-// Backend telemetry endpoint.
 input string InpTelemetryPath = "/api/mt5/telemetry";
-
-// Backend request timeout.
 input int InpBackendTimeoutMs = 5000;
 
 // -------------------------------------------------------------------
-// SAFETY SETTINGS
+// SAFETY
 // -------------------------------------------------------------------
 
-// Maximum accepted spread in PRICE units.
-//
-// Example:
-// XAUUSD with bid 3500.00 and ask 3500.50
-// spread = 0.50
-//
-// This should be tuned after testing the selected broker.
 input double InpMaxSpread = 1.00;
-
-// Maximum age of an AI decision in seconds.
 input int InpMaxDecisionAgeSeconds = 30;
 
 // -------------------------------------------------------------------
-// DEMO EXECUTION SETTINGS
+// DEMO EXECUTION
 // -------------------------------------------------------------------
 
-// Slippage/deviation in MT5 points.
 input int InpDeviationPoints = 50;
 
 // -------------------------------------------------------------------
-// POSITION PROTECTION SETTINGS
+// POSITION PROTECTION
 // -------------------------------------------------------------------
 
-// Profit amount at which break-even protection can be attempted.
-//
-// IMPORTANT:
-// These are currently account-profit values because the position
-// manager evaluates POSITION_PROFIT.
 input double InpBreakEvenTrigger = 2.00;
-
-// Amount added above/below entry when moving to break-even.
 input double InpBreakEvenOffset = 0.20;
 
-// Profit amount at which profit locking can be attempted.
 input double InpProfitLockTrigger = 4.00;
-
-// Distance from current market price used for profit locking.
 input double InpProfitLockDistance = 1.00;
 
 // -------------------------------------------------------------------
-// ABSOLUTE GLOBAL SAFETY LOCK
+// ABSOLUTE LIVE-TRADING LOCK
 // -------------------------------------------------------------------
-//
-// This variable MUST remain false in this stage.
-//
-// It is deliberately hard-coded rather than exposed as an input.
-// No external parameter can turn live trading on.
-//
+
 bool TRADING_ENABLED = false;
 
 // -------------------------------------------------------------------
-// RAYMOND MODULE INSTANCES
+// MODULES
 // -------------------------------------------------------------------
 
 RaymondBridge Raymond;
-
 RaymondSafety RaymondSafetyEngine;
-
 RaymondExecution RaymondExecutionEngine;
-
 RaymondPositionManager RaymondPositionManagerEngine;
 
 // -------------------------------------------------------------------
 // RUNTIME STATE
 // -------------------------------------------------------------------
 
-datetime g_last_status_log = 0;
-
 bool g_initialized = false;
+datetime g_last_status_log = 0;
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                            |
@@ -135,12 +86,12 @@ int OnInit()
    Print("==================================================");
 
    // ---------------------------------------------------------------
-   // HARD SAFETY CHECK
+   // ABSOLUTE LIVE-TRADING SAFETY CHECK
    // ---------------------------------------------------------------
 
    if(TRADING_ENABLED)
    {
-      Print("FATAL SAFETY ERROR: TRADING_ENABLED must be FALSE.");
+      Print("FATAL SAFETY ERROR: TRADING_ENABLED must remain FALSE.");
       return INIT_FAILED;
    }
 
@@ -162,7 +113,7 @@ int OnInit()
 
    if(InpBackendTimeoutMs < 100)
    {
-      Print("ERROR: Backend timeout is too small.");
+      Print("ERROR: Backend timeout must be at least 100 ms.");
       return INIT_PARAMETERS_INCORRECT;
    }
 
@@ -180,7 +131,25 @@ int OnInit()
 
    if(InpDeviationPoints < 1)
    {
-      Print("ERROR: Deviation points must be greater than zero.");
+      Print("ERROR: Deviation must be greater than zero.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpBreakEvenTrigger < 0.0)
+   {
+      Print("ERROR: Break-even trigger cannot be negative.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpProfitLockTrigger < 0.0)
+   {
+      Print("ERROR: Profit-lock trigger cannot be negative.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpProfitLockDistance <= 0.0)
+   {
+      Print("ERROR: Profit-lock distance must be greater than zero.");
       return INIT_PARAMETERS_INCORRECT;
    }
 
@@ -188,11 +157,15 @@ int OnInit()
    // SYMBOL
    // ---------------------------------------------------------------
 
+   ResetLastError();
+
    if(!SymbolSelect(InpSymbol, true))
    {
       Print(
          "ERROR: Could not select symbol ",
-         InpSymbol
+         InpSymbol,
+         ". Error=",
+         GetLastError()
       );
 
       return INIT_FAILED;
@@ -210,21 +183,14 @@ int OnInit()
 
    Raymond.SetEnabled(true);
 
-   if(!Raymond.IsConfigured())
+   if(Raymond.IsConfigured())
    {
-      Print(
-         "RAYMOND BRIDGE: Backend URL is not configured."
-      );
-
-      Print(
-         "Telemetry will remain disabled until a valid backend URL is supplied."
-      );
+      Print("RAYMOND BRIDGE: Backend URL configured.");
    }
    else
    {
-      Print(
-         "RAYMOND BRIDGE: Backend URL configured."
-      );
+      Print("RAYMOND BRIDGE: Backend URL not configured.");
+      Print("Telemetry will remain inactive until a backend URL is supplied.");
    }
 
    // ---------------------------------------------------------------
@@ -236,10 +202,10 @@ int OnInit()
       InpMaxDecisionAgeSeconds
    );
 
-   // Emergency stop is deliberately ON at startup.
+   // Emergency stop deliberately starts ON.
    RaymondSafetyEngine.SetEmergencyStop(true);
 
-   // These methods are hard-locked OFF internally by the safety module.
+   // Hard-disabled.
    RaymondSafetyEngine.SetLiveTradingEnabled(false);
    RaymondSafetyEngine.SetExecutionAuthorized(false);
 
@@ -252,7 +218,6 @@ int OnInit()
       InpDeviationPoints
    );
 
-   // The execution module itself hard-locks live trading OFF.
    RaymondExecutionEngine.SetLiveTradingEnabled(false);
 
    // ---------------------------------------------------------------
@@ -267,7 +232,7 @@ int OnInit()
       InpDeviationPoints
    );
 
-   // Emergency stop remains ON until a later deliberate control stage.
+   // Emergency stop remains ON at this stage.
    RaymondPositionManagerEngine.SetEmergencyStop(true);
 
    // Live trading remains disabled.
@@ -290,53 +255,53 @@ int OnInit()
    }
 
    g_initialized = true;
+   g_last_status_log = TimeCurrent();
+
+   // ---------------------------------------------------------------
+   // STARTUP STATUS
+   // ---------------------------------------------------------------
 
    Print("--------------------------------------------------");
    Print("RAYMOND SAFETY STATUS");
    Print(
-      "Safety Emergency Stop: ",
+      "Emergency Stop: ",
       RaymondSafetyEngine.EmergencyStopActive()
       ? "ON"
       : "OFF"
    );
 
    Print(
-      "Safety Live Trading: ",
+      "Live Trading: ",
       RaymondSafetyEngine.LiveTradingEnabled()
       ? "ON"
       : "OFF"
    );
 
    Print(
-      "Safety Execution: ",
+      "Execution Authorized: ",
       RaymondSafetyEngine.ExecutionAuthorized()
-      ? "AUTHORIZED"
-      : "OFF"
+      ? "YES"
+      : "NO"
    );
 
    Print(
-      "Execution Demo Only: ",
+      "Execution DEMO Only: ",
       RaymondExecutionEngine.DemoOnly()
       ? "YES"
       : "NO"
    );
 
    Print(
-      "Position Manager Demo Only: ",
+      "Position Manager DEMO Only: ",
       RaymondPositionManagerEngine.DemoOnly()
       ? "YES"
       : "NO"
    );
 
    Print("--------------------------------------------------");
-
-   Print(
-      "RAYMOND EA initialized successfully."
-   );
-
-   Print(
-      "NO LIVE TRADING IS AVAILABLE IN THIS BUILD."
-   );
+   Print("RAYMOND EA initialized successfully.");
+   Print("LIVE TRADING IS HARD-LOCKED OFF.");
+   Print("==================================================");
 
    return INIT_SUCCEEDED;
 }
@@ -353,19 +318,18 @@ void OnDeinit(const int reason)
    Print("==================================================");
    Print("RAYMOND v2.8 EA stopped.");
    Print("Reason: ", reason);
-   Print("Live trading remained disabled.");
+   Print("LIVE TRADING REMAINED DISABLED.");
    Print("==================================================");
 }
 
 //+------------------------------------------------------------------+
-//| Tick handler                                                     |
+//| Tick                                                              |
 //+------------------------------------------------------------------+
 void OnTick()
 {
    // Deliberately empty.
    //
-   // Raymond uses the timer so that monitoring is controlled
-   // and does not execute repeatedly on every incoming tick.
+   // Raymond performs controlled monitoring through OnTimer().
 }
 
 //+------------------------------------------------------------------+
@@ -376,67 +340,40 @@ void OnTimer()
    if(!g_initialized)
       return;
 
-   // ---------------------------------------------------------------
-   // ABSOLUTE SAFETY CHECK
-   // ---------------------------------------------------------------
-
+   // Absolute safety lock.
    if(TRADING_ENABLED)
    {
       Print(
-         "RAYMOND SAFETY ERROR: Trading flag became TRUE."
+         "RAYMOND SAFETY ERROR: TRADING_ENABLED became TRUE."
       );
 
       return;
    }
 
-   // ---------------------------------------------------------------
-   // MARKET
-   // ---------------------------------------------------------------
-
+   // Market monitoring.
    MonitorMarket();
 
-   // ---------------------------------------------------------------
-   // ACCOUNT
-   // ---------------------------------------------------------------
-
+   // Account monitoring.
    MonitorAccount();
 
-   // ---------------------------------------------------------------
-   // OPEN POSITIONS
-   // ---------------------------------------------------------------
-
+   // Position monitoring.
    MonitorPositions();
 
-   // ---------------------------------------------------------------
-   // POSITION PROTECTION
-   // ---------------------------------------------------------------
+   // Position protection.
    //
-   // The manager itself checks:
-   // - DEMO account
-   // - emergency stop
-   // - DEMO_ONLY
-   // - live trading lock
-   //
-   // Since emergency stop is ON at this stage, no modification
-   // will occur.
-   //
+   // The position manager has its emergency stop ON by default.
+   // Therefore this cannot modify positions at this stage.
    RaymondPositionManagerEngine.MonitorAllPositions();
 
-   // ---------------------------------------------------------------
-   // TELEMETRY
-   // ---------------------------------------------------------------
-
+   // Backend telemetry.
    SendTelemetry();
 
-   // ---------------------------------------------------------------
-   // PERIODIC STATUS
-   // ---------------------------------------------------------------
-
+   // Periodic status.
    PrintStatusPeriodically();
 }
 
 //+------------------------------------------------------------------+
-//| Get market data                                                  |
+//| Read current market quote                                        |
 //+------------------------------------------------------------------+
 bool GetMarketData(
    double &bid,
@@ -451,7 +388,7 @@ bool GetMarketData(
    if(!SymbolInfoTick(InpSymbol, tick))
    {
       Print(
-         "RAYMOND MARKET | Unable to read tick for ",
+         "RAYMOND MARKET | Failed to read tick for ",
          InpSymbol
       );
 
@@ -503,7 +440,6 @@ void MonitorMarket()
       spread
    );
 
-   // Run the same quote through Raymond's safety layer.
    string reason = "";
 
    bool quote_ok =
@@ -597,7 +533,7 @@ void MonitorPositions()
             POSITION_VOLUME
          );
 
-      double openPrice =
+      double open_price =
          PositionGetDouble(
             POSITION_PRICE_OPEN
          );
@@ -623,7 +559,7 @@ void MonitorPositions()
          symbol,
          type,
          volume,
-         openPrice,
+         open_price,
          sl,
          tp,
          profit
@@ -632,18 +568,15 @@ void MonitorPositions()
 }
 
 //+------------------------------------------------------------------+
-//| Send telemetry                                                   |
+//| Telemetry                                                        |
 //+------------------------------------------------------------------+
 void SendTelemetry()
 {
-   // ---------------------------------------------------------------
-   // ABSOLUTE SAFETY CHECK
-   // ---------------------------------------------------------------
-
+   // Absolute safety lock.
    if(TRADING_ENABLED)
    {
       Print(
-         "RAYMOND SAFETY ERROR: Telemetry blocked because trading flag is TRUE."
+         "RAYMOND SAFETY | Telemetry blocked because trading flag is TRUE."
       );
 
       return;
@@ -673,15 +606,15 @@ void SendTelemetry()
          ACCOUNT_MARGIN
       );
 
-   double freeMargin =
+   double free_margin =
       AccountInfoDouble(
          ACCOUNT_MARGIN_FREE
       );
 
-   int openPositions =
+   int open_positions =
       PositionsTotal();
 
-   bool success =
+   bool result =
       Raymond.SendTelemetry(
          InpSymbol,
          bid,
@@ -689,125 +622,81 @@ void SendTelemetry()
          balance,
          equity,
          margin,
-         freeMargin,
-         openPositions
+         free_margin,
+         open_positions
       );
 
-   if(!success)
+   if(!result)
    {
       Print(
-         "RAYMOND TELEMETRY | Send failed | HTTP=",
+         "RAYMOND TELEMETRY | Request failed | HTTP=",
          Raymond.LastHttpCode(),
          " | Error=",
          Raymond.LastError()
       );
    }
-   else
-   {
-      Print(
-         "RAYMOND TELEMETRY | Successfully sent."
-      );
-   }
 }
 
 //+------------------------------------------------------------------+
-//| Periodic status logging                                          |
+//| Periodic status                                                  |
 //+------------------------------------------------------------------+
 void PrintStatusPeriodically()
 {
-   datetime now_time =
-      TimeCurrent();
+   datetime now = TimeCurrent();
 
-   // Log detailed safety state approximately every 60 seconds.
+   // Print detailed status approximately every 60 seconds.
    if(
       g_last_status_log != 0 &&
-      (now_time - g_last_status_log) < 60
+      (now - g_last_status_log) < 60
    )
    {
       return;
    }
 
-   g_last_status_log =
-      now_time;
+   g_last_status_log = now;
 
-   Print("==================================================");
-   Print("RAYMOND STATUS");
-
+   Print("--------------------------------------------------");
+   Print("RAYMOND PERIODIC STATUS");
    Print(
       "Symbol: ",
       InpSymbol
    );
 
    Print(
-      "Timeframe: ",
-      EnumToString(InpTimeframe)
-   );
-
-   Print(
-      "Backend configured: ",
+      "Backend Configured: ",
       Raymond.IsConfigured()
       ? "YES"
       : "NO"
    );
 
    Print(
-      "Telemetry mode: READ_ONLY"
-   );
-
-   Print(
-      "Live trading: OFF"
-   );
-
-   Print(
-      "Execution authorized: OFF"
-   );
-
-   Print(
-      "Demo execution only: ",
-      RaymondExecutionEngine.DemoOnly()
-      ? "YES"
-      : "NO"
-   );
-
-   Print(
-      "Emergency stop: ",
+      "Emergency Stop: ",
       RaymondSafetyEngine.EmergencyStopActive()
       ? "ON"
       : "OFF"
    );
 
    Print(
-      "Position manager emergency stop: ",
-      RaymondPositionManagerEngine.EmergencyStopActive()
-      ? "ON"
-      : "OFF"
+      "Live Trading: HARD LOCKED OFF"
    );
 
    Print(
-      "==================================================");
+      "Execution Authorized: ",
+      RaymondSafetyEngine.ExecutionAuthorized()
+      ? "YES"
+      : "NO"
+   );
+
+   Print(
+      "Execution Mode: DEMO ONLY"
+   );
+
+   Print(
+      "Open Positions: ",
+      PositionsTotal()
+   );
+
+   Print("--------------------------------------------------");
 }
 
 //+------------------------------------------------------------------+
-//| Trading permission guard                                         |
-//+------------------------------------------------------------------+
-bool IsTradingAllowed()
-{
-   // ---------------------------------------------------------------
-   // ABSOLUTE LOCK
-   // ---------------------------------------------------------------
-   //
-   // This remains FALSE during the current development stage.
-   //
-   // Even if another module is accidentally changed, this EA
-   // cannot use this function to authorize live trading.
-   //
-
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| End of RaymondEA.mq5                                             |
-//+------------------------------------------------------------------+
-
-
-
