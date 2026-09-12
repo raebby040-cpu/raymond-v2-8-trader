@@ -343,7 +343,6 @@ def test_rejects_non_chronological_candles() -> None:
     )
 
     candles = make_candles(51)
-
     candles[25]["time"] = candles[24]["time"]
 
     with pytest.raises(BacktestEngineError):
@@ -666,8 +665,8 @@ def test_sell_gap_through_stop_loss_uses_candle_open() -> None:
         decisions=[
             make_sell_decision(
                 entry=2000.0,
-                stop_loss=2001.0,
-                take_profit=1998.0,
+                stop_loss=2010.0,
+                take_profit=1990.0,
             )
         ],
     )
