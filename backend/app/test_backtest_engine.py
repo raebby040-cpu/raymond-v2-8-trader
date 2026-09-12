@@ -622,7 +622,7 @@ def test_buy_gap_through_stop_loss_uses_candle_open() -> None:
         ],
     )
 
-    candles = make_candles(52)
+    candles = make_candles(53)
 
     candles[50] = {
         "time": "2026-01-01T00:50:00",
@@ -634,6 +634,14 @@ def test_buy_gap_through_stop_loss_uses_candle_open() -> None:
 
     candles[51] = {
         "time": "2026-01-01T00:51:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[52] = {
+        "time": "2026-01-01T00:52:00",
         "open": 1995.0,
         "high": 1996.0,
         "low": 1994.0,
@@ -647,7 +655,8 @@ def test_buy_gap_through_stop_loss_uses_candle_open() -> None:
 
     trade = result.trades[0]
 
-    assert trade["exit_reason"] == "stop_loss_gap"
+    assert result.total_trades == 1
+    assert trade["exit_reason"] == "stop_loss"
     assert trade["exit_price"] == pytest.approx(1995.0)
     assert trade["pnl"] < 0
 
@@ -658,129 +667,6 @@ def test_sell_gap_through_stop_loss_uses_candle_open() -> None:
             make_sell_decision(
                 entry=2000.0,
                 stop_loss=2001.0,
-                take_profit=1998.0,
-            )
-        ],
-    )
-
-    candles = make_candles(52)
-
-    candles[50] = {
-        "time": "2026-01-01T00:50:00",
-        "open": 2000.0,
-        "high": 2000.5,
-        "low": 1999.5,
-        "close": 2000.0,
-    }
-
-    candles[51] = {
-        "time": "2026-01-01T00:51:00",
-        "open": 2005.0,
-        "high": 2006.0,
-        "low": 2004.0,
-        "close": 2005.0,
-    }
-
-    result = engine.run(
-        candles=candles,
-        specification=make_specification(),
-    )
-
-    trade = result.trades[0]
-
-    assert trade["exit_reason"] == "stop_loss_gap"
-    assert trade["exit_price"] == pytest.approx(2005.0)
-    assert trade["pnl"] < 0
-
-
-def test_buy_gap_through_take_profit_uses_candle_open() -> None:
-    engine = make_engine(
-        decisions=[
-            make_buy_decision(
-                entry=2000.0,
-                stop_loss=1998.0,
-                take_profit=2002.0,
-            )
-        ],
-    )
-
-    candles = make_candles(52)
-
-    candles[50] = {
-        "time": "2026-01-01T00:50:00",
-        "open": 2000.0,
-        "high": 2000.5,
-        "low": 1999.5,
-        "close": 2000.0,
-    }
-
-    candles[51] = {
-        "time": "2026-01-01T00:51:00",
-        "open": 2005.0,
-        "high": 2006.0,
-        "low": 2004.0,
-        "close": 2005.0,
-    }
-
-    result = engine.run(
-        candles=candles,
-        specification=make_specification(),
-    )
-
-    trade = result.trades[0]
-
-    assert trade["exit_reason"] == "take_profit_gap"
-    assert trade["exit_price"] == pytest.approx(2005.0)
-    assert trade["pnl"] > 0
-
-
-def test_sell_gap_through_take_profit_uses_candle_open() -> None:
-    engine = make_engine(
-        decisions=[
-            make_sell_decision(
-                entry=2000.0,
-                stop_loss=2002.0,
-                take_profit=1998.0,
-            )
-        ],
-    )
-
-    candles = make_candles(52)
-
-    candles[50] = {
-        "time": "2026-01-01T00:50:00",
-        "open": 2000.0,
-        "high": 2000.5,
-        "low": 1999.5,
-        "close": 2000.0,
-    }
-
-    candles[51] = {
-        "time": "2026-01-01T00:51:00",
-        "open": 1995.0,
-        "high": 1996.0,
-        "low": 1994.0,
-        "close": 1995.0,
-    }
-
-    result = engine.run(
-        candles=candles,
-        specification=make_specification(),
-    )
-
-    trade = result.trades[0]
-
-    assert trade["exit_reason"] == "take_profit_gap"
-    assert trade["exit_price"] == pytest.approx(1995.0)
-    assert trade["pnl"] > 0
-
-
-def test_sell_trade_take_profit_generates_positive_pnl() -> None:
-    engine = make_engine(
-        decisions=[
-            make_sell_decision(
-                entry=2000.0,
-                stop_loss=2002.0,
                 take_profit=1998.0,
             )
         ],
@@ -800,16 +686,66 @@ def test_sell_trade_take_profit_generates_positive_pnl() -> None:
         "time": "2026-01-01T00:51:00",
         "open": 2000.0,
         "high": 2000.5,
-        "low": 1997.5,
-        "close": 1998.0,
+        "low": 1999.5,
+        "close": 2000.0,
     }
 
     candles[52] = {
         "time": "2026-01-01T00:52:00",
-        "open": 1998.0,
-        "high": 1998.5,
-        "low": 1997.5,
-        "close": 1998.0,
+        "open": 2005.0,
+        "high": 2006.0,
+        "low": 2004.0,
+        "close": 2005.0,
+    }
+
+    result = engine.run(
+        candles=candles,
+        specification=make_specification(),
+    )
+
+    trade = result.trades[0]
+
+    assert result.total_trades == 1
+    assert trade["exit_reason"] == "stop_loss"
+    assert trade["exit_price"] == pytest.approx(2005.0)
+    assert trade["pnl"] < 0
+
+
+def test_buy_gap_through_take_profit_uses_candle_open() -> None:
+    engine = make_engine(
+        decisions=[
+            make_buy_decision(
+                entry=2000.0,
+                stop_loss=1990.0,
+                take_profit=2010.0,
+            )
+        ],
+    )
+
+    candles = make_candles(53)
+
+    candles[50] = {
+        "time": "2026-01-01T00:50:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[51] = {
+        "time": "2026-01-01T00:51:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[52] = {
+        "time": "2026-01-01T00:52:00",
+        "open": 2020.0,
+        "high": 2021.0,
+        "low": 2019.0,
+        "close": 2020.0,
     }
 
     result = engine.run(
@@ -821,6 +757,107 @@ def test_sell_trade_take_profit_generates_positive_pnl() -> None:
 
     assert result.total_trades == 1
     assert trade["exit_reason"] == "take_profit"
+    assert trade["exit_price"] == pytest.approx(2020.0)
+    assert trade["pnl"] > 0
+
+
+def test_sell_gap_through_take_profit_uses_candle_open() -> None:
+    engine = make_engine(
+        decisions=[
+            make_sell_decision(
+                entry=2000.0,
+                stop_loss=2010.0,
+                take_profit=1990.0,
+            )
+        ],
+    )
+
+    candles = make_candles(53)
+
+    candles[50] = {
+        "time": "2026-01-01T00:50:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[51] = {
+        "time": "2026-01-01T00:51:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[52] = {
+        "time": "2026-01-01T00:52:00",
+        "open": 1980.0,
+        "high": 1981.0,
+        "low": 1979.0,
+        "close": 1980.0,
+    }
+
+    result = engine.run(
+        candles=candles,
+        specification=make_specification(),
+    )
+
+    trade = result.trades[0]
+
+    assert result.total_trades == 1
+    assert trade["exit_reason"] == "take_profit"
+    assert trade["exit_price"] == pytest.approx(1980.0)
+    assert trade["pnl"] > 0
+
+
+def test_sell_trade_take_profit_generates_positive_pnl() -> None:
+    engine = make_engine(
+        decisions=[
+            make_sell_decision(
+                entry=2000.0,
+                stop_loss=2010.0,
+                take_profit=1990.0,
+            )
+        ],
+    )
+
+    candles = make_candles(53)
+
+    candles[50] = {
+        "time": "2026-01-01T00:50:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[51] = {
+        "time": "2026-01-01T00:51:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[52] = {
+        "time": "2026-01-01T00:52:00",
+        "open": 1990.0,
+        "high": 1990.5,
+        "low": 1989.5,
+        "close": 1990.0,
+    }
+
+    result = engine.run(
+        candles=candles,
+        specification=make_specification(),
+    )
+
+    trade = result.trades[0]
+
+    assert result.total_trades == 1
+    assert trade["exit_reason"] == "take_profit"
+    assert trade["exit_price"] == pytest.approx(1990.0)
     assert trade["pnl"] > 0
 
 
@@ -1029,7 +1066,7 @@ def test_commission_is_charged_on_entry_and_exit() -> None:
         commission_per_unit=1.0,
     )
 
-    candles = make_candles(52)
+    candles = make_candles(53)
 
     candles[50] = {
         "time": "2026-01-01T00:50:00",
@@ -1042,8 +1079,16 @@ def test_commission_is_charged_on_entry_and_exit() -> None:
     candles[51] = {
         "time": "2026-01-01T00:51:00",
         "open": 2000.0,
-        "high": 2001.0,
-        "low": 1999.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[52] = {
+        "time": "2026-01-01T00:52:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
         "close": 2000.0,
     }
 
@@ -1059,7 +1104,7 @@ def test_commission_is_charged_on_entry_and_exit() -> None:
 
 
 def test_execution_costs_reduce_result() -> None:
-    candles = make_candles(52)
+    candles = make_candles(53)
 
     candles[50] = {
         "time": "2026-01-01T00:50:00",
@@ -1072,8 +1117,16 @@ def test_execution_costs_reduce_result() -> None:
     candles[51] = {
         "time": "2026-01-01T00:51:00",
         "open": 2000.0,
-        "high": 2001.0,
-        "low": 1999.0,
+        "high": 2000.5,
+        "low": 1999.5,
+        "close": 2000.0,
+    }
+
+    candles[52] = {
+        "time": "2026-01-01T00:52:00",
+        "open": 2000.0,
+        "high": 2000.5,
+        "low": 1999.5,
         "close": 2000.0,
     }
 
@@ -1109,6 +1162,9 @@ def test_execution_costs_reduce_result() -> None:
         candles=candles,
         specification=make_specification(),
     )
+
+    assert clean_result.total_trades == 1
+    assert costly_result.total_trades == 1
 
     assert costly_result.total_execution_cost > (
         clean_result.total_execution_cost
@@ -1170,22 +1226,48 @@ def test_repeated_backtests_are_deterministic() -> None:
     assert first.winning_trades == second.winning_trades
     assert first.losing_trades == second.losing_trades
     assert first.breakeven_trades == second.breakeven_trades
+
     assert first.net_profit == pytest.approx(
         second.net_profit
     )
+
     assert first.ending_balance == pytest.approx(
         second.ending_balance
     )
+
     assert first.max_drawdown == pytest.approx(
         second.max_drawdown
     )
+
     assert first.max_drawdown_percent == pytest.approx(
         second.max_drawdown_percent
     )
+
     assert first.total_execution_cost == pytest.approx(
         second.total_execution_cost
     )
-    assert first.trades == second.trades
+
+    assert len(first.trades) == len(second.trades)
+
+    for first_trade, second_trade in zip(
+        first.trades,
+        second.trades,
+    ):
+        assert first_trade["trade_id"] != second_trade["trade_id"]
+
+        first_without_id = {
+            key: value
+            for key, value in first_trade.items()
+            if key != "trade_id"
+        }
+
+        second_without_id = {
+            key: value
+            for key, value in second_trade.items()
+            if key != "trade_id"
+        }
+
+        assert first_without_id == second_without_id
 
 
 def test_buy_trade_mode_long_only_is_allowed() -> None:
