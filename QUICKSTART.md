@@ -1,261 +1,287 @@
-# RAYMOND v2.8 - Quick Start Guide
+RAYMOND v2.8 - Quick Start Guide
 
-Get the trading system running in under 5 minutes.
+Get the RAYMOND v2.8 trading system running safely in development or through the deployed Render service.
 
-## Prerequisites
+«Safety: RAYMOND is currently configured for paper/demo trading. Live broker trading must remain disabled.»
 
-- **Python 3.11+** (or use Docker)
-- **pip** or **poetry** for dependency management
-- **Git** for cloning the repository
+Prerequisites
 
-## Option 1: Local Development (Recommended for Development)
+- Python 3.11+ for local development
+- Docker for containerized development
+- Git for cloning the repository
 
-### Step 1: Clone Repository
+---
 
-```bash
+Option 1: Local Development
+
+Step 1: Clone the Repository
+
 git clone https://github.com/raebby040-cpu/raymond-v2-8-trader.git
-cd raymond-v2-8-trader/backend
-```
+cd raymond-v2-8-trader
 
-### Step 2: Create Virtual Environment
+Step 2: Create a Virtual Environment
 
-```bash
 python -m venv .venv
 
-# On macOS/Linux:
+macOS/Linux:
+
 source .venv/bin/activate
 
-# On Windows:
+Windows:
+
 .venv\Scripts\activate
-```
 
-### Step 3: Install Dependencies
+Step 3: Install Dependencies
 
-```bash
+cd backend
 pip install -r requirements.txt
-```
 
-### Step 4: Configure Environment
+Step 4: Configure the Environment
 
-```bash
-cp ../.env.example .env
-# Edit .env if needed (optional for development)
-```
+From the repository root:
 
-### Step 5: Run the Application
+cp .env.example backend/.env
 
-```bash
+Edit the environment file only when development configuration is required.
+
+Keep live trading disabled.
+
+Step 5: Run the Development API
+
 uvicorn fastapi_app.main:app --reload --port 8000
-```
 
-You should see:
-```
-INFO:     Application startup complete
-INFO:     ✓ Database tables initialized
-INFO:     ✓ RAYMOND v2.8 started in development mode
-```
+The development API should be available at:
 
-### Step 6: Access the API
+http://localhost:8000
 
-- **API Documentation**: http://localhost:8000/docs
-- **Health Check**: http://localhost:8000/health
-- **Random Joke**: http://localhost:8000/joke
+Step 6: Check the API
+
+- API documentation: "http://localhost:8000/docs"
+- Health check: "http://localhost:8000/health"
 
 ---
 
-## Option 2: Docker (Recommended for Production)
+Option 2: Docker
 
-### Step 1: Build Docker Image
+Docker is the preferred way to reproduce the containerized application.
 
-```bash
+From the repository root:
+
+Step 1: Build
+
 docker-compose build
-```
 
-### Step 2: Start Services
+Step 2: Start
 
-```bash
 docker-compose up -d
-```
 
-### Step 3: View Logs
+Step 3: Check Health
 
-```bash
+curl http://localhost:8000/health
+
+Step 4: View Logs
+
 docker-compose logs -f backend
-```
 
-### Step 4: Access the API
+Step 5: Stop
 
-- **API Documentation**: http://localhost:8000/docs
-- **Health Check**: http://localhost:8000/health
-
-### Step 5: Stop Services
-
-```bash
 docker-compose down
-```
+
+You can also use the repository startup script:
+
+./RUN.sh
 
 ---
 
-## Testing the API
+Production Deployment
 
-### Health Check
+The Render deployment uses the repository "Dockerfile".
 
-```bash
+The production application starts through:
+
+online_main:app
+
+The production market-data bridge is read-only and uses:
+
+/api/online/*
+
+The deployed service provides:
+
+GET /health
+GET /api/online/status
+GET /api/online/price
+GET /api/online/candlesticks
+GET /api/online/indicators
+GET /api/online/analysis
+
+The online market-data bridge does not place broker orders or modify positions.
+
+---
+
+Testing the API
+
+Health Check
+
 curl http://localhost:8000/health
-```
 
-Expected response:
-```json
-{
-  "status": "healthy",
-  "timestamp": "2024-01-15T10:30:45.123456",
-  "version": "2.8.0",
-  "environment": "development",
-  "live_trading_enabled": false,
-  "database": "connected"
-}
-```
+The response should indicate that the service is healthy.
 
-### Get Current Price
+Online Market Status
 
-```bash
-curl "http://localhost:8000/api/market/price?symbol=XAUUSD"
-```
+curl http://localhost:8000/api/online/status
 
-### Analyze Strategy
+Current XAUUSD Price
 
-```bash
-curl -X POST http://localhost:8000/api/strategy/analyze \
-  -H "Content-Type: application/json" \
-  -d '{
-    "symbol": "XAUUSD",
-    "ema20": 2050.5,
-    "ema50": 2048.25,
-    "rsi": 55.3,
-    "current_price": 2050.45
-  }'
-```
+curl "http://localhost:8000/api/online/price?symbol=XAUUSD"
 
-### Place a Paper Trade Order
+XAUUSD Candlesticks
 
-```bash
-curl -X POST http://localhost:8000/api/trading/place-order \
-  -H "Content-Type: application/json" \
-  -d '{
-    "symbol": "XAUUSD",
-    "direction": "buy",
-    "quantity": 1.0,
-    "entry_price": 2050.45,
-    "stop_loss": 2045.0,
-    "take_profit": 2055.0
-  }'
-```
+curl "http://localhost:8000/api/online/candlesticks?symbol=XAUUSD&timeframe=H1&limit=60"
 
-### Get Open Positions
+Technical Indicators
 
-```bash
+curl "http://localhost:8000/api/online/indicators?symbol=XAUUSD&timeframe=H1&limit=100"
+
+Online Analysis
+
+curl "http://localhost:8000/api/online/analysis?symbol=XAUUSD&timeframe=M15&limit=100"
+
+---
+
+Paper Trading
+
+Paper/demo trading endpoints are separate from the read-only online market-data bridge.
+
+Get Demo Status
+
+curl http://localhost:8000/api/demo/status
+
+Get Demo Performance
+
+curl http://localhost:8000/api/demo/performance
+
+Get Demo Trades
+
+curl http://localhost:8000/api/demo/trades
+
+Get Open Positions
+
 curl http://localhost:8000/api/trading/positions
-```
 
-### Emergency Stop (Requires API Key)
+Paper/demo trading does not authorize real-money broker execution.
 
-```bash
+---
+
+Emergency Stop
+
+The emergency-stop endpoint requires the configured API key.
+
+Example:
+
 curl -X POST http://localhost:8000/api/admin/emergency-stop \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your_emergency_api_key_here" \
-  -d '{"reason": "Manual halt for testing"}'
-```
+  -d '{"reason":"Manual halt for testing"}'
+
+Do not commit real API keys or broker credentials to GitHub.
 
 ---
 
-## Running Tests
+Running Tests
 
-```bash
-# Unit tests
+From the repository root:
+
 pytest
 
-# With coverage
+For coverage:
+
 pytest --cov=app --cov-report=html
 
-# Watch mode (requires pytest-watch)
-ptw
-```
-
 ---
 
-## Troubleshooting
+Troubleshooting
 
-### Issue: `ModuleNotFoundError: No module named 'fastapi'`
+API does not start
 
-**Solution:** Ensure virtual environment is activated and dependencies are installed.
+Check that Python and dependencies are installed:
 
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+python --version
+pip install -r backend/requirements.txt
 
-### Issue: `Address already in use :8000`
+Port 8000 is already in use
 
-**Solution:** Change the port or kill the existing process.
+Run the application on another port:
 
-```bash
-# Use a different port
 uvicorn fastapi_app.main:app --reload --port 8001
 
-# Or kill process on port 8000
-lsof -ti:8000 | xargs kill -9  # macOS/Linux
-netstat -ano | findstr :8000   # Windows
-```
+Docker service is not responding
 
-### Issue: Database errors
+Check the containers:
 
-**Solution:** The SQLite database is created automatically on startup. If you need to reset:
+docker-compose ps
 
-```bash
-rm raymond.db
-uvicorn fastapi_app.main:app --reload
-```
+Then inspect the backend logs:
 
-### Issue: Emergency endpoint returns 503
+docker-compose logs -f backend
 
-**Solution:** Set `EMERGENCY_API_KEY` in `.env` file.
+Market data is unavailable
 
-```bash
-echo "EMERGENCY_API_KEY=your_secure_key_here" >> .env
-```
+Check:
+
+curl http://localhost:8000/api/online/status
+
+The online market feed is read-only and independent of broker order execution.
 
 ---
 
-## Important: Safety & Live Trading
+Trading Safety
 
-⚠️ **CRITICAL:** Live trading is disabled by default.
+LIVE TRADING MUST REMAIN DISABLED.
 
-To enable live trading in production:
+The current RAYMOND v2.8 deployment is being validated before any real-money execution is considered.
 
-1. Set `LIVE_TRADING_ENABLED=true` in `.env` (production only)
-2. Deploy to production environment
-3. Configure broker credentials (MT5/Exness)
-4. Conduct thorough testing in paper trading mode
-5. Get team sign-off before enabling
-6. Monitor closely during deployment
+Do not:
 
-**DO NOT enable live trading in development or staging.**
+- Enable "LIVE_TRADING_ENABLED=true"
+- Send real broker orders
+- Connect the system to a funded trading account for execution
+- Treat paper/demo results as proof of live execution readiness
+
+The current validation path is:
+
+Market Data
+    ↓
+Technical Indicators
+    ↓
+Strategy / AI Analysis
+    ↓
+Risk Controls
+    ↓
+Paper / Demo Trading
+
+Real broker execution is a separate future integration step and must not be enabled during the current validation phase.
 
 ---
 
-## Next Steps
+Next Steps
 
-1. **Explore API Docs**: Visit http://localhost:8000/docs for interactive Swagger UI
-2. **Read Architecture**: See [README.md](../README.md) for system overview
-3. **Configure Brokers**: Set up MT5/Exness credentials for live connections
-4. **Run Backtests**: Use `/api/backtest/*` endpoints for historical analysis
-5. **Monitor**: Set up logging and alerts for production deployment
+1. Verify "/health"
+2. Verify "/api/online/status"
+3. Verify XAUUSD price and candlestick data
+4. Verify the Flutter application uses "/api/online/*"
+5. Run the automated test suite
+6. Validate paper/demo trading
+7. Review broker integration separately before considering any live execution
 
 ---
 
-## Support
+Support
 
-For issues or questions:
-- Check [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-- Review [docs/RUNBOOK.md](docs/RUNBOOK.md)
-- Contact: @raebby040-cpu
+For project documentation, see:
+
+- "README.md"
+- "docs/DEPLOYMENT.md"
+- "docs/BROKER_SETUP.md"
+- "docs/RUNBOOK.md"
+
+For development issues, check the repository issues and logs before making configuration changes.
