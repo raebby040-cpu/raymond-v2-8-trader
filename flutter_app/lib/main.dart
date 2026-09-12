@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'analysis_page.dart';
 import 'api_service.dart';
+import 'chart_page.dart';
 
 void main() {
   runApp(const RaymondApp());
@@ -9,6 +10,27 @@ void main() {
 
 class RaymondApp extends StatelessWidget {
   const RaymondApp({super.key});
+
+  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
+    final response = await api.paperJournalTrades(
+      limit: 50,
+      offset: 0,
+    );
+
+    final data = response;
+    final rawTrades = data['trades'];
+
+    if (rawTrades is! List) {
+      throw const FormatException(
+        'Expected a trades list from the paper journal API.',
+      );
+    }
+
+    return rawTrades
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -277,17 +299,22 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildBody() {
-    // Analysis tab
+    // Step 10B-2: functional XAUUSD chart.
+    if (selectedIndex == 1) {
+      return ChartPage(api: api);
+    }
+
+    // Analysis tab.
     if (selectedIndex == 2) {
       return AnalysisPage(api: api);
     }
 
-    // Other tabs remain placeholders for now.
+    // Positions and Settings remain placeholders for now.
     if (selectedIndex != 0) {
       return _placeholderPage();
     }
 
-    // Home tab
+    // Home tab.
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
