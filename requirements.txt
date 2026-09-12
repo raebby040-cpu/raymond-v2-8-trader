@@ -1,5 +1,31 @@
-fastapi
-uvicorn[standard]
-pydantic
-pytest
-httpx
+# Core API Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Database & ORM
+sqlalchemy==2.0.23
+alembic==1.13.0
+
+# Data Processing & Technical Analysis
+numpy==1.26.2
+pandas==2.1.3
+
+# HTTP Client
+httpx==0.25.2
+
+# Environment Management
+python-dotenv==1.0.0
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+
+# Logging & Monitoring
+python-json-logger==2.0.7
+
+# Optional: Broker SDKs (uncomment when available)
+# metatrader5==5.0.45  # MT5 SDK - requires separate installation
+# exness-api==1.0.0   # Exness SDK - requires separate installation
