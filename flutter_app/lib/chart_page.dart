@@ -374,7 +374,8 @@ class CandleChartPainter extends CustomPainter {
 
     final bodyWidth =
         (candleWidth * .58)
-            .clamp(2.0, 16.0);
+            .clamp(2.0, 16.0)
+            .toDouble();
 
     final wickPaint = Paint()
       ..strokeWidth = 1.2
@@ -423,10 +424,12 @@ class CandleChartPainter extends CustomPainter {
         x - bodyWidth / 2,
         bodyTop,
         x + bodyWidth / 2,
-        bodyBottom.clamp(
-          bodyTop + 1,
-          size.height,
-        ),
+        bodyBottom
+            .clamp(
+              bodyTop + 1,
+              size.height,
+            )
+            .toDouble(),
       );
 
       canvas.drawRect(
