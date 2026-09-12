@@ -13,8 +13,6 @@ class ChartPage extends StatefulWidget {
 
 class _ChartPageState extends State<ChartPage> {
   static const gold = Color(0xFFF5B82E);
-  static const green = Color(0xFF00E59B);
-  static const red = Color(0xFFFF5C6C);
   static const background = Color(0xFF030B14);
   static const card = Color(0xFF091724);
   static const border = Color(0xFF17334D);
@@ -295,19 +293,22 @@ class _ChartPageState extends State<ChartPage> {
       margin: const EdgeInsets.only(bottom: 14),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: red.withOpacity(.10),
+        color: chartRed.withOpacity(.10),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: red.withOpacity(.30),
+          color: chartRed.withOpacity(.30),
         ),
       ),
       child: Text(
         error,
-        style: const TextStyle(color: red),
+        style: const TextStyle(color: chartRed),
       ),
     );
   }
 }
+
+const chartGreen = Color(0xFF00E59B);
+const chartRed = Color(0xFFFF5C6C);
 
 class Candle {
   const Candle({
@@ -394,7 +395,7 @@ class CandleChartPainter extends CustomPainter {
       final up = c.close >= c.open;
 
       final paintColor =
-          up ? green : red;
+          up ? chartGreen : chartRed;
 
       wickPaint.color = paintColor;
 
