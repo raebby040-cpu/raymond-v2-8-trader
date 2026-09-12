@@ -1,6 +1,6 @@
 import pytest
 
-import main
+from app import main
 
 
 class FakeDashboardManager:
