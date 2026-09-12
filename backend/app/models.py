@@ -1,11 +1,3 @@
-"""
-RAYMOND v2.8 - Database Models
-
-SQLAlchemy models for trading-system persistence.
-
-Database configuration is centralized in database.py.
-"""
-
 from datetime import datetime
 import enum
 
@@ -18,12 +10,9 @@ from sqlalchemy import (
     Enum as SQLEnum,
 )
 
-from .database import Base, engine
+# Compatibility exports: existing code/tests import these from app.models.
+from .database import Base, engine, SessionLocal, get_db
 
-
-# ============================================================
-# ENUMS
-# ============================================================
 
 class OrderType(str, enum.Enum):
     MARKET = "market"
@@ -52,401 +41,108 @@ class TradeDirection(str, enum.Enum):
     SELL = "sell"
 
 
-# ============================================================
-# TRADE
-# ============================================================
-
 class Trade(Base):
-    """Persistent trade journal entry."""
-
     __tablename__ = "trades"
 
-    id = Column(
-        Integer,
-        primary_key=True,
-        index=True,
-    )
-
-    trade_id = Column(
-        String,
-        unique=True,
-        index=True,
-    )
-
-    symbol = Column(
-        String,
-        default="XAUUSD",
-    )
-
-    direction = Column(
-        SQLEnum(TradeDirection),
-        default=TradeDirection.BUY,
-    )
-
+    id = Column(Integer, primary_key=True, index=True)
+    trade_id = Column(String, unique=True, index=True)
+    symbol = Column(String, default="XAUUSD")
+    direction = Column(SQLEnum(TradeDirection), default=TradeDirection.BUY)
     entry_price = Column(Float)
-
-    exit_price = Column(
-        Float,
-        nullable=True,
-    )
-
+    exit_price = Column(Float, nullable=True)
     quantity = Column(Float)
+    pnl = Column(Float, default=0.0)
+    pnl_percent = Column(Float, default=0.0)
+    status = Column(SQLEnum(PositionStatus), default=PositionStatus.OPEN)
+    execution_type = Column(String, default="paper")
+    opened_at = Column(DateTime, default=datetime.utcnow)
+    closed_at = Column(DateTime, nullable=True)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    notes = Column(String, nullable=True)
 
-    pnl = Column(
-        Float,
-        default=0.0,
-    )
-
-    pnl_percent = Column(
-        Float,
-        default=0.0,
-    )
-
-    status = Column(
-        SQLEnum(PositionStatus),
-        default=PositionStatus.OPEN,
-    )
-
-    execution_type = Column(
-        String,
-        default="paper",
-    )
-
-    opened_at = Column(
-        DateTime,
-        default=datetime.utcnow,
-    )
-
-    closed_at = Column(
-        DateTime,
-        nullable=True,
-    )
-
-    stop_loss = Column(
-        Float,
-        nullable=True,
-    )
-
-    take_profit = Column(
-        Float,
-        nullable=True,
-    )
-
-    notes = Column(
-        String,
-        nullable=True,
-    )
-
-
-# ============================================================
-# ORDER
-# ============================================================
 
 class Order(Base):
-    """Trading order record."""
-
     __tablename__ = "orders"
 
-    id = Column(
-        Integer,
-        primary_key=True,
-        index=True,
-    )
-
-    order_id = Column(
-        String,
-        unique=True,
-        index=True,
-    )
-
-    trade_id = Column(
-        String,
-        nullable=True,
-    )
-
-    symbol = Column(
-        String,
-        default="XAUUSD",
-    )
-
-    order_type = Column(
-        SQLEnum(OrderType),
-        default=OrderType.MARKET,
-    )
-
-    direction = Column(
-        SQLEnum(TradeDirection),
-        default=TradeDirection.BUY,
-    )
-
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(String, unique=True, index=True)
+    trade_id = Column(String, nullable=True)
+    symbol = Column(String, default="XAUUSD")
+    order_type = Column(SQLEnum(OrderType), default=OrderType.MARKET)
+    direction = Column(SQLEnum(TradeDirection), default=TradeDirection.BUY)
     quantity = Column(Float)
+    price = Column(Float, nullable=True)
+    fill_price = Column(Float, nullable=True)
+    filled_quantity = Column(Float, default=0.0)
+    status = Column(SQLEnum(OrderStatus), default=OrderStatus.PENDING)
+    broker = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    filled_at = Column(DateTime, nullable=True)
+    commission = Column(Float, default=0.0)
+    notes = Column(String, nullable=True)
 
-    price = Column(
-        Float,
-        nullable=True,
-    )
-
-    fill_price = Column(
-        Float,
-        nullable=True,
-    )
-
-    filled_quantity = Column(
-        Float,
-        default=0.0,
-    )
-
-    status = Column(
-        SQLEnum(OrderStatus),
-        default=OrderStatus.PENDING,
-    )
-
-    broker = Column(
-        String,
-        nullable=True,
-    )
-
-    created_at = Column(
-        DateTime,
-        default=datetime.utcnow,
-    )
-
-    filled_at = Column(
-        DateTime,
-        nullable=True,
-    )
-
-    commission = Column(
-        Float,
-        default=0.0,
-    )
-
-    notes = Column(
-        String,
-        nullable=True,
-    )
-
-
-# ============================================================
-# POSITION
-# ============================================================
 
 class Position(Base):
-    """Active trading position."""
-
     __tablename__ = "positions"
 
-    id = Column(
-        Integer,
-        primary_key=True,
-        index=True,
-    )
-
-    position_id = Column(
-        String,
-        unique=True,
-        index=True,
-    )
-
-    symbol = Column(
-        String,
-        default="XAUUSD",
-    )
-
-    direction = Column(
-        SQLEnum(TradeDirection),
-        default=TradeDirection.BUY,
-    )
-
+    id = Column(Integer, primary_key=True, index=True)
+    position_id = Column(String, unique=True, index=True)
+    symbol = Column(String, default="XAUUSD")
+    direction = Column(SQLEnum(TradeDirection), default=TradeDirection.BUY)
     quantity = Column(Float)
-
     entry_price = Column(Float)
-
     current_price = Column(Float)
+    pnl = Column(Float, default=0.0)
+    pnl_percent = Column(Float, default=0.0)
+    status = Column(SQLEnum(PositionStatus), default=PositionStatus.OPEN)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    max_drawdown = Column(Float, default=0.0)
+    max_profit = Column(Float, default=0.0)
+    opened_at = Column(DateTime, default=datetime.utcnow)
+    closed_at = Column(DateTime, nullable=True)
 
-    pnl = Column(
-        Float,
-        default=0.0,
-    )
-
-    pnl_percent = Column(
-        Float,
-        default=0.0,
-    )
-
-    status = Column(
-        SQLEnum(PositionStatus),
-        default=PositionStatus.OPEN,
-    )
-
-    stop_loss = Column(
-        Float,
-        nullable=True,
-    )
-
-    take_profit = Column(
-        Float,
-        nullable=True,
-    )
-
-    max_drawdown = Column(
-        Float,
-        default=0.0,
-    )
-
-    max_profit = Column(
-        Float,
-        default=0.0,
-    )
-
-    opened_at = Column(
-        DateTime,
-        default=datetime.utcnow,
-    )
-
-    closed_at = Column(
-        DateTime,
-        nullable=True,
-    )
-
-
-# ============================================================
-# STRATEGY METRICS
-# ============================================================
 
 class StrategyMetric(Base):
-    """Strategy performance and decision metrics."""
-
     __tablename__ = "strategy_metrics"
 
-    id = Column(
-        Integer,
-        primary_key=True,
-        index=True,
-    )
-
-    timestamp = Column(
-        DateTime,
-        default=datetime.utcnow,
-        index=True,
-    )
-
-    symbol = Column(
-        String,
-        default="XAUUSD",
-    )
-
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    symbol = Column(String, default="XAUUSD")
     ema20 = Column(Float)
-
     ema50 = Column(Float)
-
     rsi = Column(Float)
-
     atr = Column(Float)
-
     current_price = Column(Float)
-
     bid = Column(Float)
-
     ask = Column(Float)
-
     ai_decision = Column(String)
-
     ai_confidence = Column(Float)
+    reason = Column(String, nullable=True)
 
-    reason = Column(
-        String,
-        nullable=True,
-    )
-
-
-# ============================================================
-# BACKTEST RESULT
-# ============================================================
 
 class BacktestResult(Base):
-    """Backtest execution results."""
-
     __tablename__ = "backtest_results"
 
-    id = Column(
-        Integer,
-        primary_key=True,
-        index=True,
-    )
-
-    backtest_id = Column(
-        String,
-        unique=True,
-        index=True,
-    )
-
+    id = Column(Integer, primary_key=True, index=True)
+    backtest_id = Column(String, unique=True, index=True)
     start_date = Column(DateTime)
-
     end_date = Column(DateTime)
+    total_trades = Column(Integer, default=0)
+    winning_trades = Column(Integer, default=0)
+    losing_trades = Column(Integer, default=0)
+    win_rate = Column(Float, default=0.0)
+    total_pnl = Column(Float, default=0.0)
+    max_drawdown = Column(Float, default=0.0)
+    sharpe_ratio = Column(Float, default=0.0)
+    initial_balance = Column(Float, default=10000.0)
+    final_balance = Column(Float, default=10000.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-    total_trades = Column(
-        Integer,
-        default=0,
-    )
-
-    winning_trades = Column(
-        Integer,
-        default=0,
-    )
-
-    losing_trades = Column(
-        Integer,
-        default=0,
-    )
-
-    win_rate = Column(
-        Float,
-        default=0.0,
-    )
-
-    total_pnl = Column(
-        Float,
-        default=0.0,
-    )
-
-    max_drawdown = Column(
-        Float,
-        default=0.0,
-    )
-
-    sharpe_ratio = Column(
-        Float,
-        default=0.0,
-    )
-
-    initial_balance = Column(
-        Float,
-        default=10000.0,
-    )
-
-    final_balance = Column(
-        Float,
-        default=10000.0,
-    )
-
-    created_at = Column(
-        DateTime,
-        default=datetime.utcnow,
-    )
-
-
-# ============================================================
-# DATABASE INITIALIZATION
-# ============================================================
 
 def create_tables():
-    """Create all registered database tables."""
-
-    Base.metadata.create_all(
-        bind=engine,
-    )
+    Base.metadata.create_all(bind=engine)
 
 
-# Create tables when the models module is loaded.
 create_tables()
