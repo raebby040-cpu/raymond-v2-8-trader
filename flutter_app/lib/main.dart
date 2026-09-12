@@ -60,6 +60,7 @@ class _HomePageState extends State<HomePage> {
   int totalTrades = 0;
 
   List<Map<String, dynamic>> trades = [];
+  bool journalLoaded = false;
 
   @override
   void initState() {
@@ -79,6 +80,7 @@ class _HomePageState extends State<HomePage> {
       Map<String, dynamic> status = {};
       Map<String, dynamic> performance = {};
       List<Map<String, dynamic>> fetchedTrades = [];
+      bool fetchedJournal = false;
 
       try {
         status = await api.demoStatus();
@@ -88,9 +90,18 @@ class _HomePageState extends State<HomePage> {
         performance = await api.demoPerformance();
       } catch (_) {}
 
+      // Step 10B-1: use the persistent paper-trade journal first.
       try {
-        fetchedTrades = await api.demoTrades();
-      } catch (_) {}
+        final journalResponse = await _loadPaperJournal();
+        fetchedTrades = journalResponse;
+        fetchedJournal = true;
+      } catch (_) {
+        // Keep the older demo endpoint as a safe fallback while the
+        // backend is being upgraded.
+        try {
+          fetchedTrades = await api.demoTrades();
+        } catch (_) {}
+      }
 
       if (!mounted) return;
 
@@ -123,6 +134,7 @@ class _HomePageState extends State<HomePage> {
         }
 
         trades = fetchedTrades;
+        journalLoaded = fetchedJournal;
         loading = false;
       });
     } catch (_) {
@@ -134,6 +146,27 @@ class _HomePageState extends State<HomePage> {
         errorMessage = 'Backend unavailable';
       });
     }
+  }
+
+  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
+    final response = await api.paperJournalTrades(
+      limit: 50,
+      offset: 0,
+    );
+
+    final data = response;
+    final rawTrades = data['trades'];
+
+    if (rawTrades is! List) {
+      throw const FormatException(
+        'Expected a trades list from the paper journal API.',
+      );
+    }
+
+    return rawTrades
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
   }
 
   @override
@@ -405,12 +438,26 @@ class _HomePageState extends State<HomePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'RECENT PAPER TRADES',
-            style: TextStyle(
-              color: gold,
-              fontWeight: FontWeight.bold,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'RECENT PAPER TRADES',
+                style: TextStyle(
+                  color: gold,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (journalLoaded)
+                const Text(
+                  'DATABASE',
+                  style: TextStyle(
+                    color: muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 12),
           if (loading)
@@ -588,7 +635,7 @@ class _HomePageState extends State<HomePage> {
 
     return Center(
       child: Text(
-        '${names[selectedIndex]} screen — Step 10B',
+        '${names[selectedIndex]} screen — next Step 10B phase',
         style: const TextStyle(
           color: muted,
           fontSize: 18,

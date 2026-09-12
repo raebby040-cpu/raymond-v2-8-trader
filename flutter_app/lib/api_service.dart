@@ -34,16 +34,22 @@ class ApiService {
 
   Future<List<Map<String, dynamic>>> demoTrades() async {
     final response = await _dio.get('/api/demo/trades');
-    final data = response.data;
+    return _asTradeList(response.data);
+  }
 
-    if (data is Map && data['trades'] is List) {
-      return (data['trades'] as List)
-          .whereType<Map>()
-          .map((item) => Map<String, dynamic>.from(item))
-          .toList();
-    }
-
-    return [];
+  // Step 10B-1: persistent Step 15 paper-trade journal.
+  Future<Map<String, dynamic>> paperJournalTrades({
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    final response = await _dio.get(
+      '/api/journal/trades',
+      queryParameters: {
+        'limit': limit,
+        'offset': offset,
+      },
+    );
+    return _asMap(response.data);
   }
 
   Future<Map<String, dynamic>> marketPrice({
@@ -110,6 +116,17 @@ class ApiService {
   Future<Map<String, dynamic>> resetDemo() async {
     final response = await _dio.post('/api/demo/reset');
     return _asMap(response.data);
+  }
+
+  List<Map<String, dynamic>> _asTradeList(dynamic data) {
+    if (data is Map && data['trades'] is List) {
+      return (data['trades'] as List)
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+    }
+
+    return [];
   }
 
   Map<String, dynamic> _asMap(dynamic data) {
