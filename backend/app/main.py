@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text as sqlalchemy_text
 
 
 # ============================================================
@@ -102,6 +103,20 @@ except ImportError:
         demo_engine,
         router as demo_trading_router,
     )
+
+
+# ============================================================
+# STEP 3C - DATABASE / TRADE JOURNAL
+# ============================================================
+
+try:
+    from .database import SessionLocal
+    from .demo_trading import DemoTrade
+    from .journal import TradeJournal
+except ImportError:
+    from database import SessionLocal
+    from demo_trading import DemoTrade
+    from journal import TradeJournal
 
 
 # ============================================================
@@ -635,6 +650,144 @@ def build_symbol_specification(
         ) from exc
 
     return result
+
+
+# ============================================================
+# STEP 3C - PAPER TRADE PERSISTENCE
+# ============================================================
+
+def persist_step15_paper_execution(result) -> Optional[dict]:
+    '''
+    Persist a successful Step 15 paper execution into the
+    existing Trade journal.
+
+    This function only accepts paper executions. It never sends
+    anything to MT5, Exness, or another live broker.
+    '''
+    execution = getattr(result, "execution_result", None)
+
+    if execution is None:
+        return None
+
+    execution_type = str(
+        getattr(execution, "execution_type", "")
+    ).lower().strip()
+
+    if execution_type != "paper":
+        raise TradingPipelineServiceError(
+            "Step 15 persistence rejected a non-paper execution."
+        )
+
+    status = str(
+        getattr(execution, "status", "")
+    ).lower().strip()
+
+    if status not in {"accepted", "filled"}:
+        return None
+
+    proposal = getattr(result.decision, "proposal", None)
+
+    if proposal is None:
+        raise TradingPipelineServiceError(
+            "Paper execution cannot be journaled without a trade proposal."
+        )
+
+    order_id = str(
+        getattr(execution, "order_id", "")
+    ).strip()
+
+    if not order_id:
+        raise TradingPipelineServiceError(
+            "Paper execution did not provide an order ID."
+        )
+
+    side = getattr(execution, "side", None)
+
+    if hasattr(side, "value"):
+        direction = str(side.value).lower()
+    else:
+        direction = str(side).lower().strip()
+
+    if direction not in {"buy", "sell"}:
+        raise TradingPipelineServiceError(
+            "Paper execution returned an invalid trade direction."
+        )
+
+    try:
+        entry_price = float(
+            getattr(execution, "price")
+        )
+        quantity = float(
+            getattr(execution, "volume")
+        )
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise TradingPipelineServiceError(
+            "Paper execution returned invalid price or volume."
+        ) from exc
+
+    timestamp_value = getattr(
+        execution,
+        "timestamp",
+        None,
+    )
+
+    opened_at = datetime.now(timezone.utc)
+
+    if timestamp_value:
+        try:
+            if isinstance(timestamp_value, datetime):
+                opened_at = timestamp_value
+            else:
+                opened_at = datetime.fromisoformat(
+                    str(timestamp_value).replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+        except (TypeError, ValueError):
+            logger.warning(
+                "Unable to parse paper execution timestamp; "
+                "using current UTC time."
+            )
+
+    trade = DemoTrade(
+        trade_id=order_id,
+        symbol=str(
+            getattr(execution, "symbol", proposal.symbol)
+        ),
+        direction=direction,
+        entry_price=entry_price,
+        quantity=quantity,
+        stop_loss=getattr(
+            execution,
+            "stop_loss",
+            proposal.stop_loss,
+        ),
+        take_profit=getattr(
+            execution,
+            "take_profit",
+            proposal.take_profit,
+        ),
+        execution_type="paper",
+        opened_at=opened_at,
+    )
+
+    db = SessionLocal()
+
+    try:
+        journal = TradeJournal(db)
+        row = journal.save_demo_trade(trade)
+
+        return TradeJournal.serialize_trade(row)
+
+    except Exception as exc:
+        db.rollback()
+        raise TradingPipelineServiceError(
+            f"Unable to persist Step 15 paper trade: {exc}"
+        ) from exc
+
+    finally:
+        db.close()
 
 
 # ============================================================
@@ -1497,6 +1650,29 @@ async def run_strategy_paper_trade(
             )
         )
 
+        # ----------------------------------------------------
+        # 5. Persist successful paper execution.
+        # ----------------------------------------------------
+
+        persisted_trade = persist_step15_paper_execution(
+            result
+        )
+
+        # ----------------------------------------------------
+        # 6. Add persistence information to the response.
+        # ----------------------------------------------------
+
+        if persisted_trade is not None:
+            response["journal"] = {
+                "persisted": True,
+                "trade": persisted_trade,
+            }
+        else:
+            response["journal"] = {
+                "persisted": False,
+                "trade": None,
+            }
+
         response.update(
             {
                 "status": "ok",
@@ -1568,13 +1744,47 @@ async def get_trade_journal(
         ge=0,
     ),
 ):
-    return {
-        "trades": [],
-        "total": 0,
-        "limit": limit,
-        "offset": offset,
-        "timestamp": utc_timestamp(),
-    }
+    db = SessionLocal()
+
+    try:
+        journal = TradeJournal(db)
+
+        rows, total = journal.list_trades(
+            limit=limit,
+            offset=offset,
+            execution_type="paper",
+        )
+
+        return {
+            "trades": [
+                TradeJournal.serialize_trade(row)
+                for row in rows
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "timestamp": utc_timestamp(),
+        }
+
+    except Exception as exc:
+        db.rollback()
+
+        logger.error(
+            "Trade journal read failed: %s",
+            exc,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Trade journal unavailable",
+                "message": str(exc),
+                "timestamp": utc_timestamp(),
+            },
+        ) from exc
+
+    finally:
+        db.close()
 
 
 # ============================================================
@@ -1710,6 +1920,21 @@ async def admin_status():
 
         safety_manager.mark_connection_lost()
 
+    db_connected = False
+
+    db = SessionLocal()
+
+    try:
+        db.execute(sqlalchemy_text("SELECT 1"))
+        db_connected = True
+    except Exception as exc:
+        logger.error(
+            "Database connectivity check failed: %s",
+            exc,
+        )
+    finally:
+        db.close()
+
     safety_status = safety_manager.status()
 
     return {
@@ -1721,7 +1946,7 @@ async def admin_status():
             "RAYMOND_ENV",
             "development",
         ),
-        "db_connected": True,
+        "db_connected": db_connected,
         "market_feed_healthy": (
             mt5_status.get(
                 "connected",
