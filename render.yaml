@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: raymond-v2-8-backend
+    runtime: docker
+    plan: free
+    region: singapore
+
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+
+    healthCheckPath: /health
+
+    envVars:
+      - key: LIVE_TRADING_ENABLED
+        value: "false"
+
+      - key: RAYMOND_ENV
+        value: production
+
+      - key: DATABASE_URL
+        value: sqlite:///./raymond.db
+
+      - key: LOG_LEVEL
+        value: INFO
