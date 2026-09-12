@@ -2,37 +2,6 @@
 RAYMOND v2.8 - Backtest Engine Tests
 
 Deterministic tests for the production backtesting engine.
-
-These tests deliberately use a fake TradingPipelineService so the
-backtest engine can be tested without invoking live broker services.
-
-Safety coverage:
-- insufficient historical data is rejected
-- invalid candle values are rejected
-- non-chronological candles are rejected
-- symbol mismatch is rejected
-- WAIT decisions do not create trades
-- BUY decisions execute on the next candle open
-- no look-ahead bias
-- BUY stop-loss is respected
-- BUY take-profit is respected
-- stop-loss wins when both SL and TP are touched
-- SELL stop-loss is respected
-- SELL take-profit is respected
-- SELL trades can produce positive P&L
-- gap-through-SL execution uses the achievable candle open
-- gap-through-TP execution uses the achievable candle open
-- Risk Engine rejection prevents entry
-- broker-aware position sizing is used
-- open positions can be closed at end of data
-- equity curve is generated
-- performance metrics remain internally consistent
-- invalid execution costs are rejected
-- commission is charged on entry and exit
-- execution costs reduce the result
-- repeated backtests remain logically deterministic
-- long-only trade mode permits BUY
-- short-only trade mode permits SELL
 """
 
 from __future__ import annotations
@@ -564,7 +533,6 @@ def test_buy_take_profit_is_respected() -> None:
         "close": 2000.0,
     }
 
-    # Open below TP; TP is reached intrabar.
     candles[52] = {
         "time": "2026-01-01T00:52:00",
         "open": 2000.0,
@@ -700,7 +668,6 @@ def test_sell_take_profit_is_respected() -> None:
         "close": 2000.0,
     }
 
-    # Open above TP; TP is reached intrabar.
     candles[52] = {
         "time": "2026-01-01T00:52:00",
         "open": 2000.0,
@@ -943,8 +910,6 @@ def test_sell_gap_through_take_profit_uses_candle_open() -> None:
 
 
 def test_risk_engine_rejection_prevents_entry() -> None:
-    rejecting_engine = RejectingRiskEngine()
-
     engine = make_engine(
         decisions=[
             make_buy_decision(
@@ -953,7 +918,7 @@ def test_risk_engine_rejection_prevents_entry() -> None:
                 take_profit=2020.0,
             )
         ],
-        risk_engine=rejecting_engine,
+        risk_engine=RejectingRiskEngine(),
     )
 
     result = engine.run(
@@ -1211,15 +1176,13 @@ def test_execution_costs_reduce_result() -> None:
         "close": 2003.0,
     }
 
-    decision = make_buy_decision(
-        entry=2000.0,
-        stop_loss=1990.0,
-        take_profit=2020.0,
-    )
-
     clean = run_single_buy(
         candles=candles,
-        decision=decision,
+        decision=make_buy_decision(
+            entry=2000.0,
+            stop_loss=1990.0,
+            take_profit=2020.0,
+        ),
     )
 
     costly = run_single_buy(
