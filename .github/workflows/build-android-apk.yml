@@ -1,0 +1,100 @@
+name: Build Raymond V2.8 Android APK
+
+on:
+  workflow_dispatch:
+
+  push:
+    tags:
+      - "v*.*.*"
+
+  release:
+    types:
+      - published
+
+jobs:
+  build-apk:
+    name: Build Raymond V2.8 APK
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: flutter_app
+
+    steps:
+      - name: Checkout Raymond V2.8
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show tool versions
+        run: |
+          echo "===== JAVA ====="
+          java -version
+          echo "===== FLUTTER ====="
+          flutter --version
+          echo "===== DART ====="
+          dart --version
+
+      - name: Check Flutter project
+        run: |
+          test -f pubspec.yaml || {
+            echo "ERROR: pubspec.yaml missing"
+            exit 1
+          }
+
+          test -f lib/main.dart || {
+            echo "ERROR: lib/main.dart missing"
+            exit 1
+          }
+
+      - name: Create Android platform if missing
+        run: |
+          if [ ! -d android ]; then
+            echo "Android directory missing. Creating it..."
+            flutter create --platforms=android .
+          else
+            echo "Android directory already exists."
+          fi
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze Flutter project
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Run Flutter tests
+        run: flutter test
+
+      - name: Build release APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Verify APKs
+        run: |
+          echo "===== APK OUTPUT ====="
+          ls -lah build/app/outputs/flutter-apk/
+
+          APK_COUNT=$(find build/app/outputs/flutter-apk -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No APK files were generated."
+            exit 1
+          fi
+
+          echo "Successfully generated $APK_COUNT APK file(s)."
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-v2-8-apks
+          path: flutter_app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 30

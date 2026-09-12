@@ -1,1 +1,1 @@
-"""RAYMOND v2.8 Test Suite"""
+# Tests package for RAYMOND v2.8
