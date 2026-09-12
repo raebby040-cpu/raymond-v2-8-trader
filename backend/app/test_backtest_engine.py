@@ -564,11 +564,12 @@ def test_buy_take_profit_is_respected() -> None:
         "close": 2000.0,
     }
 
+    # Open below TP; TP is reached intrabar.
     candles[52] = {
         "time": "2026-01-01T00:52:00",
-        "open": 2020.0,
+        "open": 2000.0,
         "high": 2021.0,
-        "low": 2019.0,
+        "low": 1999.0,
         "close": 2020.0,
     }
 
@@ -699,10 +700,11 @@ def test_sell_take_profit_is_respected() -> None:
         "close": 2000.0,
     }
 
+    # Open above TP; TP is reached intrabar.
     candles[52] = {
         "time": "2026-01-01T00:52:00",
-        "open": 1980.0,
-        "high": 1981.0,
+        "open": 2000.0,
+        "high": 2001.0,
         "low": 1979.0,
         "close": 1980.0,
     }
@@ -746,8 +748,8 @@ def test_sell_trade_take_profit_generates_positive_pnl() -> None:
 
     candles[52] = {
         "time": "2026-01-01T00:52:00",
-        "open": 1980.0,
-        "high": 1981.0,
+        "open": 2000.0,
+        "high": 2001.0,
         "low": 1979.0,
         "close": 1980.0,
     }
@@ -763,7 +765,7 @@ def test_sell_trade_take_profit_generates_positive_pnl() -> None:
 
     trade = result.trades[0]
 
-    assert trade["direction"] == "SELL"
+    assert trade["direction"] == "sell"
     assert trade["exit_reason"] == "take_profit"
     assert trade["pnl"] > 0
 
@@ -1064,9 +1066,9 @@ def test_metrics_are_consistent() -> None:
 
     candles[52] = {
         "time": "2026-01-01T00:52:00",
-        "open": 2020.0,
+        "open": 2000.0,
         "high": 2021.0,
-        "low": 2019.0,
+        "low": 1999.0,
         "close": 2020.0,
     }
 
@@ -1265,9 +1267,9 @@ def test_repeated_backtests_are_deterministic() -> None:
 
     candles[52] = {
         "time": "2026-01-01T00:52:00",
-        "open": 2020.0,
+        "open": 2000.0,
         "high": 2021.0,
-        "low": 2019.0,
+        "low": 1999.0,
         "close": 2020.0,
     }
 
@@ -1370,7 +1372,7 @@ def test_buy_trade_mode_long_only_is_allowed() -> None:
 
     candles[52] = {
         "time": "2026-01-01T00:52:00",
-        "open": 2020.0,
+        "open": 2000.0,
         "high": 2021.0,
         "low": 2019.0,
         "close": 2020.0,
@@ -1394,7 +1396,7 @@ def test_buy_trade_mode_long_only_is_allowed() -> None:
     )
 
     assert result.total_trades == 1
-    assert result.trades[0]["direction"] == "BUY"
+    assert result.trades[0]["direction"] == "buy"
 
 
 def test_sell_trade_mode_short_only_is_allowed() -> None:
@@ -1418,8 +1420,8 @@ def test_sell_trade_mode_short_only_is_allowed() -> None:
 
     candles[52] = {
         "time": "2026-01-01T00:52:00",
-        "open": 1980.0,
-        "high": 1981.0,
+        "open": 2000.0,
+        "high": 2001.0,
         "low": 1979.0,
         "close": 1980.0,
     }
@@ -1442,4 +1444,4 @@ def test_sell_trade_mode_short_only_is_allowed() -> None:
     )
 
     assert result.total_trades == 1
-    assert result.trades[0]["direction"] == "SELL"
+    assert result.trades[0]["direction"] == "sell"
