@@ -56,8 +56,11 @@ class ApiService {
   Future<Map<String, dynamic>> marketPrice({
     String symbol = 'XAUUSD',
   }) async {
+    // Read-only online market feed.
+    // This keeps the Android dashboard independent
+    // from the optional MT5 connection.
     final response = await _dio.get(
-      '/api/market/price',
+      '/api/online/price',
       queryParameters: {
         'symbol': symbol,
       },
@@ -68,11 +71,15 @@ class ApiService {
 
   Future<Map<String, dynamic>> marketIndicators({
     String symbol = 'XAUUSD',
+    String timeframe = 'H1',
+    int limit = 100,
   }) async {
     final response = await _dio.get(
-      '/api/market/indicators',
+      '/api/online/indicators',
       queryParameters: {
         'symbol': symbol,
+        'timeframe': timeframe,
+        'limit': limit,
       },
     );
 
@@ -85,7 +92,29 @@ class ApiService {
     int limit = 60,
   }) async {
     final response = await _dio.get(
-      '/api/market/candlesticks',
+      '/api/online/candlesticks',
+      queryParameters: {
+        'symbol': symbol,
+        'timeframe': timeframe,
+        'limit': limit,
+      },
+    );
+
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> marketOnlineStatus() async {
+    final response = await _dio.get('/api/online/status');
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> marketAnalysis({
+    String symbol = 'XAUUSD',
+    String timeframe = 'M15',
+    int limit = 100,
+  }) async {
+    final response = await _dio.get(
+      '/api/online/analysis',
       queryParameters: {
         'symbol': symbol,
         'timeframe': timeframe,
