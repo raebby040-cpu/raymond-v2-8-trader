@@ -15,14 +15,14 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  static const gold = Color(0xFFF5B82E);
-  static const green = Color(0xFF00E59B);
-  static const red = Color(0xFFFF5C6C);
-  static const orange = Color(0xFFFFA726);
-  static const background = Color(0xFF030B14);
-  static const card = Color(0xFF091724);
-  static const border = Color(0xFF17334D);
-  static const muted = Color(0xFF8EA4B8);
+  static const Color gold = Color(0xFFF5B82E);
+  static const Color green = Color(0xFF00E59B);
+  static const Color red = Color(0xFFFF5C6C);
+  static const Color orange = Color(0xFFFFA726);
+  static const Color background = Color(0xFF030B14);
+  static const Color card = Color(0xFF091724);
+  static const Color border = Color(0xFF17334D);
+  static const Color muted = Color(0xFF8EA4B8);
 
   bool loading = true;
   bool actionLoading = false;
@@ -63,19 +63,25 @@ class _SettingsPageState extends State<SettingsPage> {
       try {
         status = await widget.api.adminStatus();
       } catch (_) {
-        // Keep the page usable even if the admin endpoint is unavailable.
+        // The page remains usable if admin status is temporarily unavailable.
       }
 
-      final safetyRaw = status['safety'];
+      final dynamic safetyRaw = status['safety'];
 
-      final safety = safetyRaw is Map
-          ? Map<String, dynamic>.from(safetyRaw)
-          : <String, dynamic>{};
+      final Map<String, dynamic> safety =
+          safetyRaw is Map<String, dynamic>
+              ? safetyRaw
+              : safetyRaw is Map
+                  ? Map<String, dynamic>.from(safetyRaw)
+                  : <String, dynamic>{};
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
-        backendOnline = health['status'] == 'healthy' ||
+        backendOnline =
+            health['status'] == 'healthy' ||
             status['status'] == 'operational';
 
         liveTradingEnabled =
@@ -103,12 +109,14 @@ class _SettingsPageState extends State<SettingsPage> {
             '${status['environment'] ?? '--'}';
 
         safetyReason =
-            '${safety['reason'] ?? '--}';
+            '${safety['reason'] ?? '--'}';
 
         loading = false;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         loading = false;
@@ -119,9 +127,14 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _activateEmergencyStop() async {
-    final confirmed = await _confirmEmergencyStop();
+    final bool confirmed =
+        await _confirmEmergencyStop();
 
     if (!confirmed) {
+      return;
+    }
+
+    if (!mounted) {
       return;
     }
 
@@ -133,7 +146,9 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       await widget.api.activateEmergencyStop();
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         emergencyStopActive = true;
@@ -143,14 +158,18 @@ class _SettingsPageState extends State<SettingsPage> {
 
       await _loadStatus();
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       _showMessage(
         'Emergency stop activated. New trading is blocked.',
         isError: false,
       );
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         actionLoading = false;
@@ -165,9 +184,14 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _resetEmergencyStop() async {
-    final confirmed = await _confirmReset();
+    final bool confirmed =
+        await _confirmReset();
 
     if (!confirmed) {
+      return;
+    }
+
+    if (!mounted) {
       return;
     }
 
@@ -179,7 +203,9 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       await widget.api.resetEmergencyStop();
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         actionLoading = false;
@@ -187,14 +213,18 @@ class _SettingsPageState extends State<SettingsPage> {
 
       await _loadStatus();
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       _showMessage(
         'Emergency stop reset request sent.',
         isError: false,
       );
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         actionLoading = false;
@@ -209,9 +239,9 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<bool> _confirmEmergencyStop() async {
-    final result = await showDialog<bool>(
+    final bool? result = await showDialog<bool>(
       context: context,
-      builder: (context) {
+      builder: (BuildContext context) {
         return AlertDialog(
           backgroundColor: card,
           title: const Text(
@@ -222,10 +252,10 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
           content: const Text(
-            'This will block new trading activity through the '
-            'RAYMOND safety manager.\n\n'
-            'It does not automatically close existing broker '
-            'positions.',
+            'This will block new trading activity '
+            'through the RAYMOND safety manager.\n\n'
+            'It does not automatically close existing '
+            'broker positions.',
             style: TextStyle(
               color: muted,
               height: 1.5,
@@ -259,9 +289,9 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<bool> _confirmReset() async {
-    final result = await showDialog<bool>(
+    final bool? result = await showDialog<bool>(
       context: context,
-      builder: (context) {
+      builder: (BuildContext context) {
         return AlertDialog(
           backgroundColor: card,
           title: const Text(
@@ -273,8 +303,8 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           content: const Text(
             'Resetting the emergency stop does not force '
-            'trading to become active. The backend still requires '
-            'a healthy connection and safe conditions.',
+            'trading to become active. The backend still '
+            'requires a healthy connection and safe conditions.',
             style: TextStyle(
               color: muted,
               height: 1.5,
@@ -313,11 +343,13 @@ class _SettingsPageState extends State<SettingsPage> {
   }) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        backgroundColor: isError ? red : green,
+        backgroundColor:
+            isError ? red : green,
         content: Text(
           message,
           style: TextStyle(
-            color: isError ? Colors.white : Colors.black,
+            color:
+                isError ? Colors.white : Colors.black,
             fontWeight: FontWeight.w700,
           ),
         ),
@@ -398,36 +430,40 @@ class _SettingsPageState extends State<SettingsPage> {
               _statusCard(
                 icon: Icons.cloud_outlined,
                 title: 'Backend',
-                value: backendOnline
-                    ? 'ONLINE'
-                    : 'OFFLINE',
+                value:
+                    backendOnline
+                        ? 'ONLINE'
+                        : 'OFFLINE',
                 healthy: backendOnline,
               ),
 
               _statusCard(
                 icon: Icons.cable_outlined,
                 title: 'MT5 Connection',
-                value: mt5Connected
-                    ? 'CONNECTED'
-                    : 'DISCONNECTED',
+                value:
+                    mt5Connected
+                        ? 'CONNECTED'
+                        : 'DISCONNECTED',
                 healthy: mt5Connected,
               ),
 
               _statusCard(
                 icon: Icons.show_chart_outlined,
                 title: 'Market Feed',
-                value: marketFeedHealthy
-                    ? 'HEALTHY'
-                    : 'UNAVAILABLE',
+                value:
+                    marketFeedHealthy
+                        ? 'HEALTHY'
+                        : 'UNAVAILABLE',
                 healthy: marketFeedHealthy,
               ),
 
               _statusCard(
                 icon: Icons.storage_outlined,
                 title: 'Database',
-                value: dbConnected
-                    ? 'CONNECTED'
-                    : 'UNAVAILABLE',
+                value:
+                    dbConnected
+                        ? 'CONNECTED'
+                        : 'UNAVAILABLE',
                 healthy: dbConnected,
               ),
 
@@ -476,17 +512,19 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _modeCard() {
-    final safe = !liveTradingEnabled;
+    final bool safe = !liveTradingEnabled;
 
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius:
+            BorderRadius.circular(16),
         border: Border.all(
-          color: safe
-              ? green.withOpacity(.35)
-              : red.withOpacity(.50),
+          color:
+              safe
+                  ? green.withOpacity(.35)
+                  : red.withOpacity(.50),
         ),
       ),
       child: Row(
@@ -509,8 +547,10 @@ class _SettingsPageState extends State<SettingsPage> {
                       ? 'SAFE PAPER MODE'
                       : 'LIVE TRADING ENABLED',
                   style: TextStyle(
-                    color: safe ? green : red,
-                    fontWeight: FontWeight.w800,
+                    color:
+                        safe ? green : red,
+                    fontWeight:
+                        FontWeight.w800,
                     fontSize: 16,
                   ),
                 ),
@@ -537,7 +577,8 @@ class _SettingsPageState extends State<SettingsPage> {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius:
+            BorderRadius.circular(16),
         border: Border.all(
           color: border,
         ),
@@ -552,19 +593,23 @@ class _SettingsPageState extends State<SettingsPage> {
             active: !liveTradingEnabled,
             activeText: 'ACTIVE',
           ),
+
           const Divider(
             color: border,
             height: 24,
           ),
+
           _modeRow(
-            icon: Icons.account_balance_outlined,
+            icon:
+                Icons.account_balance_outlined,
             title: 'Live Trading',
             subtitle:
                 'Real broker order execution',
             active: liveTradingEnabled,
-            activeText: liveTradingEnabled
-                ? 'ENABLED'
-                : 'DISABLED',
+            activeText:
+                liveTradingEnabled
+                    ? 'ENABLED'
+                    : 'DISABLED',
             dangerous: true,
           ),
         ],
@@ -580,11 +625,12 @@ class _SettingsPageState extends State<SettingsPage> {
     required String activeText,
     bool dangerous = false,
   }) {
-    final color = dangerous && active
-        ? red
-        : active
-            ? green
-            : muted;
+    final Color color =
+        dangerous && active
+            ? red
+            : active
+                ? green
+                : muted;
 
     return Row(
       children: [
@@ -592,7 +638,9 @@ class _SettingsPageState extends State<SettingsPage> {
           icon,
           color: color,
         ),
+
         const SizedBox(width: 12),
+
         Expanded(
           child: Column(
             crossAxisAlignment:
@@ -601,7 +649,8 @@ class _SettingsPageState extends State<SettingsPage> {
               Text(
                 title,
                 style: const TextStyle(
-                  fontWeight: FontWeight.w700,
+                  fontWeight:
+                      FontWeight.w700,
                 ),
               ),
               const SizedBox(height: 3),
@@ -615,8 +664,10 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
         ),
+
         Container(
-          padding: const EdgeInsets.symmetric(
+          padding:
+              const EdgeInsets.symmetric(
             horizontal: 9,
             vertical: 5,
           ),
@@ -629,7 +680,8 @@ class _SettingsPageState extends State<SettingsPage> {
             activeText,
             style: TextStyle(
               color: color,
-              fontWeight: FontWeight.bold,
+              fontWeight:
+                  FontWeight.bold,
               fontSize: 10,
             ),
           ),
@@ -645,10 +697,12 @@ class _SettingsPageState extends State<SettingsPage> {
     required bool healthy,
   }) {
     return Container(
-      margin: const EdgeInsets.only(
+      margin:
+          const EdgeInsets.only(
         bottom: 10,
       ),
-      padding: const EdgeInsets.all(14),
+      padding:
+          const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: card,
         borderRadius:
@@ -661,22 +715,29 @@ class _SettingsPageState extends State<SettingsPage> {
         children: [
           Icon(
             icon,
-            color: healthy ? green : red,
+            color:
+                healthy ? green : red,
           ),
+
           const SizedBox(width: 12),
+
           Expanded(
             child: Text(
               title,
               style: const TextStyle(
-                fontWeight: FontWeight.w700,
+                fontWeight:
+                    FontWeight.w700,
               ),
             ),
           ),
+
           Text(
             value,
             style: TextStyle(
-              color: healthy ? green : red,
-              fontWeight: FontWeight.w800,
+              color:
+                  healthy ? green : red,
+              fontWeight:
+                  FontWeight.w800,
               fontSize: 12,
             ),
           ),
@@ -686,12 +747,20 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _safetyStatusCard() {
-    final safe =
-        !emergencyStopActive &&
+    final bool safe =
+        safetyConnectionHealthy &&
         tradingAllowed &&
-        safetyConnectionHealthy;
+        !emergencyStopActive;
 
-    final color = safe ? green : red;
+    final Color statusColor =
+        safe ? green : red;
+
+    final String statusText =
+        emergencyStopActive
+            ? 'EMERGENCY STOP ACTIVE'
+            : tradingAllowed
+                ? 'TRADING ALLOWED'
+                : 'TRADING BLOCKED';
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -700,59 +769,50 @@ class _SettingsPageState extends State<SettingsPage> {
         borderRadius:
             BorderRadius.circular(16),
         border: Border.all(
-          color: color.withOpacity(.35),
+          color:
+              statusColor.withOpacity(.35),
         ),
       ),
       child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               Icon(
                 safe
                     ? Icons.verified_user_outlined
-                    : Icons.gpp_bad_outlined,
-                color: color,
-                size: 30,
+                    : Icons.gpp_maybe_outlined,
+                color: statusColor,
+                size: 28,
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      safe
-                          ? 'SAFETY OK'
-                          : 'SAFETY BLOCKED',
-                      style: TextStyle(
-                        color: color,
-                        fontWeight:
-                            FontWeight.w800,
-                        fontSize: 16,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      emergencyStopActive
-                          ? 'Emergency stop is active.'
-                          : tradingAllowed
-                              ? 'Trading permission is currently allowed.'
-                              : 'Trading permission is currently blocked.',
-                      style: const TextStyle(
-                        color: muted,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
+                child: Text(
+                  statusText,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontWeight:
+                        FontWeight.w800,
+                    fontSize: 15,
+                  ),
                 ),
               ),
             ],
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
 
           _safetyRow(
-            'Trading permission',
+            'Safety Connection',
+            safetyConnectionHealthy
+                ? 'HEALTHY'
+                : 'UNAVAILABLE',
+            safetyConnectionHealthy,
+          ),
+
+          _safetyRow(
+            'Trading Permission',
             tradingAllowed
                 ? 'ALLOWED'
                 : 'BLOCKED',
@@ -760,31 +820,21 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
 
           _safetyRow(
-            'Emergency stop',
+            'Emergency Stop',
             emergencyStopActive
                 ? 'ACTIVE'
                 : 'INACTIVE',
             !emergencyStopActive,
           ),
 
-          _safetyRow(
-            'Safety connection',
-            safetyConnectionHealthy
-                ? 'HEALTHY'
-                : 'UNHEALTHY',
-            safetyConnectionHealthy,
-          ),
+          const SizedBox(height: 8),
 
-          const SizedBox(height: 10),
-
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Reason: $safetyReason',
-              style: const TextStyle(
-                color: muted,
-                fontSize: 11,
-              ),
+          Text(
+            'Reason: $safetyReason',
+            style: const TextStyle(
+              color: muted,
+              fontSize: 11,
+              height: 1.4,
             ),
           ),
         ],
@@ -793,19 +843,20 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _safetyRow(
-    String label,
+    String title,
     String value,
     bool healthy,
   ) {
     return Padding(
-      padding: const EdgeInsets.only(
-        bottom: 10,
+      padding:
+          const EdgeInsets.symmetric(
+        vertical: 5,
       ),
       child: Row(
         children: [
           Expanded(
             child: Text(
-              label,
+              title,
               style: const TextStyle(
                 color: muted,
                 fontSize: 12,
@@ -815,8 +866,10 @@ class _SettingsPageState extends State<SettingsPage> {
           Text(
             value,
             style: TextStyle(
-              color: healthy ? green : red,
-              fontWeight: FontWeight.w800,
+              color:
+                  healthy ? green : red,
+              fontWeight:
+                  FontWeight.w700,
               fontSize: 11,
             ),
           ),
@@ -826,8 +879,6 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _emergencyControls() {
-    final active = emergencyStopActive;
-
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -835,60 +886,46 @@ class _SettingsPageState extends State<SettingsPage> {
         borderRadius:
             BorderRadius.circular(16),
         border: Border.all(
-          color: active
-              ? red.withOpacity(.45)
-              : border,
+          color: border,
         ),
       ),
       child: Column(
         crossAxisAlignment:
-            CrossAxisAlignment.start,
+            CrossAxisAlignment.stretch,
         children: [
-          const Row(
-            children: [
-              Icon(
-                Icons.warning_amber_rounded,
-                color: orange,
-              ),
-              SizedBox(width: 10),
-              Text(
-                'EMERGENCY CONTROL',
-                style: TextStyle(
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 8),
-
           const Text(
-            'Use the emergency stop to block new '
-            'trading activity. It does not automatically '
-            'close existing broker positions.',
+            'EMERGENCY CONTROLS',
             style: TextStyle(
-              color: muted,
-              fontSize: 12,
-              height: 1.45,
+              fontWeight:
+                  FontWeight.w800,
+              fontSize: 14,
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 6),
+
+          const Text(
+            'Use these controls only when necessary.',
+            style: TextStyle(
+              color: muted,
+              fontSize: 11,
+            ),
+          ),
+
+          const SizedBox(height: 14),
 
           SizedBox(
-            width: double.infinity,
+            height: 48,
             child: FilledButton.icon(
               onPressed:
-                  actionLoading || active
+                  actionLoading
                       ? null
                       : _activateEmergencyStop,
-              style: FilledButton.styleFrom(
+              style:
+                  FilledButton.styleFrom(
                 backgroundColor: red,
-                foregroundColor: Colors.white,
-                padding:
-                    const EdgeInsets.symmetric(
-                  vertical: 14,
-                ),
+                foregroundColor:
+                    Colors.white,
               ),
               icon: actionLoading
                   ? const SizedBox(
@@ -897,47 +934,39 @@ class _SettingsPageState extends State<SettingsPage> {
                       child:
                           CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: Colors.white,
                       ),
                     )
                   : const Icon(
                       Icons.stop_circle_outlined,
                     ),
-              label: Text(
-                active
-                    ? 'EMERGENCY STOP ACTIVE'
-                    : 'ACTIVATE EMERGENCY STOP',
+              label: const Text(
+                'ACTIVATE EMERGENCY STOP',
+                style: TextStyle(
+                  fontWeight:
+                      FontWeight.w800,
+                ),
               ),
             ),
           ),
 
-          if (active) ...[
-            const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: actionLoading
-                    ? null
-                    : _resetEmergencyStop,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: gold,
-                  side: const BorderSide(
-                    color: gold,
-                  ),
-                  padding:
-                      const EdgeInsets.symmetric(
-                    vertical: 14,
-                  ),
-                ),
-                icon: const Icon(
-                  Icons.lock_open_outlined,
-                ),
-                label: const Text(
-                  'RESET EMERGENCY STOP',
-                ),
+          const SizedBox(height: 10),
+
+          SizedBox(
+            height: 46,
+            child: OutlinedButton.icon(
+              onPressed:
+                  actionLoading ||
+                          !emergencyStopActive
+                      ? null
+                      : _resetEmergencyStop,
+              icon: const Icon(
+                Icons.restart_alt,
+              ),
+              label: const Text(
+                'RESET EMERGENCY STOP',
               ),
             ),
-          ],
+          ),
         ],
       ),
     );
@@ -957,24 +986,25 @@ class _SettingsPageState extends State<SettingsPage> {
       child: Row(
         children: [
           const Icon(
-            Icons.developer_board_outlined,
-            color: gold,
+            Icons.settings_suggest_outlined,
+            color: orange,
           ),
           const SizedBox(width: 12),
           const Expanded(
             child: Text(
               'Environment',
               style: TextStyle(
-                fontWeight: FontWeight.w700,
+                fontWeight:
+                    FontWeight.w700,
               ),
             ),
           ),
           Text(
-            environment.toUpperCase(),
+            environment,
             style: const TextStyle(
-              color: gold,
-              fontWeight: FontWeight.w800,
-              fontSize: 12,
+              color: muted,
+              fontWeight:
+                  FontWeight.w700,
             ),
           ),
         ],
@@ -984,11 +1014,11 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _readOnlyNotice() {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: gold.withOpacity(.07),
+        color: gold.withOpacity(.08),
         borderRadius:
-            BorderRadius.circular(16),
+            BorderRadius.circular(14),
         border: Border.all(
           color: gold.withOpacity(.25),
         ),
@@ -998,19 +1028,19 @@ class _SettingsPageState extends State<SettingsPage> {
             CrossAxisAlignment.start,
         children: [
           Icon(
-            Icons.info_outline,
+            Icons.lock_outline,
             color: gold,
+            size: 20,
           ),
-          SizedBox(width: 12),
+          SizedBox(width: 10),
           Expanded(
             child: Text(
-              'Safety controls are displayed here for '
-              'operator visibility. RAYMOND remains '
-              'paper-trading only until live execution '
-              'is deliberately enabled and fully validated.',
+              'Live broker execution remains disabled. '
+              'This dashboard is intended for safe monitoring, '
+              'paper trading and system controls.',
               style: TextStyle(
                 color: muted,
-                fontSize: 12,
+                fontSize: 11,
                 height: 1.5,
               ),
             ),
@@ -1020,24 +1050,26 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _sectionTitle(String text) {
+  Widget _sectionTitle(String title) {
     return Text(
-      text,
+      title,
       style: const TextStyle(
-        color: gold,
-        fontSize: 12,
+        color: muted,
+        fontSize: 11,
         fontWeight: FontWeight.w800,
-        letterSpacing: 1.1,
+        letterSpacing: 1.2,
       ),
     );
   }
 
   Widget _errorCard() {
     return Container(
-      margin: const EdgeInsets.only(
+      margin:
+          const EdgeInsets.only(
         bottom: 14,
       ),
-      padding: const EdgeInsets.all(12),
+      padding:
+          const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: red.withOpacity(.10),
         borderRadius:
