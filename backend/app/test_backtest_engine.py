@@ -54,7 +54,7 @@ def make_specification(
         tick_value=1.0,
         tick_value_profit=1.0,
         tick_value_loss=1.0,
-        contract_size=1.0,
+        contract_size=0.1,
         volume_min=0.01,
         volume_max=100.0,
         volume_step=0.01,
