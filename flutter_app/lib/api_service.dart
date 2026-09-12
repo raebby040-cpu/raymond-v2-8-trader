@@ -4,10 +4,11 @@ class ApiService {
   ApiService({String? baseUrl})
       : _dio = Dio(
           BaseOptions(
-            baseUrl: baseUrl ?? 'http://10.0.2.2:8000',
-            connectTimeout: const Duration(seconds: 5),
-            receiveTimeout: const Duration(seconds: 10),
-            sendTimeout: const Duration(seconds: 10),
+            // Render backend
+            baseUrl: baseUrl ?? 'https://raymond-v2-8-trader.onrender.com',
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 20),
+            sendTimeout: const Duration(seconds: 20),
             headers: {
               'Accept': 'application/json',
               'Content-Type': 'application/json',
@@ -37,7 +38,6 @@ class ApiService {
     return _asTradeList(response.data);
   }
 
-  // Step 10B-1: persistent Step 15 paper-trade journal.
   Future<Map<String, dynamic>> paperJournalTrades({
     int limit = 50,
     int offset = 0,
@@ -79,7 +79,6 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  // Step 10B-2: functional XAUUSD candlestick chart.
   Future<Map<String, dynamic>> marketCandlesticks({
     String symbol = 'XAUUSD',
     String timeframe = 'H1',
@@ -97,7 +96,6 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  // Step 10B-3: read-only current MT5 positions.
   Future<Map<String, dynamic>> marketPositions({
     String? symbol,
   }) async {
@@ -111,19 +109,16 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  // Step 10B-4: administrator/system safety status.
   Future<Map<String, dynamic>> adminStatus() async {
     final response = await _dio.get('/api/admin/status');
     return _asMap(response.data);
   }
 
-  // Step 10B-4: activate the backend emergency stop.
   Future<Map<String, dynamic>> activateEmergencyStop() async {
     final response = await _dio.post('/api/admin/emergency-stop');
     return _asMap(response.data);
   }
 
-  // Step 10B-4: reset the backend emergency stop.
   Future<Map<String, dynamic>> resetEmergencyStop() async {
     final response = await _dio.post('/api/admin/emergency-stop/reset');
     return _asMap(response.data);
