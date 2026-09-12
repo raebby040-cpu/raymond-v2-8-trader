@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'analysis_page.dart';
 import 'api_service.dart';
 import 'chart_page.dart';
+import 'positions_page.dart';
 
 void main() {
   runApp(const RaymondApp());
@@ -309,7 +310,12 @@ class _HomePageState extends State<HomePage> {
       return AnalysisPage(api: api);
     }
 
-    // Positions and Settings remain placeholders for now.
+    // Step 10B-3: functional read-only MT5 positions.
+    if (selectedIndex == 3) {
+      return PositionsPage(api: api);
+    }
+
+    // Settings remains a placeholder for now.
     if (selectedIndex != 0) {
       return _placeholderPage();
     }
