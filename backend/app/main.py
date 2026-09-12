@@ -106,6 +106,20 @@ except ImportError:
 
 
 # ============================================================
+# STEP 11B-3 - MT5 TELEMETRY
+# ============================================================
+
+try:
+    from .mt5_telemetry import (
+        router as mt5_telemetry_router,
+    )
+except ImportError:
+    from mt5_telemetry import (
+        router as mt5_telemetry_router,
+    )
+
+
+# ============================================================
 # STEP 3C - DATABASE / TRADE JOURNAL
 # ============================================================
 
@@ -171,7 +185,10 @@ except ImportError:
 # LOGGING
 # ============================================================
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper()
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -235,15 +252,53 @@ app.include_router(
 
 
 # ============================================================
+# STEP 11B-3 - MT5 TELEMETRY ROUTER
+# ============================================================
+
+app.include_router(
+    mt5_telemetry_router,
+)
+
+
+# ============================================================
 # CORS
 # ============================================================
 
-origins = [
-    "http://localhost:3000",
-    "http://localhost:8080",
-    "http://localhost:5000",
-    "*",
-]
+def configured_cors_origins() -> list[str]:
+    """
+    Return explicitly configured CORS origins.
+
+    CORS_ORIGINS may contain comma-separated origins.
+
+    Example:
+        CORS_ORIGINS=http://localhost:3000,http://localhost:8080
+
+    A wildcard is intentionally not used together with
+    allow_credentials=True.
+    """
+
+    configured = os.getenv(
+        "CORS_ORIGINS",
+        "",
+    ).strip()
+
+    if not configured:
+        return [
+            "http://localhost:3000",
+            "http://localhost:8080",
+            "http://localhost:5000",
+        ]
+
+    origins = [
+        origin.strip()
+        for origin in configured.split(",")
+        if origin.strip()
+    ]
+
+    return origins
+
+
+origins = configured_cors_origins()
 
 app.add_middleware(
     CORSMiddleware,
@@ -263,6 +318,15 @@ def utc_timestamp() -> str:
 
 
 def live_trading_enabled() -> bool:
+    """
+    Read the configured live-trading flag.
+
+    IMPORTANT:
+    The current Step 15 backend does not implement live
+    broker execution. This flag must remain false while
+    the project is in the paper/demo development stages.
+    """
+
     return (
         os.getenv(
             "LIVE_TRADING_ENABLED",
@@ -667,20 +731,29 @@ def build_symbol_specification(
 # ============================================================
 
 def persist_step15_paper_execution(result) -> Optional[dict]:
-    '''
+    """
     Persist a successful Step 15 paper execution into the
     existing Trade journal.
 
     This function only accepts paper executions. It never sends
     anything to MT5, Exness, or another live broker.
-    '''
-    execution = getattr(result, "execution_result", None)
+    """
+
+    execution = getattr(
+        result,
+        "execution_result",
+        None,
+    )
 
     if execution is None:
         return None
 
     execution_type = str(
-        getattr(execution, "execution_type", "")
+        getattr(
+            execution,
+            "execution_type",
+            "",
+        )
     ).lower().strip()
 
     if execution_type != "paper":
@@ -689,13 +762,21 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
         )
 
     status = str(
-        getattr(execution, "status", "")
+        getattr(
+            execution,
+            "status",
+            "",
+        )
     ).lower().strip()
 
     if status not in {"accepted", "filled"}:
         return None
 
-    proposal = getattr(result.decision, "proposal", None)
+    proposal = getattr(
+        result.decision,
+        "proposal",
+        None,
+    )
 
     if proposal is None:
         raise TradingPipelineServiceError(
@@ -703,7 +784,11 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
         )
 
     order_id = str(
-        getattr(execution, "order_id", "")
+        getattr(
+            execution,
+            "order_id",
+            "",
+        )
     ).strip()
 
     if not order_id:
@@ -711,12 +796,20 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
             "Paper execution did not provide an order ID."
         )
 
-    side = getattr(execution, "side", None)
+    side = getattr(
+        execution,
+        "side",
+        None,
+    )
 
     if hasattr(side, "value"):
-        direction = str(side.value).lower()
+        direction = str(
+            side.value
+        ).lower()
     else:
-        direction = str(side).lower().strip()
+        direction = str(
+            side
+        ).lower().strip()
 
     if direction not in {"buy", "sell"}:
         raise TradingPipelineServiceError(
@@ -730,7 +823,11 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
         quantity = float(
             getattr(execution, "volume")
         )
-    except (TypeError, ValueError, AttributeError) as exc:
+    except (
+        TypeError,
+        ValueError,
+        AttributeError,
+    ) as exc:
         raise TradingPipelineServiceError(
             "Paper execution returned invalid price or volume."
         ) from exc
@@ -745,7 +842,10 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
 
     if timestamp_value:
         try:
-            if isinstance(timestamp_value, datetime):
+            if isinstance(
+                timestamp_value,
+                datetime,
+            ):
                 opened_at = timestamp_value
             else:
                 opened_at = datetime.fromisoformat(
@@ -754,7 +854,10 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
                         "+00:00",
                     )
                 )
-        except (TypeError, ValueError):
+        except (
+            TypeError,
+            ValueError,
+        ):
             logger.warning(
                 "Unable to parse paper execution timestamp; "
                 "using current UTC time."
@@ -763,7 +866,11 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
     trade = DemoTrade(
         trade_id=order_id,
         symbol=str(
-            getattr(execution, "symbol", proposal.symbol)
+            getattr(
+                execution,
+                "symbol",
+                proposal.symbol,
+            )
         ),
         direction=direction,
         entry_price=entry_price,
@@ -792,6 +899,7 @@ def persist_step15_paper_execution(result) -> Optional[dict]:
 
     except Exception as exc:
         db.rollback()
+
         raise TradingPipelineServiceError(
             f"Unable to persist Step 15 paper trade: {exc}"
         ) from exc
@@ -872,6 +980,7 @@ async def health_check():
         "live_trading_enabled": live_trading_enabled(),
         "step15_pipeline": True,
         "execution_mode": "paper_only",
+        "mt5_telemetry": True,
     }
 
 
@@ -899,6 +1008,11 @@ async def root():
                 "PaperExecutionGateway"
             ),
         },
+        "mt5_telemetry": {
+            "enabled": True,
+            "endpoint": "/api/mt5/telemetry",
+            "mode": "READ_ONLY",
+        },
         "endpoints": {
             "health": "/health",
             "mt5_connect": "/api/mt5/connect",
@@ -906,6 +1020,7 @@ async def root():
             "mt5_status": "/api/mt5/status",
             "mt5_account": "/api/mt5/account",
             "mt5_terminal": "/api/mt5/terminal",
+            "mt5_telemetry": "/api/mt5/telemetry",
             "market_price": "/api/market/price",
             "market_candles": "/api/market/candlesticks",
             "market_symbols": "/api/market/symbols",
@@ -987,6 +1102,7 @@ async def connect_mt5(
             "MT5 connection failed: %s",
             exc,
         )
+
         raise mt5_error_response(exc) from exc
 
 
@@ -1007,6 +1123,7 @@ async def disconnect_mt5():
             "MT5 disconnect failed: %s",
             exc,
         )
+
         raise mt5_error_response(exc) from exc
 
 
@@ -1070,6 +1187,7 @@ async def get_mt5_status():
 
     except MT5ServiceError as exc:
         safety_manager.mark_connection_lost()
+
         raise mt5_error_response(exc) from exc
 
 
@@ -1339,6 +1457,7 @@ async def get_indicators(
         response = indicator_result_to_dict(result)
         response["timestamp"] = utc_timestamp()
         response["source"] = "mt5"
+
         return response
 
     except MT5ServiceError as exc:
@@ -1931,8 +2050,10 @@ async def run_backtest(
                 "candle_limit": candle_limit,
                 "candles_used": len(candles),
             },
-            "symbol_specification": safe_symbol_specification_response(
-                raw_specification
+            "symbol_specification": (
+                safe_symbol_specification_response(
+                    raw_specification
+                )
             ),
             "result": {
                 "status": result.status,
@@ -2202,13 +2323,17 @@ async def admin_status():
     db = SessionLocal()
 
     try:
-        db.execute(sqlalchemy_text("SELECT 1"))
+        db.execute(
+            sqlalchemy_text("SELECT 1")
+        )
         db_connected = True
+
     except Exception as exc:
         logger.error(
             "Database connectivity check failed: %s",
             exc,
         )
+
     finally:
         db.close()
 
@@ -2239,6 +2364,11 @@ async def admin_status():
         "step15_pipeline": {
             "enabled": True,
             "execution_mode": "paper_only",
+        },
+        "mt5_telemetry": {
+            "enabled": True,
+            "endpoint": "/api/mt5/telemetry",
+            "mode": "READ_ONLY",
         },
         "safety": {
             "trading_allowed": (
