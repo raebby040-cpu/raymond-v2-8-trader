@@ -5,16 +5,11 @@ void main() {
   testWidgets(
     'RaymondApp starts and shows the main dashboard',
     (WidgetTester tester) async {
-      await tester.pumpWidget(const RaymondApp());
-
-      // HomePage starts an HTTP health check during initState.
-      // The test environment does not run the backend, so allow
-      // the real Dio timeout to finish before disposing the widget.
-      await tester.runAsync(() async {
-        await Future<void>.delayed(
-          const Duration(seconds: 6),
-        );
-      });
+      await tester.pumpWidget(
+        const RaymondApp(
+          startupRefreshEnabled: false,
+        ),
+      );
 
       await tester.pump();
 
@@ -78,6 +73,7 @@ void main() {
         findsOneWidget,
       );
 
+      // Positions exists more than once in the UI.
       expect(
         find.text('Positions'),
         findsWidgets,
