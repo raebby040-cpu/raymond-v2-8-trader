@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'analysis_page.dart';
 import 'api_service.dart';
 
 void main() {
@@ -8,6 +9,27 @@ void main() {
 
 class RaymondApp extends StatelessWidget {
   const RaymondApp({super.key});
+
+  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
+    final response = await api.paperJournalTrades(
+      limit: 50,
+      offset: 0,
+    );
+
+    final data = response;
+    final rawTrades = data['trades'];
+
+    if (rawTrades is! List) {
+      throw const FormatException(
+        'Expected a trades list from the paper journal API.',
+      );
+    }
+
+    return rawTrades
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -59,6 +81,7 @@ class _HomePageState extends State<HomePage> {
   int totalTrades = 0;
 
   List<Map<String, dynamic>> trades = [];
+  bool journalLoaded = false;
 
   @override
   void initState() {
@@ -78,6 +101,7 @@ class _HomePageState extends State<HomePage> {
       Map<String, dynamic> status = {};
       Map<String, dynamic> performance = {};
       List<Map<String, dynamic>> fetchedTrades = [];
+      bool fetchedJournal = false;
 
       try {
         status = await api.demoStatus();
@@ -87,9 +111,18 @@ class _HomePageState extends State<HomePage> {
         performance = await api.demoPerformance();
       } catch (_) {}
 
+      // Step 10B-1: use the persistent paper-trade journal first.
       try {
-        fetchedTrades = await api.demoTrades();
-      } catch (_) {}
+        final journalResponse = await _loadPaperJournal();
+        fetchedTrades = journalResponse;
+        fetchedJournal = true;
+      } catch (_) {
+        // Keep the older demo endpoint as a safe fallback while the
+        // backend is being upgraded.
+        try {
+          fetchedTrades = await api.demoTrades();
+        } catch (_) {}
+      }
 
       if (!mounted) return;
 
@@ -122,9 +155,10 @@ class _HomePageState extends State<HomePage> {
         }
 
         trades = fetchedTrades;
+        journalLoaded = fetchedJournal;
         loading = false;
       });
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
 
       setState(() {
@@ -133,6 +167,27 @@ class _HomePageState extends State<HomePage> {
         errorMessage = 'Backend unavailable';
       });
     }
+  }
+
+  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
+    final response = await api.paperJournalTrades(
+      limit: 50,
+      offset: 0,
+    );
+
+    final data = response;
+    final rawTrades = data['trades'];
+
+    if (rawTrades is! List) {
+      throw const FormatException(
+        'Expected a trades list from the paper journal API.',
+      );
+    }
+
+    return rawTrades
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
   }
 
   @override
@@ -191,6 +246,7 @@ class _HomePageState extends State<HomePage> {
           ),
           NavigationDestination(
             icon: Icon(Icons.analytics_outlined),
+            selectedIcon: Icon(Icons.analytics, color: gold),
             label: 'Analysis',
           ),
           NavigationDestination(
@@ -242,10 +298,18 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildBody() {
+    // Analysis tab
+    if (selectedIndex == 2) {
+      return AnalysisPage(api: api);
+    }
+
+    // Chart, Positions and Settings will be connected in later Step 10B
+    // phases. Keep them explicit rather than displaying fake live data.
     if (selectedIndex != 0) {
       return _placeholderPage();
     }
 
+    // Home tab
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
@@ -254,8 +318,7 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (errorMessage.isNotEmpty)
-              _errorCard(),
+            if (errorMessage.isNotEmpty) _errorCard(),
 
             const Text(
               'XAUUSD',
@@ -397,12 +460,26 @@ class _HomePageState extends State<HomePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'RECENT PAPER TRADES',
-            style: TextStyle(
-              color: gold,
-              fontWeight: FontWeight.bold,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'RECENT PAPER TRADES',
+                style: TextStyle(
+                  color: gold,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (journalLoaded)
+                const Text(
+                  'DATABASE',
+                  style: TextStyle(
+                    color: muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 12),
           if (loading)
@@ -580,7 +657,7 @@ class _HomePageState extends State<HomePage> {
 
     return Center(
       child: Text(
-        '${names[selectedIndex]} screen — Step 10B',
+        '${names[selectedIndex]} screen — next Step 10B phase',
         style: const TextStyle(
           color: muted,
           fontSize: 18,
