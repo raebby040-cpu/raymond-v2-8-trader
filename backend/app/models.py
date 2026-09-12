@@ -10,8 +10,13 @@ from sqlalchemy import (
     Enum as SQLEnum,
 )
 
-# Compatibility exports: existing code/tests import these from app.models.
-from .database import Base, engine, SessionLocal, get_db
+# Support both package imports (app.models) and the existing test setup
+# where backend/app is placed directly on PYTHONPATH and models is imported
+# as a top-level module.
+try:
+    from .database import Base, engine, SessionLocal, get_db
+except ImportError:
+    from database import Base, engine, SessionLocal, get_db
 
 
 class OrderType(str, enum.Enum):
