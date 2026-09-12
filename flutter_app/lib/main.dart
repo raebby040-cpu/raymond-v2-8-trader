@@ -10,27 +10,6 @@ void main() {
 class RaymondApp extends StatelessWidget {
   const RaymondApp({super.key});
 
-  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
-    final response = await api.paperJournalTrades(
-      limit: 50,
-      offset: 0,
-    );
-
-    final data = response;
-    final rawTrades = data['trades'];
-
-    if (rawTrades is! List) {
-      throw const FormatException(
-        'Expected a trades list from the paper journal API.',
-      );
-    }
-
-    return rawTrades
-        .whereType<Map>()
-        .map((item) => Map<String, dynamic>.from(item))
-        .toList();
-  }
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
