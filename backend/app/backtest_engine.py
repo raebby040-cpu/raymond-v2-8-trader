@@ -712,11 +712,18 @@ class BacktestEngine:
             item["low"] = low
             item["close"] = close
 
-            timestamp = item.get(
-                "timestamp",
-                item.get("time"),
-                item.get("datetime"),
-            )
+            # FIX:
+            # dict.get() accepts only (key, default).
+            # The previous implementation incorrectly passed three
+            # arguments, causing:
+            # TypeError: get expected at most 2 arguments, got 3
+            timestamp = item.get("timestamp")
+
+            if timestamp is None:
+                timestamp = item.get("time")
+
+            if timestamp is None:
+                timestamp = item.get("datetime")
 
             if timestamp is not None:
                 timestamp_text = (
