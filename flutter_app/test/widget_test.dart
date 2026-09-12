@@ -7,17 +7,35 @@ void main() {
     (WidgetTester tester) async {
       await tester.pumpWidget(const RaymondApp());
 
-      // Allow the first Flutter frame to render.
+      // HomePage starts an HTTP health check during initState.
+      // The test environment does not run the backend, so allow
+      // the real Dio timeout to finish before disposing the widget.
+      await tester.runAsync(() async {
+        await Future<void>.delayed(
+          const Duration(seconds: 6),
+        );
+      });
+
       await tester.pump();
 
       // App branding.
-      expect(find.text('RAYMOND'), findsOneWidget);
-      expect(find.text('V2.8'), findsOneWidget);
+      expect(
+        find.text('RAYMOND'),
+        findsOneWidget,
+      );
+
+      expect(
+        find.text('V2.8'),
+        findsOneWidget,
+      );
 
       // Main market.
-      expect(find.text('XAUUSD'), findsOneWidget);
+      expect(
+        find.text('XAUUSD'),
+        findsOneWidget,
+      );
 
-      // Current dashboard.
+      // Dashboard.
       expect(
         find.text('Live market connection'),
         findsOneWidget,
@@ -60,7 +78,6 @@ void main() {
         findsOneWidget,
       );
 
-      // Positions appears more than once in the current UI.
       expect(
         find.text('Positions'),
         findsWidgets,
