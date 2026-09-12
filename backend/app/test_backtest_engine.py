@@ -434,7 +434,7 @@ def test_buy_entry_occurs_on_next_candle_open() -> None:
         "time": "2026-01-01T00:51:00",
         "open": 2010.0,
         "high": 2011.0,
-        "low": 2009.0,
+        "low": 2009.5,
         "close": 2010.5,
     }
 
