@@ -142,6 +142,11 @@ except ImportError:
 # ============================================================
 
 try:
+    from .backtest_engine import (
+        BacktestConfig,
+        BacktestEngine,
+        BacktestEngineError,
+    )
     from .risk_engine import SymbolSpecification
     from .trading_pipeline_service import (
         PaperRiskState,
@@ -149,6 +154,11 @@ try:
         TradingPipelineServiceError,
     )
 except ImportError:
+    from backtest_engine import (
+        BacktestConfig,
+        BacktestEngine,
+        BacktestEngineError,
+    )
     from risk_engine import SymbolSpecification
     from trading_pipeline_service import (
         PaperRiskState,
@@ -1717,15 +1727,282 @@ async def run_strategy_paper_trade(
 async def run_backtest(
     backtest_config: dict,
 ):
-    return {
-        "backtest_id": "BT-PENDING",
-        "status": "not_implemented",
-        "message": (
-            "Backtesting will use validated "
-            "historical market data."
-        ),
-        "timestamp": utc_timestamp(),
-    }
+    """
+    Run the production deterministic backtest engine.
+
+    Safety:
+    - Historical candles are read from MT5 only.
+    - The BacktestEngine is simulation-only.
+    - No MT5/Exness/live order is ever submitted.
+    - The existing RiskEngine and trading pipeline are reused.
+    """
+
+    if not isinstance(backtest_config, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Invalid backtest configuration",
+                "message": "backtest_config must be a JSON object.",
+                "timestamp": utc_timestamp(),
+            },
+        )
+
+    symbol = str(
+        backtest_config.get(
+            "symbol",
+            "XAUUSD",
+        )
+    ).strip()
+
+    timeframe = str(
+        backtest_config.get(
+            "timeframe",
+            "H1",
+        )
+    ).strip().upper()
+
+    if not symbol:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Invalid backtest configuration",
+                "message": "symbol is required.",
+                "timestamp": utc_timestamp(),
+            },
+        )
+
+    try:
+        starting_balance = float(
+            backtest_config.get(
+                "starting_balance",
+                10_000.0,
+            )
+        )
+
+        warmup_candles = int(
+            backtest_config.get(
+                "warmup_candles",
+                50,
+            )
+        )
+
+        max_open_positions = int(
+            backtest_config.get(
+                "max_open_positions",
+                1,
+            )
+        )
+
+        execute_on_next_open = bool(
+            backtest_config.get(
+                "execute_on_next_open",
+                True,
+            )
+        )
+
+        close_open_position_at_end = bool(
+            backtest_config.get(
+                "close_open_position_at_end",
+                True,
+            )
+        )
+
+        spread = float(
+            backtest_config.get(
+                "spread",
+                0.0,
+            )
+        )
+
+        slippage = float(
+            backtest_config.get(
+                "slippage",
+                0.0,
+            )
+        )
+
+        commission_per_unit = float(
+            backtest_config.get(
+                "commission_per_unit",
+                0.0,
+            )
+        )
+
+        candle_limit = int(
+            backtest_config.get(
+                "candle_limit",
+                max(500, warmup_candles + 1),
+            )
+        )
+
+        if candle_limit < warmup_candles + 1:
+            candle_limit = warmup_candles + 1
+
+        candles = await mt5_service.get_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=candle_limit,
+        )
+
+        if len(candles) < warmup_candles + 1:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "Insufficient historical data",
+                    "message": (
+                        f"Backtest requires at least "
+                        f"{warmup_candles + 1} candles, "
+                        f"but MT5 returned {len(candles)}."
+                    ),
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "candles_received": len(candles),
+                    "timestamp": utc_timestamp(),
+                },
+            )
+
+        # Use the broker's real read-only MT5 symbol specification.
+        # This keeps position sizing and risk calculations aligned
+        # with the connected instrument while remaining simulation-only.
+        raw_specification = (
+            await mt5_service.get_symbol_specification(
+                symbol
+            )
+        )
+
+        specification = build_symbol_specification(
+            raw_specification
+        )
+
+        config = BacktestConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            starting_balance=starting_balance,
+            warmup_candles=warmup_candles,
+            max_open_positions=max_open_positions,
+            execute_on_next_open=execute_on_next_open,
+            close_open_position_at_end=(
+                close_open_position_at_end
+            ),
+            spread=spread,
+            slippage=slippage,
+            commission_per_unit=commission_per_unit,
+        )
+
+        engine = BacktestEngine(
+            config=config,
+            pipeline_service=trading_pipeline_service,
+        )
+
+        result = engine.run(
+            candles=candles,
+            specification=specification,
+        )
+
+        return {
+            "status": "ok",
+            "backtest_id": str(
+                getattr(
+                    result,
+                    "backtest_id",
+                    f"BT-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
+                )
+            ),
+            "execution_mode": "simulation_only",
+            "live_trading_enabled": False,
+            "source": "mt5_historical_data",
+            "config": {
+                "symbol": config.symbol,
+                "timeframe": config.timeframe,
+                "starting_balance": config.starting_balance,
+                "warmup_candles": config.warmup_candles,
+                "max_open_positions": config.max_open_positions,
+                "execute_on_next_open": (
+                    config.execute_on_next_open
+                ),
+                "close_open_position_at_end": (
+                    config.close_open_position_at_end
+                ),
+                "spread": config.spread,
+                "slippage": config.slippage,
+                "commission_per_unit": (
+                    config.commission_per_unit
+                ),
+                "candle_limit": candle_limit,
+                "candles_used": len(candles),
+            },
+            "symbol_specification": safe_symbol_specification_response(
+                raw_specification
+            ),
+            "result": {
+                "status": result.status,
+                "symbol": result.symbol,
+                "timeframe": result.timeframe,
+                "start_time": result.start_time,
+                "end_time": result.end_time,
+                "starting_balance": result.starting_balance,
+                "ending_balance": result.ending_balance,
+                "net_profit": result.net_profit,
+                "net_profit_percent": (
+                    result.net_profit_percent
+                ),
+                "total_trades": result.total_trades,
+                "winning_trades": result.winning_trades,
+                "losing_trades": result.losing_trades,
+                "breakeven_trades": (
+                    result.breakeven_trades
+                ),
+                "win_rate_percent": (
+                    result.win_rate_percent
+                ),
+                "gross_profit": result.gross_profit,
+                "gross_loss": result.gross_loss,
+                "profit_factor": result.profit_factor,
+                "total_execution_cost": (
+                    result.total_execution_cost
+                ),
+                "max_drawdown": result.max_drawdown,
+                "max_drawdown_percent": (
+                    result.max_drawdown_percent
+                ),
+                "average_trade": result.average_trade,
+                "average_win": result.average_win,
+                "average_loss": result.average_loss,
+                "bars_processed": result.bars_processed,
+                "warmup_candles": result.warmup_candles,
+                "trades": result.trades,
+                "equity_curve": result.equity_curve,
+            },
+            "timestamp": utc_timestamp(),
+        }
+
+    except MT5ServiceError as exc:
+        raise mt5_error_response(exc) from exc
+
+    except BacktestEngineError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Backtest failed safely",
+                "message": str(exc),
+                "timestamp": utc_timestamp(),
+            },
+        ) from exc
+
+    except (
+        TradingPipelineServiceError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "Backtest configuration or pipeline failed",
+                "message": str(exc),
+                "timestamp": utc_timestamp(),
+            },
+        ) from exc
 
 
 # ============================================================
