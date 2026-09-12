@@ -72,21 +72,12 @@ class BacktestConfig:
     timeframe: str = "H1"
     starting_balance: float = 10_000.0
 
-    # Minimum number of candles before the strategy is evaluated.
-    # EMA50 is the longest primary indicator, so 50 is the minimum.
     warmup_candles: int = 50
 
-    # Only one simulated position is allowed in this first production
-    # implementation. This keeps accounting deterministic and prevents
-    # accidental portfolio-level assumptions.
     max_open_positions: int = 1
 
-    # When a signal is generated at candle close, execution occurs at
-    # the NEXT candle open. This avoids look-ahead bias.
     execute_on_next_open: bool = True
 
-    # If a position remains open when historical data ends, close it at
-    # the final available close.
     close_open_position_at_end: bool = True
 
     def validate(self) -> None:
@@ -254,10 +245,6 @@ class BacktestEngine:
             else RiskEngine()
         )
 
-    # ============================================================
-    # PUBLIC API
-    # ============================================================
-
     def run(
         self,
         *,
@@ -306,8 +293,6 @@ class BacktestEngine:
 
         open_position: Optional[_OpenPosition] = None
 
-        # The daily loss supplied to RiskEngine is intentionally based
-        # on realized loss during this historical simulation.
         daily_loss = 0.0
 
         for index in range(
@@ -315,10 +300,6 @@ class BacktestEngine:
             len(normalized),
         ):
             candle = normalized[index]
-
-            # ----------------------------------------------------
-            # 1. Manage an existing position first.
-            # ----------------------------------------------------
 
             if open_position is not None:
                 open_position.bars_held += 1
@@ -341,10 +322,6 @@ class BacktestEngine:
                     )
 
                     open_position = None
-
-            # ----------------------------------------------------
-            # 2. Mark current equity.
-            # ----------------------------------------------------
 
             unrealized = 0.0
 
@@ -393,17 +370,8 @@ class BacktestEngine:
                 )
             )
 
-            # ----------------------------------------------------
-            # 3. Do not open another position while one exists.
-            # ----------------------------------------------------
-
             if open_position is not None:
                 continue
-
-            # ----------------------------------------------------
-            # 4. Generate the signal using ONLY candles up to
-            #    and including the current completed candle.
-            # ----------------------------------------------------
 
             history = normalized[: index + 1]
 
@@ -445,10 +413,6 @@ class BacktestEngine:
                     "Trade proposal has no take profit."
                 )
 
-            # ----------------------------------------------------
-            # 5. We need a future candle to execute the signal.
-            # ----------------------------------------------------
-
             next_index = index + 1
 
             if (
@@ -479,13 +443,6 @@ class BacktestEngine:
                     candle
                 )
 
-            # ----------------------------------------------------
-            # 6. Rebase SL/TP around the actual simulated entry.
-            #
-            # This preserves the same distance from the signal
-            # price rather than silently moving the risk boundary.
-            # ----------------------------------------------------
-
             stop_loss, take_profit = (
                 self._rebase_protective_levels(
                     direction=decision.direction,
@@ -501,10 +458,6 @@ class BacktestEngine:
                     ),
                 )
             )
-
-            # ----------------------------------------------------
-            # 7. Run the existing Risk Engine.
-            # ----------------------------------------------------
 
             try:
                 position_size = (
@@ -551,10 +504,6 @@ class BacktestEngine:
             if not risk_decision.allowed:
                 continue
 
-            # ----------------------------------------------------
-            # 8. Open simulated position.
-            # ----------------------------------------------------
-
             open_position = _OpenPosition(
                 trade_id=self._new_trade_id(),
                 direction=decision.direction,
@@ -568,16 +517,6 @@ class BacktestEngine:
                 take_profit=take_profit,
                 position_size=position_size,
             )
-
-            # ----------------------------------------------------
-            # If entry happens on the next candle open, the next
-            # iteration will manage its exit. We intentionally do
-            # not use future intrabar data from the signal candle.
-            # ----------------------------------------------------
-
-        # ========================================================
-        # FINALIZE ANY OPEN POSITION
-        # ========================================================
 
         if (
             open_position is not None
@@ -603,10 +542,6 @@ class BacktestEngine:
 
             open_position = None
 
-        # ========================================================
-        # FINAL METRICS
-        # ========================================================
-
         return self._build_result(
             normalized=normalized,
             balance=balance,
@@ -615,10 +550,6 @@ class BacktestEngine:
             max_drawdown=max_drawdown,
             max_drawdown_percent=max_drawdown_percent,
         )
-
-    # ============================================================
-    # CANDLE VALIDATION
-    # ============================================================
 
     @staticmethod
     def _validate_and_normalize_candles(
@@ -712,11 +643,6 @@ class BacktestEngine:
             item["low"] = low
             item["close"] = close
 
-            # FIX:
-            # dict.get() accepts only (key, default).
-            # The previous implementation incorrectly passed three
-            # arguments, causing:
-            # TypeError: get expected at most 2 arguments, got 3
             timestamp = item.get("timestamp")
 
             if timestamp is None:
@@ -726,9 +652,7 @@ class BacktestEngine:
                 timestamp = item.get("datetime")
 
             if timestamp is not None:
-                timestamp_text = (
-                    str(timestamp)
-                )
+                timestamp_text = str(timestamp)
 
                 if (
                     previous_timestamp is not None
@@ -741,15 +665,18 @@ class BacktestEngine:
 
                 previous_timestamp = timestamp_text
 
-                item["timestamp"] = timestamp_text
+                # IMPORTANT:
+                # Do NOT inject a new timestamp field.
+                # Preserve the original candle representation so
+                # the decision engine receives exactly the historical
+                # data supplied by the caller.
+                #
+                # _timestamp() can independently resolve timestamp,
+                # time, or datetime when required.
 
             normalized.append(item)
 
         return normalized
-
-    # ============================================================
-    # EXIT LOGIC
-    # ============================================================
 
     def _check_exit(
         self,
@@ -764,8 +691,6 @@ class BacktestEngine:
             hit_stop = low <= position.stop_loss
             hit_target = high >= position.take_profit
 
-            # Conservative intrabar policy:
-            # if both are touched, assume SL first.
             if hit_stop:
                 return self._close_position(
                     position=position,
@@ -880,10 +805,6 @@ class BacktestEngine:
             - mark_price
         ) * position.position_size
 
-    # ============================================================
-    # PRICE LEVEL HANDLING
-    # ============================================================
-
     @staticmethod
     def _rebase_protective_levels(
         *,
@@ -941,10 +862,6 @@ class BacktestEngine:
             rebased_stop,
             rebased_take_profit,
         )
-
-    # ============================================================
-    # RESULT HELPERS
-    # ============================================================
 
     def _build_result(
         self,
@@ -1033,7 +950,6 @@ class BacktestEngine:
             else 0.0
         )
 
-        # Populate symbol/timeframe on immutable trade records.
         serialized_trades: list[dict[str, Any]] = []
 
         for trade in trades:
