@@ -111,6 +111,24 @@ class ApiService {
     return _asMap(response.data);
   }
 
+  // Step 10B-4: administrator/system safety status.
+  Future<Map<String, dynamic>> adminStatus() async {
+    final response = await _dio.get('/api/admin/status');
+    return _asMap(response.data);
+  }
+
+  // Step 10B-4: activate the backend emergency stop.
+  Future<Map<String, dynamic>> activateEmergencyStop() async {
+    final response = await _dio.post('/api/admin/emergency-stop');
+    return _asMap(response.data);
+  }
+
+  // Step 10B-4: reset the backend emergency stop.
+  Future<Map<String, dynamic>> resetEmergencyStop() async {
+    final response = await _dio.post('/api/admin/emergency-stop/reset');
+    return _asMap(response.data);
+  }
+
   Future<Map<String, dynamic>> openDemoTrade({
     required String symbol,
     required String direction,
