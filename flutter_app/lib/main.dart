@@ -11,6 +11,27 @@ void main() {
 class RaymondApp extends StatelessWidget {
   const RaymondApp({super.key});
 
+  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
+    final response = await api.paperJournalTrades(
+      limit: 50,
+      offset: 0,
+    );
+
+    final data = response;
+    final rawTrades = data['trades'];
+
+    if (rawTrades is! List) {
+      throw const FormatException(
+        'Expected a trades list from the paper journal API.',
+      );
+    }
+
+    return rawTrades
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -293,6 +314,7 @@ class _HomePageState extends State<HomePage> {
       return _placeholderPage();
     }
 
+    // Home tab.
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
@@ -302,6 +324,7 @@ class _HomePageState extends State<HomePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (errorMessage.isNotEmpty) _errorCard(),
+
             const Text(
               'XAUUSD',
               style: TextStyle(
@@ -309,7 +332,9 @@ class _HomePageState extends State<HomePage> {
                 fontSize: 13,
               ),
             ),
+
             const SizedBox(height: 4),
+
             const Text(
               'Live market connection',
               style: TextStyle(
@@ -317,9 +342,13 @@ class _HomePageState extends State<HomePage> {
                 fontWeight: FontWeight.w800,
               ),
             ),
+
             const SizedBox(height: 16),
+
             _paperCard(),
+
             const SizedBox(height: 14),
+
             Row(
               children: [
                 Expanded(
@@ -339,12 +368,306 @@ class _HomePageState extends State<HomePage> {
                 ),
               ],
             ),
+
             const SizedBox(height: 14),
+
             _performanceCard(),
+
             const SizedBox(height: 14),
+
             _tradesCard(),
           ],
         ),
       ),
     );
   }
+
+  Widget _paperCard() {
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'PAPER TRADING',
+                style: TextStyle(
+                  color: gold,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Icon(
+                Icons.account_balance_wallet_outlined,
+                color: gold,
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          loading
+              ? const LinearProgressIndicator()
+              : Text(
+                  '\$${balance.toStringAsFixed(2)}',
+                  style: const TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+          const SizedBox(height: 12),
+          const Text(
+            'Real-money trading is disabled.',
+            style: TextStyle(color: muted),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _performanceCard() {
+    final positive = totalPnl >= 0;
+
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'PERFORMANCE',
+            style: TextStyle(
+              color: gold,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Total P&L',
+                style: TextStyle(color: muted),
+              ),
+              Text(
+                '${positive ? '+' : ''}\$${totalPnl.toStringAsFixed(2)}',
+                style: TextStyle(
+                  color: positive ? green : red,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tradesCard() {
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'RECENT PAPER TRADES',
+                style: TextStyle(
+                  color: gold,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (journalLoaded)
+                const Text(
+                  'DATABASE',
+                  style: TextStyle(
+                    color: muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (loading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(20),
+                child: CircularProgressIndicator(),
+              ),
+            )
+          else if (trades.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 20),
+              child: Center(
+                child: Text(
+                  'No paper trades yet.',
+                  style: TextStyle(color: muted),
+                ),
+              ),
+            )
+          else
+            ...trades.take(5).map(_tradeRow),
+        ],
+      ),
+    );
+  }
+
+  Widget _tradeRow(Map<String, dynamic> trade) {
+    final direction =
+        '${trade['direction'] ?? ''}'.toUpperCase();
+
+    final pnlValue = trade['pnl'];
+    final pnl = pnlValue is num ? pnlValue.toDouble() : 0.0;
+
+    final positive = pnl >= 0;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF06111C),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            direction == 'BUY'
+                ? Icons.arrow_upward
+                : Icons.arrow_downward,
+            color: direction == 'BUY' ? green : red,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${trade['symbol'] ?? 'XAUUSD'} $direction',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                Text(
+                  '${trade['status'] ?? 'unknown'}',
+                  style: const TextStyle(
+                    color: muted,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '${positive ? '+' : ''}\$${pnl.toStringAsFixed(2)}',
+            style: TextStyle(
+              color: positive ? green : red,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _metricCard(
+    String title,
+    String value,
+    String subtitle,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(color: muted),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 23,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: const TextStyle(
+              color: gold,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _card({required Widget child}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: border),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _errorCard() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: red.withOpacity(.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: red.withOpacity(.30),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            color: red,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '$errorMessage. Pull down to retry.',
+              style: const TextStyle(color: red),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _placeholderPage() {
+    const names = [
+      'Home',
+      'Chart',
+      'Analysis',
+      'Positions',
+      'Settings',
+    ];
+
+    return Center(
+      child: Text(
+        '${names[selectedIndex]} screen — next Step 10B phase',
+        style: const TextStyle(
+          color: muted,
+          fontSize: 18,
+        ),
+      ),
+    );
+  }
+}
