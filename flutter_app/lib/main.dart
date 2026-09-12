@@ -11,7 +11,12 @@ void main() {
 }
 
 class RaymondApp extends StatelessWidget {
-  const RaymondApp({super.key});
+  const RaymondApp({
+    super.key,
+    this.startupRefreshEnabled = true,
+  });
+
+  final bool startupRefreshEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -27,13 +32,20 @@ class RaymondApp extends StatelessWidget {
         ),
         fontFamily: 'Roboto',
       ),
-      home: const HomePage(),
+      home: HomePage(
+        startupRefreshEnabled: startupRefreshEnabled,
+      ),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({
+    super.key,
+    this.startupRefreshEnabled = true,
+  });
+
+  final bool startupRefreshEnabled;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -68,10 +80,15 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    _refresh();
+
+    if (widget.startupRefreshEnabled) {
+      _refresh();
+    }
   }
 
   Future<void> _refresh() async {
+    if (!mounted) return;
+
     setState(() {
       loading = true;
       errorMessage = '';
@@ -216,11 +233,16 @@ class _HomePageState extends State<HomePage> {
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home, color: gold),
+            selectedIcon: Icon(
+              Icons.home,
+              color: gold,
+            ),
             label: 'Home',
           ),
           NavigationDestination(
-            icon: Icon(Icons.candlestick_chart_outlined),
+            icon: Icon(
+              Icons.candlestick_chart_outlined,
+            ),
             selectedIcon: Icon(
               Icons.candlestick_chart,
               color: gold,
@@ -228,7 +250,9 @@ class _HomePageState extends State<HomePage> {
             label: 'Chart',
           ),
           NavigationDestination(
-            icon: Icon(Icons.analytics_outlined),
+            icon: Icon(
+              Icons.analytics_outlined,
+            ),
             selectedIcon: Icon(
               Icons.analytics,
               color: gold,
@@ -244,7 +268,9 @@ class _HomePageState extends State<HomePage> {
             label: 'Positions',
           ),
           NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
+            icon: Icon(
+              Icons.settings_outlined,
+            ),
             selectedIcon: Icon(
               Icons.settings,
               color: gold,
@@ -264,10 +290,12 @@ class _HomePageState extends State<HomePage> {
         vertical: 5,
       ),
       decoration: BoxDecoration(
-        color: (backendOnline ? green : red).withOpacity(.12),
+        color: (backendOnline ? green : red)
+            .withOpacity(.12),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: (backendOnline ? green : red).withOpacity(.35),
+          color: (backendOnline ? green : red)
+              .withOpacity(.35),
         ),
       ),
       child: Row(
@@ -311,12 +339,20 @@ class _HomePageState extends State<HomePage> {
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        physics:
+            const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(
+          16,
+          8,
+          16,
+          24,
+        ),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
-            if (errorMessage.isNotEmpty) _errorCard(),
+            if (errorMessage.isNotEmpty)
+              _errorCard(),
 
             const Text(
               'XAUUSD',
@@ -378,10 +414,12 @@ class _HomePageState extends State<HomePage> {
   Widget _paperCard() {
     return _card(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
           const Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
               Text(
                 'PAPER TRADING',
@@ -421,7 +459,8 @@ class _HomePageState extends State<HomePage> {
 
     return _card(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
           const Text(
             'PERFORMANCE',
@@ -432,7 +471,8 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 16),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'Total P&L',
@@ -456,10 +496,12 @@ class _HomePageState extends State<HomePage> {
   Widget _tradesCard() {
     return _card(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'RECENT PAPER TRADES',
@@ -489,7 +531,9 @@ class _HomePageState extends State<HomePage> {
             )
           else if (trades.isEmpty)
             const Padding(
-              padding: EdgeInsets.symmetric(vertical: 20),
+              padding: EdgeInsets.symmetric(
+                vertical: 20,
+              ),
               child: Center(
                 child: Text(
                   'No paper trades yet.',
@@ -504,12 +548,15 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _tradeRow(Map<String, dynamic> trade) {
+  Widget _tradeRow(
+    Map<String, dynamic> trade,
+  ) {
     final direction =
         '${trade['direction'] ?? ''}'.toUpperCase();
 
     final pnlValue = trade['pnl'];
-    final pnl = pnlValue is num ? pnlValue.toDouble() : 0.0;
+    final pnl =
+        pnlValue is num ? pnlValue.toDouble() : 0.0;
 
     final positive = pnl >= 0;
 
@@ -526,12 +573,14 @@ class _HomePageState extends State<HomePage> {
             direction == 'BUY'
                 ? Icons.arrow_upward
                 : Icons.arrow_downward,
-            color: direction == 'BUY' ? green : red,
+            color:
+                direction == 'BUY' ? green : red,
           ),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
                 Text(
                   '${trade['symbol'] ?? 'XAUUSD'} $direction',
@@ -574,7 +623,8 @@ class _HomePageState extends State<HomePage> {
         border: Border.all(color: border),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
           Text(
             title,
@@ -601,7 +651,9 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _card({required Widget child}) {
+  Widget _card({
+    required Widget child,
+  }) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
