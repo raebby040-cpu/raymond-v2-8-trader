@@ -24,6 +24,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
   double rsi = 0.0;
   double macd = 0.0;
   double macdSignal = 0.0;
+  double macdHistogram = 0.0;
   double ema20 = 0.0;
   double ema50 = 0.0;
   double atr = 0.0;
@@ -35,6 +36,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
   String reasoning = '';
   String source = '';
+  double confidence = 0.0;
 
   @override
   void initState() {
@@ -59,60 +61,202 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
       if (!mounted) return;
 
-      final market = data['market'];
-      final indicators = data['indicators'];
+      /*
+       * API response structure:
+       *
+       * {
+       *   "market": {
+       *     "symbol": "XAUUSD",
+       *     "timeframe": "M15",
+       *     "price": 4339.834
+       *   },
+       *
+       *   "indicators": {
+       *     "status": "ok",
+       *     "symbol": "XAUUSD",
+       *     "timeframe": "M15",
+       *     "close": 4339.834,
+       *
+       *     "indicators": {
+       *       "ema20": 4345.42,
+       *       "ema50": 4348.89,
+       *       "rsi14": 41.66,
+       *       "atr14": 7.29,
+       *       "macd": -5.36,
+       *       "macd_signal": -5.00,
+       *       "macd_histogram": -0.35
+       *     },
+       *
+       *     "analysis": {
+       *       "trend": "Bearish",
+       *       "score": 14,
+       *       "signal": "SELL"
+       *     },
+       *
+       *     "candles_used": 100
+       *   },
+       *
+       *   "decision": {
+       *     "direction": "sell",
+       *     "confidence": 77.8,
+       *     "technical_score": 14,
+       *     "trend": "Bearish",
+       *     "signal": "SELL",
+       *     "reasoning": "..."
+       *   }
+       * }
+       */
 
-      final marketMap = market is Map
-          ? Map<String, dynamic>.from(market)
-          : <String, dynamic>{};
+      final market = _asMap(data['market']);
+      final indicatorsResponse = _asMap(data['indicators']);
 
-      final indicatorsMap = indicators is Map
-          ? Map<String, dynamic>.from(indicators)
-          : <String, dynamic>{};
+      // The actual technical indicators are nested inside:
+      // data['indicators']['indicators']
+      final technicalIndicators =
+          _asMap(indicatorsResponse['indicators']);
+
+      // Backend technical analysis is nested inside:
+      // data['indicators']['analysis']
+      final technicalAnalysis =
+          _asMap(indicatorsResponse['analysis']);
+
+      // AI decision is also available at the top level.
+      final decision = _asMap(data['decision']);
+
+      final returnedSymbol =
+          _stringValue(market['symbol'], fallback: symbol);
+
+      final returnedTimeframe =
+          _stringValue(market['timeframe'], fallback: timeframe);
+
+      final returnedPrice = _number(
+        market['price'],
+        fallback: _number(indicatorsResponse['close']),
+      );
+
+      final returnedRsi = _number(
+        technicalIndicators['rsi14'],
+        fallback: _number(technicalIndicators['rsi']),
+      );
+
+      final returnedMacd =
+          _number(technicalIndicators['macd']);
+
+      final returnedMacdSignal = _number(
+        technicalIndicators['macd_signal'],
+      );
+
+      final returnedMacdHistogram = _number(
+        technicalIndicators['macd_histogram'],
+      );
+
+      final returnedEma20 = _number(
+        technicalIndicators['ema20'],
+      );
+
+      final returnedEma50 = _number(
+        technicalIndicators['ema50'],
+      );
+
+      final returnedAtr = _number(
+        technicalIndicators['atr14'],
+        fallback: _number(technicalIndicators['atr']),
+      );
+
+      /*
+       * Prefer the AI decision values when available because that is
+       * the final analysis decision returned by the backend.
+       *
+       * Fall back to the technical analysis section if needed.
+       */
+      final returnedTrend = _stringValue(
+        decision['trend'],
+        fallback: _stringValue(
+          technicalAnalysis['trend'],
+          fallback: 'Neutral',
+        ),
+      );
+
+      final returnedSignal = _stringValue(
+        decision['signal'],
+        fallback: _stringValue(
+          technicalAnalysis['signal'],
+          fallback: 'WAIT',
+        ),
+      );
+
+      final returnedScore = _number(
+        decision['technical_score'],
+        fallback: _number(
+          technicalAnalysis['score'],
+          fallback: 50.0,
+        ),
+      );
+
+      final returnedCandles = _intValue(
+        indicatorsResponse['candles_used'],
+      );
+
+      final returnedReasoning = _stringValue(
+        decision['reasoning'],
+        fallback: _stringValue(
+          data['reasoning'],
+          fallback: '',
+        ),
+      );
+
+      final returnedSource = _stringValue(
+        data['source'],
+        fallback: '',
+      );
+
+      final returnedConfidence = _number(
+        decision['confidence'],
+      );
 
       setState(() {
-        symbol = '${marketMap['symbol'] ?? symbol}';
-        timeframe = '${marketMap['timeframe'] ?? timeframe}';
+        symbol = returnedSymbol;
+        timeframe = returnedTimeframe;
 
-        close = _number(marketMap['price']);
+        close = returnedPrice;
 
-        rsi = _number(indicatorsMap['rsi']);
-        macd = _number(indicatorsMap['macd']);
-        macdSignal = _number(indicatorsMap['macd_signal']);
-        ema20 = _number(indicatorsMap['ema20']);
-        ema50 = _number(indicatorsMap['ema50']);
-        atr = _number(indicatorsMap['atr']);
+        rsi = returnedRsi;
+        macd = returnedMacd;
+        macdSignal = returnedMacdSignal;
+        macdHistogram = returnedMacdHistogram;
+        ema20 = returnedEma20;
+        ema50 = returnedEma50;
+        atr = returnedAtr;
 
-        trend = '${data['trend'] ?? 'Neutral'}';
-        signal = '${data['signal'] ?? 'WAIT'}';
+        trend = returnedTrend;
+        signal = returnedSignal;
+        score = returnedScore;
+        candlesUsed = returnedCandles;
 
-        final scoreValue = data['technical_score'];
-        if (scoreValue is num) {
-          score = scoreValue.toDouble();
-        } else {
-          score = _number(indicatorsMap['score'], fallback: 50.0);
-        }
-
-        final candlesValue = indicatorsMap['candles_used'];
-        if (candlesValue is num) {
-          candlesUsed = candlesValue.toInt();
-        } else {
-          candlesUsed = 0;
-        }
-
-        reasoning = '${data['reasoning'] ?? ''}';
-        source = '${data['source'] ?? ''}';
+        reasoning = returnedReasoning;
+        source = returnedSource;
+        confidence = returnedConfidence;
 
         loading = false;
+        error = null;
       });
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
         loading = false;
-        error = 'Unable to load market analysis. Pull down to retry.';
+        error =
+            'Unable to load market analysis. Pull down to retry.';
       });
     }
+  }
+
+  Map<String, dynamic> _asMap(dynamic value) {
+    if (value is Map) {
+      return Map<String, dynamic>.from(value);
+    }
+
+    return <String, dynamic>{};
   }
 
   double _number(
@@ -130,12 +274,43 @@ class _AnalysisPageState extends State<AnalysisPage> {
     return fallback;
   }
 
+  int _intValue(dynamic value) {
+    if (value is num) {
+      return value.toInt();
+    }
+
+    if (value is String) {
+      return int.tryParse(value) ?? 0;
+    }
+
+    return 0;
+  }
+
+  String _stringValue(
+    dynamic value, {
+    String fallback = '',
+  }) {
+    if (value == null) {
+      return fallback;
+    }
+
+    final result = value.toString().trim();
+
+    if (result.isEmpty) {
+      return fallback;
+    }
+
+    return result;
+  }
+
   Color _signalColor() {
     switch (signal.toUpperCase()) {
       case 'BUY':
         return Colors.green;
+
       case 'SELL':
         return Colors.red;
+
       default:
         return Colors.orange;
     }
@@ -145,14 +320,19 @@ class _AnalysisPageState extends State<AnalysisPage> {
     switch (trend.toLowerCase()) {
       case 'bullish':
         return Colors.green;
+
       case 'bearish':
         return Colors.red;
+
       default:
         return Colors.orange;
     }
   }
 
-  String _formatNumber(double value, int decimals) {
+  String _formatNumber(
+    double value,
+    int decimals,
+  ) {
     return value.toStringAsFixed(decimals);
   }
 
@@ -181,26 +361,41 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
             if (loading) ...[
               const SizedBox(height: 40),
+
               const Center(
                 child: CircularProgressIndicator(),
               ),
+
               const SizedBox(height: 20),
+
               const Center(
-                child: Text('Loading market analysis...'),
+                child: Text(
+                  'Loading market analysis...',
+                ),
               ),
             ] else if (error != null) ...[
               _errorCard(),
             ] else ...[
               _marketCard(),
+
               const SizedBox(height: 12),
+
               _signalCard(),
+
               const SizedBox(height: 12),
+
               _indicatorsCard(),
+
               const SizedBox(height: 12),
+
               _reasoningCard(),
+
               const SizedBox(height: 12),
+
               _dataCard(),
+
               const SizedBox(height: 12),
+
               _safetyCard(),
             ],
           ],
@@ -232,7 +427,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
               shape: BoxShape.circle,
             ),
           ),
+
           const SizedBox(width: 10),
+
           const Expanded(
             child: Text(
               'ONLINE',
@@ -242,6 +439,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
               ),
             ),
           ),
+
           Text(
             '$symbol • $timeframe',
             style: const TextStyle(
@@ -258,7 +456,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
             const Text(
               'Market',
@@ -267,7 +466,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 fontWeight: FontWeight.bold,
               ),
             ),
+
             const SizedBox(height: 14),
+
             Row(
               children: [
                 Expanded(
@@ -276,6 +477,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                     symbol,
                   ),
                 ),
+
                 Expanded(
                   child: _valueTile(
                     'Timeframe',
@@ -284,7 +486,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 ),
               ],
             ),
+
             const SizedBox(height: 12),
+
             _valueTile(
               'Current Price',
               _formatNumber(close, 2),
@@ -304,7 +508,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
             const Text(
               'Trading Analysis',
@@ -313,7 +518,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 fontWeight: FontWeight.bold,
               ),
             ),
+
             const SizedBox(height: 16),
+
             Row(
               children: [
                 Expanded(
@@ -323,6 +530,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                     trendColor,
                   ),
                 ),
+
                 Expanded(
                   child: _analysisValue(
                     'Signal',
@@ -332,7 +540,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 ),
               ],
             ),
+
             const SizedBox(height: 18),
+
             Text(
               'Technical Score',
               style: TextStyle(
@@ -343,16 +553,21 @@ class _AnalysisPageState extends State<AnalysisPage> {
                     ?.withValues(alpha: 0.7),
               ),
             ),
+
             const SizedBox(height: 8),
+
             Row(
               children: [
                 Expanded(
                   child: LinearProgressIndicator(
-                    value: (score / 100).clamp(0.0, 1.0),
+                    value: (score / 100)
+                        .clamp(0.0, 1.0),
                     minHeight: 10,
                   ),
                 ),
+
                 const SizedBox(width: 12),
+
                 Text(
                   '${score.toStringAsFixed(0)}/100',
                   style: const TextStyle(
@@ -361,6 +576,15 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 ),
               ],
             ),
+
+            if (confidence > 0) ...[
+              const SizedBox(height: 16),
+
+              _indicatorRow(
+                'AI Confidence',
+                '${confidence.toStringAsFixed(1)}%',
+              ),
+            ],
           ],
         ),
       ),
@@ -372,7 +596,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
             const Text(
               'Technical Indicators',
@@ -381,29 +606,41 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 fontWeight: FontWeight.bold,
               ),
             ),
+
             const SizedBox(height: 14),
+
             _indicatorRow(
-              'RSI',
+              'RSI 14',
               _formatNumber(rsi, 2),
             ),
+
             _indicatorRow(
               'MACD',
               _formatNumber(macd, 4),
             ),
+
             _indicatorRow(
               'MACD Signal',
               _formatNumber(macdSignal, 4),
             ),
+
+            _indicatorRow(
+              'MACD Histogram',
+              _formatNumber(macdHistogram, 4),
+            ),
+
             _indicatorRow(
               'EMA 20',
               _formatNumber(ema20, 2),
             ),
+
             _indicatorRow(
               'EMA 50',
               _formatNumber(ema50, 2),
             ),
+
             _indicatorRow(
-              'ATR',
+              'ATR 14',
               _formatNumber(atr, 4),
             ),
           ],
@@ -417,7 +654,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
             const Text(
               'Analysis Reasoning',
@@ -426,7 +664,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 fontWeight: FontWeight.bold,
               ),
             ),
+
             const SizedBox(height: 12),
+
             Text(
               reasoning.isEmpty
                   ? 'No additional reasoning was returned by the analysis engine.'
@@ -446,7 +686,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
             const Text(
               'Data',
@@ -455,11 +696,14 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 fontWeight: FontWeight.bold,
               ),
             ),
+
             const SizedBox(height: 12),
+
             _indicatorRow(
               'Candles Used',
               '$candlesUsed',
             ),
+
             if (source.isNotEmpty)
               _indicatorRow(
                 'Market Source',
@@ -476,7 +720,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
             Row(
               children: [
@@ -484,7 +729,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                   Icons.lock,
                   color: Colors.green,
                 ),
+
                 const SizedBox(width: 8),
+
                 const Expanded(
                   child: Text(
                     'SAFE PAPER MODE',
@@ -496,7 +743,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 ),
               ],
             ),
+
             const SizedBox(height: 12),
+
             const Text(
               'This analysis is read-only. Live broker order execution remains disabled.',
               style: TextStyle(
@@ -520,12 +769,16 @@ class _AnalysisPageState extends State<AnalysisPage> {
               size: 42,
               color: Colors.red,
             ),
+
             const SizedBox(height: 12),
+
             Text(
               error!,
               textAlign: TextAlign.center,
             ),
+
             const SizedBox(height: 14),
+
             ElevatedButton.icon(
               onPressed: _loadAnalysis,
               icon: const Icon(Icons.refresh),
@@ -543,7 +796,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
     bool large = false,
   }) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
       children: [
         Text(
           label,
@@ -556,7 +810,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 ?.withValues(alpha: 0.65),
           ),
         ),
+
         const SizedBox(height: 5),
+
         Text(
           value,
           style: TextStyle(
@@ -574,7 +830,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
     Color color,
   ) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment:
+          CrossAxisAlignment.start,
       children: [
         Text(
           label,
@@ -586,7 +843,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 ?.withValues(alpha: 0.65),
           ),
         ),
+
         const SizedBox(height: 5),
+
         Text(
           value,
           style: TextStyle(
@@ -604,16 +863,22 @@ class _AnalysisPageState extends State<AnalysisPage> {
     String value,
   ) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
+      padding: const EdgeInsets.symmetric(
+        vertical: 7,
+      ),
       child: Row(
         children: [
           Expanded(
             child: Text(label),
           ),
-          Text(
-            value,
-            style: const TextStyle(
-              fontWeight: FontWeight.w600,
+
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ],
