@@ -1,125 +1,262 @@
-"""Tests for broker adapters and execution verification"""
+"""Tests for safe broker adapters and execution verification."""
+
 import pytest
-from app.brokers import MT5BrokerAdapter, ExnessBrokerAdapter, ExecutionVerifier, OrderStatus
+
+from app.brokers import (
+    BrokerFactory,
+    BrokerType,
+    ExnessBrokerAdapter,
+    ExecutionVerifier,
+    MT5BrokerAdapter,
+    OrderStatus,
+    broker_execution_safety_status,
+)
 
 
 @pytest.mark.asyncio
 class TestMT5BrokerAdapter:
-    """Test MT5 broker adapter"""
-    
-    async def test_connect(self, mt5_adapter):
-        """Test MT5 connection"""
-        assert mt5_adapter.is_connected is True
-        assert mt5_adapter.account_info["server"] is not None
-    
-    async def test_disconnect(self, mt5_adapter):
-        """Test MT5 disconnection"""
-        result = await mt5_adapter.disconnect()
-        assert result is True
-        assert mt5_adapter.is_connected is False
-    
-    async def test_place_order(self, mt5_adapter, sample_order):
-        """Test placing order on MT5"""
-        result = await mt5_adapter.place_order(sample_order)
-        
-        assert "order_id" in result
-        assert result["status"] == OrderStatus.FILLED
-        assert result["symbol"] == "XAUUSD"
-        assert result["broker"] == "mt5"
-    
-    async def test_place_order_not_connected(self):
-        """Test placing order when not connected"""
+    """Test safe MT5 broker adapter."""
+
+    async def test_connect_requires_configuration(self):
+        """MT5 adapter does not claim a broker connection without config."""
         adapter = MT5BrokerAdapter()
-        result = await adapter.place_order({"symbol": "XAUUSD"})
-        
-        assert "error" in result or result.get("status") != OrderStatus.FILLED
-    
-    async def test_get_account_info(self, mt5_adapter):
-        """Test getting MT5 account info"""
+
+        result = await adapter.connect()
+
+        assert result is False
+        assert adapter.is_connected is False
+
+    async def test_disconnect(self):
+        """Test safe MT5 disconnection."""
+        adapter = MT5BrokerAdapter()
+
+        result = await adapter.disconnect()
+
+        assert result is True
+        assert adapter.is_connected is False
+
+    async def test_place_order_is_rejected(self, mt5_adapter, sample_order):
+        """Broker order placement must always be rejected."""
+        result = await mt5_adapter.place_order(sample_order)
+
+        assert result["status"] == OrderStatus.REJECTED.value
+        assert result["execution_allowed"] is False
+        assert result["execution_authorized"] is False
+        assert result["live_trading_enabled"] is False
+        assert result["real_orders_allowed"] is False
+        assert result["read_only"] is True
+
+    async def test_cancel_order_is_rejected(self, mt5_adapter):
+        """Broker order cancellation must remain disabled."""
+        result = await mt5_adapter.cancel_order("ORDER-001")
+
+        assert result["status"] == OrderStatus.REJECTED.value
+        assert result["execution_allowed"] is False
+        assert result["real_orders_allowed"] is False
+
+    async def test_close_position_is_rejected(self, mt5_adapter):
+        """Broker position closing must remain disabled."""
+        result = await mt5_adapter.close_position("POS-001")
+
+        assert result["status"] == OrderStatus.REJECTED.value
+        assert result["execution_allowed"] is False
+        assert result["real_orders_allowed"] is False
+
+    async def test_account_info_is_read_only(self, mt5_adapter):
+        """Account information must not authorize trading."""
         info = await mt5_adapter.get_account_info()
-        
+
         assert info["broker"] == "mt5"
-        assert "account_info" in info
-        assert info["account_info"]["balance"] == 10000.0
-    
-    async def test_get_open_positions(self, mt5_adapter, sample_order):
-        """Test getting open positions"""
-        await mt5_adapter.place_order(sample_order)
+        assert info["read_only"] is True
+        assert info["live_trading_enabled"] is False
+        assert info["real_orders_allowed"] is False
+
+    async def test_open_positions_are_read_only(self, mt5_adapter):
+        """Position reporting must not imply live broker execution."""
         positions = await mt5_adapter.get_open_positions()
-        
+
         assert positions["broker"] == "mt5"
-        assert positions["total"] == 1
-        assert len(positions["positions"]) == 1
-    
-    async def test_cancel_order(self, mt5_adapter, sample_order):
-        """Test canceling an order"""
-        order_result = await mt5_adapter.place_order(sample_order)
-        order_id = order_result["order_id"]
-        
-        cancel_result = await mt5_adapter.cancel_order(order_id)
-        
-        assert cancel_result["status"] == OrderStatus.CANCELLED
-        assert cancel_result["order_id"] == order_id
+        assert positions["total"] == 0
+        assert positions["positions"] == []
+        assert positions["read_only"] is True
+        assert positions["live_broker_query"] is False
+        assert positions["real_orders_allowed"] is False
+
+    async def test_status_is_fail_closed(self, mt5_adapter):
+        """Adapter status must report execution as disabled."""
+        status = mt5_adapter.status()
+
+        assert status["broker"] == "mt5"
+        assert status["read_only"] is True
+        assert status["paper_only"] is True
+        assert status["live_trading_enabled"] is False
+        assert status["execution_authorized"] is False
+        assert status["real_orders_allowed"] is False
 
 
 @pytest.mark.asyncio
 class TestExnessBrokerAdapter:
-    """Test Exness broker adapter"""
-    
-    async def test_connect(self, exness_adapter):
-        """Test Exness connection"""
-        assert exness_adapter.is_connected is True
-        assert exness_adapter.account_info["account_id"] is not None
-    
-    async def test_disconnect(self, exness_adapter):
-        """Test Exness disconnection"""
-        result = await exness_adapter.disconnect()
+    """Test safe Exness broker adapter."""
+
+    async def test_connect_requires_configuration(self):
+        """Exness adapter does not claim a broker connection without config."""
+        adapter = ExnessBrokerAdapter()
+
+        result = await adapter.connect()
+
+        assert result is False
+        assert adapter.is_connected is False
+
+    async def test_disconnect(self):
+        """Test safe Exness disconnection."""
+        adapter = ExnessBrokerAdapter()
+
+        result = await adapter.disconnect()
+
         assert result is True
-        assert exness_adapter.is_connected is False
-    
-    async def test_place_order(self, exness_adapter, sample_order):
-        """Test placing order on Exness"""
+        assert adapter.is_connected is False
+
+    async def test_place_order_is_rejected(self, exness_adapter, sample_order):
+        """Exness order placement must always be rejected."""
         result = await exness_adapter.place_order(sample_order)
-        
-        assert "order_id" in result
-        assert result["status"] == OrderStatus.FILLED
-        assert result["broker"] == "exness"
-    
-    async def test_get_account_info(self, exness_adapter):
-        """Test getting Exness account info"""
-        info = await exness_adapter.get_account_info()
-        
-        assert info["broker"] == "exness"
-        assert "account_info" in info
-        assert info["account_info"]["account_type"] is not None
-    
-    async def test_close_position(self, exness_adapter):
-        """Test closing Exness position"""
+
+        assert result["status"] == OrderStatus.REJECTED.value
+        assert result["execution_allowed"] is False
+        assert result["execution_authorized"] is False
+        assert result["live_trading_enabled"] is False
+        assert result["real_orders_allowed"] is False
+        assert result["read_only"] is True
+
+    async def test_cancel_order_is_rejected(self, exness_adapter):
+        """Exness order cancellation must remain disabled."""
+        result = await exness_adapter.cancel_order("ORDER-001")
+
+        assert result["status"] == OrderStatus.REJECTED.value
+        assert result["execution_allowed"] is False
+        assert result["real_orders_allowed"] is False
+
+    async def test_close_position_is_rejected(self, exness_adapter):
+        """Exness position closing must remain disabled."""
         result = await exness_adapter.close_position("POS-001")
-        
-        assert result["status"] == "closed"
-        assert result["position_id"] == "POS-001"
+
+        assert result["status"] == OrderStatus.REJECTED.value
+        assert result["execution_allowed"] is False
+        assert result["real_orders_allowed"] is False
+
+    async def test_account_info_is_read_only(self, exness_adapter):
+        """Account information must not authorize trading."""
+        info = await exness_adapter.get_account_info()
+
+        assert info["broker"] == "exness"
+        assert info["read_only"] is True
+        assert info["live_trading_enabled"] is False
+        assert info["real_orders_allowed"] is False
+
+    async def test_open_positions_are_read_only(self, exness_adapter):
+        """Position reporting must not imply live broker execution."""
+        positions = await exness_adapter.get_open_positions()
+
+        assert positions["broker"] == "exness"
+        assert positions["total"] == 0
+        assert positions["positions"] == []
+        assert positions["read_only"] is True
+        assert positions["live_broker_query"] is False
+        assert positions["real_orders_allowed"] is False
+
+    async def test_status_is_fail_closed(self, exness_adapter):
+        """Adapter status must report execution as disabled."""
+        status = exness_adapter.status()
+
+        assert status["broker"] == "exness"
+        assert status["read_only"] is True
+        assert status["paper_only"] is True
+        assert status["live_trading_enabled"] is False
+        assert status["execution_authorized"] is False
+        assert status["real_orders_allowed"] is False
 
 
+class TestBrokerFactory:
+    """Test safe broker adapter factory."""
+
+    def test_create_mt5_adapter(self):
+        """Factory creates the safe MT5 adapter."""
+        adapter = BrokerFactory.create_adapter(BrokerType.MT5)
+
+        assert isinstance(adapter, MT5BrokerAdapter)
+        assert adapter.broker_type == BrokerType.MT5
+
+    def test_create_exness_adapter(self):
+        """Factory creates the safe Exness adapter."""
+        adapter = BrokerFactory.create_adapter(BrokerType.EXNESS)
+
+        assert isinstance(adapter, ExnessBrokerAdapter)
+        assert adapter.broker_type == BrokerType.EXNESS
+
+    def test_create_adapter_from_string(self):
+        """Factory accepts broker names as strings."""
+        mt5 = BrokerFactory.create_adapter("mt5")
+        exness = BrokerFactory.create_adapter("exness")
+
+        assert isinstance(mt5, MT5BrokerAdapter)
+        assert isinstance(exness, ExnessBrokerAdapter)
+
+    def test_unknown_broker_is_rejected(self):
+        """Unknown broker types must fail closed."""
+        with pytest.raises(ValueError):
+            BrokerFactory.create_adapter("unknown")
+
+
+@pytest.mark.asyncio
 class TestExecutionVerifier:
-    """Test execution verification"""
-    
-    @pytest.mark.asyncio
-    async def test_verify_order(self, execution_verifier, mt5_adapter, sample_order):
-        """Test order verification"""
+    """Test safe execution verification."""
+
+    async def test_verify_order_does_not_confirm_real_execution(
+        self,
+        execution_verifier,
+        mt5_adapter,
+        sample_order,
+    ):
+        """Verifier must never claim real broker execution."""
         order_result = await mt5_adapter.place_order(sample_order)
-        
-        verification = await execution_verifier.verify_order(order_result, mt5_adapter)
-        
-        assert verification["verified"] is True
-        assert verification["broker"] == "mt5"
-        assert verification["order_id"] is not None
-    
-    def test_get_verification_report(self, execution_verifier):
-        """Test verification report generation"""
+
+        verification = await execution_verifier.verify_order(
+            order_result,
+            mt5_adapter,
+        )
+
+        assert verification["verified"] is False
+        assert verification["execution_confirmed"] is False
+        assert verification["real_broker_execution"] is False
+        assert verification["live_trading_enabled"] is False
+        assert verification["real_orders_allowed"] is False
+
+    def test_get_verification_report_is_fail_closed(
+        self,
+        execution_verifier,
+    ):
+        """Verification report must never report real execution."""
         report = execution_verifier.get_verification_report()
-        
-        assert "total_verifications" in report
-        assert "verified_count" in report
-        assert "verification_rate" in report
-        assert report["verification_rate"] >= 0
+
+        assert report["total_verifications"] == 0
+        assert report["verified_count"] == 0
+        assert report["verification_rate"] == 0.0
+        assert report["real_broker_execution_confirmed"] is False
+        assert report["live_trading_enabled"] is False
+        assert report["real_orders_allowed"] is False
+
+
+class TestBrokerExecutionSafetyStatus:
+    """Test absolute broker execution safety status."""
+
+    def test_execution_is_hard_locked_off(self):
+        """Broker execution must remain disabled."""
+        status = broker_execution_safety_status()
+
+        assert status["live_trading_enabled"] is False
+        assert status["execution_authorized"] is False
+        assert status["real_broker_orders_allowed"] is False
+        assert status["read_only"] is True
+        assert status["paper_only"] is True
+        assert status["broker_order_placement"] is False
+        assert status["broker_position_closing"] is False
+        assert status["broker_position_modification"] is False
