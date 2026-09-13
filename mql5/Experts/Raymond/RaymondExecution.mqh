@@ -1,962 +1,886 @@
 //+------------------------------------------------------------------+
-//| RaymondExecution.mqh                                             |
-//| Raymond v2.8 Trader - Step 11B-6                                |
-//| Broker-agnostic MT5 DEMO execution layer                         |
+//| RaymondBridge.mqh                                                |
+//| RAYMOND v2.8 - MT5 ↔ FastAPI Bridge                              |
+//|                                                                  |
+//| STEP 11B-8: READ-ONLY TELEMETRY + AI DECISION BRIDGE             |
+//|                                                                  |
+//| This bridge ONLY communicates READ-ONLY information with         |
+//| Raymond's backend.                                                |
+//|                                                                  |
+//| It does NOT:                                                       |
+//| - place trades                                                     |
+//| - modify trades                                                    |
+//| - close trades                                                     |
+//| - authorize live trading                                          |
+//| - bypass Risk Engine                                               |
+//| - bypass Emergency Stop                                            |
 //+------------------------------------------------------------------+
-#property strict
 
-#ifndef RAYMOND_EXECUTION_MQH
-#define RAYMOND_EXECUTION_MQH
-
-#include <Trade/Trade.mqh>
+#ifndef __RAYMOND_BRIDGE_MQH__
+#define __RAYMOND_BRIDGE_MQH__
 
 // -------------------------------------------------------------------
-// IMPORTANT SAFETY POLICY
-//
-// Step 11B-6 supports DEMO execution only.
-//
-// This layer:
-//   - works through the MT5 terminal
-//   - does not contain broker credentials
-//   - does not depend on Exness
-//   - supports BUY / SELL demo orders
-//   - validates volume, price and stops
-//   - verifies the resulting position
-//
-// LIVE TRADING IS HARD-LOCKED OFF.
-//
-// Do NOT remove the DEMO_ONLY guard until a separate live-trading
-// readiness stage has been completed and explicitly approved.
+// Safety constants
 // -------------------------------------------------------------------
 
-class RaymondExecution
+#define RAYMOND_BRIDGE_VERSION "0.2.0"
+#define RAYMOND_BRIDGE_MODE    "READ_ONLY"
+
+// -------------------------------------------------------------------
+// Bridge class
+// -------------------------------------------------------------------
+
+class RaymondBridge
 {
 private:
 
-   CTrade m_trade;
+   string m_base_url;
+   string m_telemetry_path;
+   string m_decision_path;
+   int    m_timeout_ms;
 
-   bool m_demo_only;
-   bool m_live_trading_enabled;
+   bool   m_enabled;
 
-   double m_max_spread;
-   int m_deviation_points;
-
+   bool   m_last_success;
+   int    m_last_http_code;
    string m_last_error;
-   ulong m_last_ticket;
 
-public:
+   string m_last_ai_action;
+   double m_last_ai_confidence;
+   string m_last_ai_response;
 
-   RaymondExecution()
+   // ---------------------------------------------------------------
+   // Escape JSON string characters
+   // ---------------------------------------------------------------
+   string JsonEscape(string value)
    {
-      m_demo_only = true;
-      m_live_trading_enabled = false;
+      StringReplace(value, "\\", "\\\\");
+      StringReplace(value, "\"", "\\\"");
+      StringReplace(value, "\r", "\\r");
+      StringReplace(value, "\n", "\\n");
+      StringReplace(value, "\t", "\\t");
 
-      // Conservative default.
-      // Broker-specific testing can adjust this later.
-      m_max_spread = 1.00;
-
-      m_deviation_points = 50;
-
-      m_last_error = "";
-      m_last_ticket = 0;
+      return value;
    }
 
    // ---------------------------------------------------------------
-   // CONFIGURATION
+   // Build telemetry URL
    // ---------------------------------------------------------------
+   string BuildTelemetryUrl()
+   {
+      string base = m_base_url;
 
-   void Configure(
-      double max_spread,
-      int deviation_points
+      while(StringLen(base) > 0 &&
+            StringSubstr(base, StringLen(base) - 1, 1) == "/")
+      {
+         base = StringSubstr(base, 0, StringLen(base) - 1);
+      }
+
+      string path = m_telemetry_path;
+
+      if(StringLen(path) == 0)
+         path = "/api/mt5/telemetry";
+
+      if(StringSubstr(path, 0, 1) != "/")
+         path = "/" + path;
+
+      return base + path;
+   }
+
+   // ---------------------------------------------------------------
+   // Build AI decision URL
+   // ---------------------------------------------------------------
+   string BuildDecisionUrl(
+      string symbol,
+      string timeframe,
+      int limit
    )
    {
-      if(max_spread > 0.0)
-         m_max_spread = max_spread;
+      string base = m_base_url;
 
-      if(deviation_points > 0)
-         m_deviation_points = deviation_points;
+      while(StringLen(base) > 0 &&
+            StringSubstr(base, StringLen(base) - 1, 1) == "/")
+      {
+         base = StringSubstr(base, 0, StringLen(base) - 1);
+      }
 
-      m_trade.SetDeviationInPoints(
-         m_deviation_points
+      string path = m_decision_path;
+
+      if(StringLen(path) == 0)
+         path = "/api/mt5/decision";
+
+      if(StringSubstr(path, 0, 1) != "/")
+         path = "/" + path;
+
+      string encoded_symbol = symbol;
+
+      StringReplace(encoded_symbol, " ", "%20");
+
+      string url =
+         base +
+         path +
+         "?symbol=" +
+         encoded_symbol +
+         "&timeframe=" +
+         timeframe +
+         "&limit=" +
+         IntegerToString(limit);
+
+      return url;
+   }
+
+   // ---------------------------------------------------------------
+   // Convert UTF-8 string to byte array
+   // ---------------------------------------------------------------
+   void StringToUtf8Bytes(
+      string text,
+      uchar &data[]
+   )
+   {
+      ArrayResize(data, 0);
+
+      if(StringLen(text) == 0)
+         return;
+
+      StringToCharArray(
+         text,
+         data,
+         0,
+         WHOLE_ARRAY,
+         CP_UTF8
+      );
+
+      int size = ArraySize(data);
+
+      if(size > 0 && data[size - 1] == 0)
+         ArrayResize(data, size - 1);
+   }
+
+   // ---------------------------------------------------------------
+   // Convert response bytes to string
+   // ---------------------------------------------------------------
+   string BytesToString(
+      uchar &data[]
+   )
+   {
+      int size = ArraySize(data);
+
+      if(size <= 0)
+         return "";
+
+      return CharArrayToString(
+         data,
+         0,
+         size,
+         CP_UTF8
       );
    }
 
    // ---------------------------------------------------------------
-   // ABSOLUTE LIVE-TRADING LOCK
+   // Extract a JSON string field
+   //
+   // This is intentionally lightweight. We only consume the
+   // read-only fields needed by the EA.
    // ---------------------------------------------------------------
-
-   void SetLiveTradingEnabled(bool enabled)
+   string ExtractJsonString(
+      string json,
+      string key,
+      string default_value = ""
+   )
    {
-      // Step 11B-6 NEVER enables live trading.
-      m_live_trading_enabled = false;
+      string pattern = "\"" + key + "\"";
+
+      int key_pos = StringFind(
+         json,
+         pattern
+      );
+
+      if(key_pos < 0)
+         return default_value;
+
+      int colon_pos = StringFind(
+         json,
+         ":",
+         key_pos + StringLen(pattern)
+      );
+
+      if(colon_pos < 0)
+         return default_value;
+
+      int quote_start = StringFind(
+         json,
+         "\"",
+         colon_pos + 1
+      );
+
+      if(quote_start < 0)
+         return default_value;
+
+      int quote_end = StringFind(
+         json,
+         "\"",
+         quote_start + 1
+      );
+
+      if(quote_end < 0)
+         return default_value;
+
+      return StringSubstr(
+         json,
+         quote_start + 1,
+         quote_end - quote_start - 1
+      );
    }
 
-   bool LiveTradingEnabled()
+   // ---------------------------------------------------------------
+   // Extract a JSON numeric field
+   // ---------------------------------------------------------------
+   double ExtractJsonDouble(
+      string json,
+      string key,
+      double default_value = 0.0
+   )
    {
-      return false;
+      string pattern = "\"" + key + "\"";
+
+      int key_pos = StringFind(
+         json,
+         pattern
+      );
+
+      if(key_pos < 0)
+         return default_value;
+
+      int colon_pos = StringFind(
+         json,
+         ":",
+         key_pos + StringLen(pattern)
+      );
+
+      if(colon_pos < 0)
+         return default_value;
+
+      int start = colon_pos + 1;
+
+      while(
+         start < StringLen(json) &&
+         (
+            StringSubstr(json, start, 1) == " " ||
+            StringSubstr(json, start, 1) == "\t" ||
+            StringSubstr(json, start, 1) == "\r" ||
+            StringSubstr(json, start, 1) == "\n"
+         )
+      )
+      {
+         start++;
+      }
+
+      int end = start;
+
+      while(end < StringLen(json))
+      {
+         string character =
+            StringSubstr(json, end, 1);
+
+         if(
+            character == "," ||
+            character == "}" ||
+            character == "]" ||
+            character == " "
+         )
+         {
+            break;
+         }
+
+         end++;
+      }
+
+      string number_text =
+         StringSubstr(
+            json,
+            start,
+            end - start
+         );
+
+      if(StringLen(number_text) == 0)
+         return default_value;
+
+      return StringToDouble(
+         number_text
+      );
    }
 
-   bool DemoOnly()
+public:
+
+   // ---------------------------------------------------------------
+   // Constructor
+   // ---------------------------------------------------------------
+   RaymondBridge()
    {
-      return true;
+      m_base_url       = "";
+      m_telemetry_path = "/api/mt5/telemetry";
+      m_decision_path  = "/api/mt5/decision";
+      m_timeout_ms     = 5000;
+
+      m_enabled        = false;
+
+      m_last_success   = false;
+      m_last_http_code = 0;
+      m_last_error     = "";
+
+      m_last_ai_action      = "HOLD/WAIT";
+      m_last_ai_confidence  = 0.0;
+      m_last_ai_response    = "";
    }
 
    // ---------------------------------------------------------------
-   // ERROR / RESULT INFORMATION
+   // Configure bridge
    // ---------------------------------------------------------------
+   void Configure(
+      string base_url,
+      string telemetry_path = "/api/mt5/telemetry",
+      int timeout_ms = 5000
+   )
+   {
+      m_base_url       = base_url;
+      m_telemetry_path = telemetry_path;
+      m_decision_path  = "/api/mt5/decision";
+      m_timeout_ms     = timeout_ms;
 
+      m_last_success   = false;
+      m_last_http_code = 0;
+      m_last_error     = "";
+
+      m_last_ai_action     = "HOLD/WAIT";
+      m_last_ai_confidence = 0.0;
+      m_last_ai_response   = "";
+
+      if(StringLen(m_base_url) > 0)
+         m_enabled = true;
+      else
+         m_enabled = false;
+   }
+
+   // ---------------------------------------------------------------
+   // Enable / disable bridge
+   // ---------------------------------------------------------------
+   void SetEnabled(bool enabled)
+   {
+      m_enabled = enabled;
+   }
+
+   // ---------------------------------------------------------------
+   // Check whether bridge is configured
+   // ---------------------------------------------------------------
+   bool IsConfigured()
+   {
+      return (
+         m_enabled &&
+         StringLen(m_base_url) > 0
+      );
+   }
+
+   // ---------------------------------------------------------------
+   // Last request successful?
+   // ---------------------------------------------------------------
+   bool LastRequestSucceeded()
+   {
+      return m_last_success;
+   }
+
+   // ---------------------------------------------------------------
+   // Last HTTP response code
+   // ---------------------------------------------------------------
+   int LastHttpCode()
+   {
+      return m_last_http_code;
+   }
+
+   // ---------------------------------------------------------------
+   // Last error message
+   // ---------------------------------------------------------------
    string LastError()
    {
       return m_last_error;
    }
 
-   ulong LastTicket()
+   // ---------------------------------------------------------------
+   // Last AI action
+   // ---------------------------------------------------------------
+   string LastAIAction()
    {
-      return m_last_ticket;
-   }
-
-   void ClearResult()
-   {
-      m_last_error = "";
-      m_last_ticket = 0;
+      return m_last_ai_action;
    }
 
    // ---------------------------------------------------------------
-   // ACCOUNT SAFETY
+   // Last AI confidence
    // ---------------------------------------------------------------
+   double LastAIConfidence()
+   {
+      return m_last_ai_confidence;
+   }
 
-   bool ValidateDemoAccount(
-      string &reason
+   // ---------------------------------------------------------------
+   // Last AI response
+   // ---------------------------------------------------------------
+   string LastAIResponse()
+   {
+      return m_last_ai_response;
+   }
+
+   // ---------------------------------------------------------------
+   // Send telemetry to Raymond backend
+   // ---------------------------------------------------------------
+   bool SendTelemetry(
+      string symbol,
+      double bid,
+      double ask,
+      double balance,
+      double equity,
+      double margin,
+      double free_margin,
+      int open_positions
    )
    {
-      ENUM_ACCOUNT_TRADE_MODE mode =
-         (ENUM_ACCOUNT_TRADE_MODE)
-         AccountInfoInteger(
-            ACCOUNT_TRADE_MODE
+      m_last_success   = false;
+      m_last_http_code = 0;
+      m_last_error     = "";
+
+      // -------------------------------------------------------------
+      // HARD SAFETY CHECK
+      // -------------------------------------------------------------
+      // Telemetry remains read-only.
+      // -------------------------------------------------------------
+
+      if(!IsConfigured())
+      {
+         m_last_error =
+            "Raymond bridge is not configured.";
+
+         Print(
+            "RAYMOND BRIDGE | ",
+            m_last_error
          );
 
-      // Only demo accounts are accepted.
-      if(mode != ACCOUNT_TRADE_MODE_DEMO)
-      {
-         reason =
-            "Execution blocked: MT5 account is not DEMO.";
-
          return false;
       }
 
-      reason =
-         "MT5 DEMO account validated.";
+      // -------------------------------------------------------------
+      // Build JSON payload
+      // -------------------------------------------------------------
 
-      return true;
-   }
+      string json = "{";
 
-   // ---------------------------------------------------------------
-   // SYMBOL VALIDATION
-   // ---------------------------------------------------------------
+      json += "\"bridge_version\":\"";
+      json += RAYMOND_BRIDGE_VERSION;
+      json += "\",";
 
-   bool ValidateSymbol(
-      string symbol,
-      string &reason
-   )
-   {
-      if(symbol == "")
-      {
-         reason = "Symbol is empty.";
-         return false;
-      }
+      json += "\"mode\":\"";
+      json += RAYMOND_BRIDGE_MODE;
+      json += "\",";
 
-      if(!SymbolSelect(symbol, true))
-      {
-         reason =
-            "Unable to select requested symbol.";
+      json += "\"trading_enabled\":false,";
 
-         return false;
-      }
+      json += "\"symbol\":\"";
+      json += JsonEscape(symbol);
+      json += "\",";
 
-      bool exists =
-         (bool)SymbolInfoInteger(
-            symbol,
-            SYMBOL_EXIST
-         );
+      json += "\"bid\":";
+      json += DoubleToString(bid, 8);
+      json += ",";
 
-      if(!exists)
-      {
-         reason =
-            "Requested symbol does not exist.";
+      json += "\"ask\":";
+      json += DoubleToString(ask, 8);
+      json += ",";
 
-         return false;
-      }
+      json += "\"spread\":";
+      json += DoubleToString(ask - bid, 8);
+      json += ",";
 
-      reason =
-         "Symbol validated.";
+      json += "\"balance\":";
+      json += DoubleToString(balance, 2);
+      json += ",";
 
-      return true;
-   }
+      json += "\"equity\":";
+      json += DoubleToString(equity, 2);
+      json += ",";
 
-   // ---------------------------------------------------------------
-   // QUOTE VALIDATION
-   // ---------------------------------------------------------------
+      json += "\"margin\":";
+      json += DoubleToString(margin, 2);
+      json += ",";
 
-   bool ValidateQuote(
-      string symbol,
-      double &bid,
-      double &ask,
-      string &reason
-   )
-   {
-      bid = SymbolInfoDouble(
-         symbol,
-         SYMBOL_BID
+      json += "\"free_margin\":";
+      json += DoubleToString(free_margin, 2);
+      json += ",";
+
+      json += "\"open_positions\":";
+      json += IntegerToString(open_positions);
+      json += ",";
+
+      json += "\"timestamp\":";
+      json += IntegerToString(
+         (int)TimeCurrent()
       );
 
-      ask = SymbolInfoDouble(
-         symbol,
-         SYMBOL_ASK
+      json += "}";
+
+      uchar request_data[];
+
+      StringToUtf8Bytes(
+         json,
+         request_data
       );
 
-      if(bid <= 0.0)
+      uchar response_data[];
+      string response_headers;
+
+      string headers =
+         "Content-Type: application/json\r\n"
+         "Accept: application/json\r\n"
+         "X-Raymond-Bridge: " +
+         RAYMOND_BRIDGE_VERSION +
+         "\r\n"
+         "X-Raymond-Mode: READ_ONLY\r\n";
+
+      string url =
+         BuildTelemetryUrl();
+
+      ResetLastError();
+
+      int http_code = WebRequest(
+         "POST",
+         url,
+         headers,
+         m_timeout_ms,
+         request_data,
+         response_data,
+         response_headers
+      );
+
+      m_last_http_code = http_code;
+
+      if(http_code == -1)
       {
-         reason = "Invalid bid.";
-         return false;
-      }
+         int error_code = GetLastError();
 
-      if(ask <= 0.0)
-      {
-         reason = "Invalid ask.";
-         return false;
-      }
-
-      if(ask < bid)
-      {
-         reason =
-            "Ask is below bid.";
-
-         return false;
-      }
-
-      double spread =
-         ask - bid;
-
-      if(spread > m_max_spread)
-      {
-         reason =
-            "Spread exceeds configured safety limit.";
-
-         return false;
-      }
-
-      reason =
-         "Quote validated.";
-
-      return true;
-   }
-
-   // ---------------------------------------------------------------
-   // VOLUME VALIDATION
-   // ---------------------------------------------------------------
-
-   bool ValidateVolume(
-      string symbol,
-      double volume,
-      string &reason
-   )
-   {
-      if(volume <= 0.0)
-      {
-         reason =
-            "Volume must be greater than zero.";
-
-         return false;
-      }
-
-      double minimum =
-         SymbolInfoDouble(
-            symbol,
-            SYMBOL_VOLUME_MIN
-         );
-
-      double maximum =
-         SymbolInfoDouble(
-            symbol,
-            SYMBOL_VOLUME_MAX
-         );
-
-      double step =
-         SymbolInfoDouble(
-            symbol,
-            SYMBOL_VOLUME_STEP
-         );
-
-      if(minimum <= 0.0)
-      {
-         reason =
-            "Broker returned invalid minimum volume.";
-
-         return false;
-      }
-
-      if(maximum <= 0.0)
-      {
-         reason =
-            "Broker returned invalid maximum volume.";
-
-         return false;
-      }
-
-      if(step <= 0.0)
-      {
-         reason =
-            "Broker returned invalid volume step.";
-
-         return false;
-      }
-
-      if(volume < minimum)
-      {
-         reason =
-            "Requested volume is below broker minimum.";
-
-         return false;
-      }
-
-      if(volume > maximum)
-      {
-         reason =
-            "Requested volume exceeds broker maximum.";
-
-         return false;
-      }
-
-      double normalized =
-         MathRound(
-            volume / step
-         ) * step;
-
-      double tolerance =
-         step * 0.0001;
-
-      if(
-         MathAbs(
-            normalized - volume
-         ) > tolerance
-      )
-      {
-         reason =
-            "Volume does not match broker volume step.";
-
-         return false;
-      }
-
-      reason =
-         "Volume validated.";
-
-      return true;
-   }
-
-   // ---------------------------------------------------------------
-   // STOP VALIDATION
-   // ---------------------------------------------------------------
-
-   bool ValidateStops(
-      string symbol,
-      ENUM_ORDER_TYPE order_type,
-      double entry_price,
-      double stop_loss,
-      double take_profit,
-      string &reason
-   )
-   {
-      int digits =
-         (int)SymbolInfoInteger(
-            symbol,
-            SYMBOL_DIGITS
-         );
-
-      double point =
-         SymbolInfoDouble(
-            symbol,
-            SYMBOL_POINT
-         );
-
-      if(point <= 0.0)
-      {
-         reason =
-            "Invalid symbol point size.";
-
-         return false;
-      }
-
-      double minimum_distance =
-         (double)SymbolInfoInteger(
-            symbol,
-            SYMBOL_TRADE_STOPS_LEVEL
-         ) * point;
-
-      if(stop_loss <= 0.0)
-      {
-         reason =
-            "Stop loss must be provided.";
-
-         return false;
-      }
-
-      if(take_profit <= 0.0)
-      {
-         reason =
-            "Take profit must be provided.";
-
-         return false;
-      }
-
-      if(order_type == ORDER_TYPE_BUY)
-      {
-         if(stop_loss >= entry_price)
-         {
-            reason =
-               "BUY stop loss must be below entry.";
-
-            return false;
-         }
-
-         if(take_profit <= entry_price)
-         {
-            reason =
-               "BUY take profit must be above entry.";
-
-            return false;
-         }
-
-         if(
-            minimum_distance > 0.0 &&
-            entry_price - stop_loss <
-            minimum_distance
-         )
-         {
-            reason =
-               "BUY stop loss is too close to entry.";
-
-            return false;
-         }
-
-         if(
-            minimum_distance > 0.0 &&
-            take_profit - entry_price <
-            minimum_distance
-         )
-         {
-            reason =
-               "BUY take profit is too close to entry.";
-
-            return false;
-         }
-      }
-      else if(order_type == ORDER_TYPE_SELL)
-      {
-         if(stop_loss <= entry_price)
-         {
-            reason =
-               "SELL stop loss must be above entry.";
-
-            return false;
-         }
-
-         if(take_profit >= entry_price)
-         {
-            reason =
-               "SELL take profit must be below entry.";
-
-            return false;
-         }
-
-         if(
-            minimum_distance > 0.0 &&
-            stop_loss - entry_price <
-            minimum_distance
-         )
-         {
-            reason =
-               "SELL stop loss is too close to entry.";
-
-            return false;
-         }
-
-         if(
-            minimum_distance > 0.0 &&
-            entry_price - take_profit <
-            minimum_distance
-         )
-         {
-            reason =
-               "SELL take profit is too close to entry.";
-
-            return false;
-         }
-      }
-      else
-      {
-         reason =
-            "Unsupported order type.";
-
-         return false;
-      }
-
-      // Normalize prices to broker precision.
-      entry_price =
-         NormalizeDouble(
-            entry_price,
-            digits
-         );
-
-      stop_loss =
-         NormalizeDouble(
-            stop_loss,
-            digits
-         );
-
-      take_profit =
-         NormalizeDouble(
-            take_profit,
-            digits
-         );
-
-      reason =
-         "Stops validated.";
-
-      return true;
-   }
-
-   // ---------------------------------------------------------------
-   // FINAL EXECUTION GATE
-   //
-   // This function requires every safety condition.
-   // ---------------------------------------------------------------
-
-   bool CanExecuteDemo(
-      string symbol,
-      ENUM_ORDER_TYPE order_type,
-      double volume,
-      double stop_loss,
-      double take_profit,
-      bool raymond_approved,
-      bool risk_approved,
-      bool emergency_stop,
-      bool execution_authorized,
-      bool live_trading_enabled,
-      string &reason
-   )
-   {
-      // Emergency stop has absolute priority.
-      if(emergency_stop)
-      {
-         reason =
-            "Execution blocked: Emergency Stop active.";
-
-         return false;
-      }
-
-      // Live trading must remain disabled.
-      if(live_trading_enabled)
-      {
-         reason =
-            "Execution blocked: live trading flag detected.";
-
-         return false;
-      }
-
-      // Internal live flag also remains disabled.
-      if(m_live_trading_enabled)
-      {
-         reason =
-            "Execution blocked: internal live trading flag.";
-
-         return false;
-      }
-
-      // Execution authorization must be false in this stage.
-      if(execution_authorized)
-      {
-         reason =
-            "Execution blocked: live execution authorization detected.";
-
-         return false;
-      }
-
-      // Raymond decision approval is required.
-      if(!raymond_approved)
-      {
-         reason =
-            "Execution blocked: Raymond approval missing.";
-
-         return false;
-      }
-
-      // Risk approval is mandatory.
-      if(!risk_approved)
-      {
-         reason =
-            "Execution blocked: Risk Engine approval missing.";
-
-         return false;
-      }
-
-      // Only DEMO accounts are permitted.
-      if(
-         !ValidateDemoAccount(
-            reason
-         )
-      )
-      {
-         return false;
-      }
-
-      // Validate symbol.
-      if(
-         !ValidateSymbol(
-            symbol,
-            reason
-         )
-      )
-      {
-         return false;
-      }
-
-      // Validate volume.
-      if(
-         !ValidateVolume(
-            symbol,
-            volume,
-            reason
-         )
-      )
-      {
-         return false;
-      }
-
-      // Validate quote.
-      double bid = 0.0;
-      double ask = 0.0;
-
-      if(
-         !ValidateQuote(
-            symbol,
-            bid,
-            ask,
-            reason
-         )
-      )
-      {
-         return false;
-      }
-
-      double entry_price;
-
-      if(order_type == ORDER_TYPE_BUY)
-         entry_price = ask;
-      else if(order_type == ORDER_TYPE_SELL)
-         entry_price = bid;
-      else
-      {
-         reason =
-            "Unsupported order type.";
-
-         return false;
-      }
-
-      // Validate SL / TP.
-      if(
-         !ValidateStops(
-            symbol,
-            order_type,
-            entry_price,
-            stop_loss,
-            take_profit,
-            reason
-         )
-      )
-      {
-         return false;
-      }
-
-      // ------------------------------------------------------------
-      // ABSOLUTE STEP 11B-6 DEMO GUARD
-      // ------------------------------------------------------------
-
-      if(!m_demo_only)
-      {
-         reason =
-            "Execution blocked: DEMO_ONLY guard failed.";
-
-         return false;
-      }
-
-      // This stage never permits live execution.
-      if(m_live_trading_enabled)
-      {
-         reason =
-            "Execution blocked: live trading is disabled.";
-
-         return false;
-      }
-
-      reason =
-         "All DEMO execution safety checks passed.";
-
-      return true;
-   }
-
-   // ---------------------------------------------------------------
-   // DEMO BUY
-   // ---------------------------------------------------------------
-
-   bool BuyDemo(
-      string symbol,
-      double volume,
-      double stop_loss,
-      double take_profit,
-      bool raymond_approved,
-      bool risk_approved,
-      bool emergency_stop,
-      bool execution_authorized,
-      bool live_trading_enabled
-   )
-   {
-      ClearResult();
-
-      string reason = "";
-
-      if(
-         !CanExecuteDemo(
-            symbol,
-            ORDER_TYPE_BUY,
-            volume,
-            stop_loss,
-            take_profit,
-            raymond_approved,
-            risk_approved,
-            emergency_stop,
-            execution_authorized,
-            live_trading_enabled,
-            reason
-         )
-      )
-      {
-         m_last_error = reason;
-         return false;
-      }
-
-      double ask =
-         SymbolInfoDouble(
-            symbol,
-            SYMBOL_ASK
-         );
-
-      if(ask <= 0.0)
-      {
          m_last_error =
-            "Invalid BUY execution price.";
+            "WebRequest failed. MQL5 error=" +
+            IntegerToString(error_code);
 
-         return false;
-      }
-
-      // DEMO ONLY.
-      bool result =
-         m_trade.Buy(
-            volume,
-            symbol,
-            ask,
-            stop_loss,
-            take_profit,
-            "Raymond DEMO BUY"
+         Print(
+            "RAYMOND BRIDGE | ",
+            m_last_error
          );
 
-      if(!result)
-      {
-         m_last_error =
-            m_trade.ResultRetcodeDescription();
-
          return false;
       }
 
-      m_last_ticket =
-         m_trade.ResultOrder();
+      string response_text =
+         BytesToString(response_data);
 
-      // Verify resulting position.
-      if(!VerifyPosition(
-         symbol,
-         POSITION_TYPE_BUY
-      ))
+      if(http_code >= 200 && http_code < 300)
       {
-         m_last_error =
-            "BUY order reported success but position verification failed.";
+         m_last_success = true;
 
-         return false;
-      }
-
-      return true;
-   }
-
-   // ---------------------------------------------------------------
-   // DEMO SELL
-   // ---------------------------------------------------------------
-
-   bool SellDemo(
-      string symbol,
-      double volume,
-      double stop_loss,
-      double take_profit,
-      bool raymond_approved,
-      bool risk_approved,
-      bool emergency_stop,
-      bool execution_authorized,
-      bool live_trading_enabled
-   )
-   {
-      ClearResult();
-
-      string reason = "";
-
-      if(
-         !CanExecuteDemo(
-            symbol,
-            ORDER_TYPE_SELL,
-            volume,
-            stop_loss,
-            take_profit,
-            raymond_approved,
-            risk_approved,
-            emergency_stop,
-            execution_authorized,
-            live_trading_enabled,
-            reason
-         )
-      )
-      {
-         m_last_error = reason;
-         return false;
-      }
-
-      double bid =
-         SymbolInfoDouble(
-            symbol,
-            SYMBOL_BID
+         PrintFormat(
+            "RAYMOND BRIDGE | Telemetry sent | HTTP=%d | Symbol=%s",
+            http_code,
+            symbol
          );
 
-      if(bid <= 0.0)
-      {
-         m_last_error =
-            "Invalid SELL execution price.";
-
-         return false;
-      }
-
-      // DEMO ONLY.
-      bool result =
-         m_trade.Sell(
-            volume,
-            symbol,
-            bid,
-            stop_loss,
-            take_profit,
-            "Raymond DEMO SELL"
-         );
-
-      if(!result)
-      {
-         m_last_error =
-            m_trade.ResultRetcodeDescription();
-
-         return false;
-      }
-
-      m_last_ticket =
-         m_trade.ResultOrder();
-
-      // Verify resulting position.
-      if(!VerifyPosition(
-         symbol,
-         POSITION_TYPE_SELL
-      ))
-      {
-         m_last_error =
-            "SELL order reported success but position verification failed.";
-
-         return false;
-      }
-
-      return true;
-   }
-
-   // ---------------------------------------------------------------
-   // POSITION VERIFICATION
-   // ---------------------------------------------------------------
-
-   bool VerifyPosition(
-      string symbol,
-      ENUM_POSITION_TYPE expected_type
-   )
-   {
-      for(
-         int i = PositionsTotal() - 1;
-         i >= 0;
-         i--
-      )
-      {
-         ulong ticket =
-            PositionGetTicket(i);
-
-         if(ticket == 0)
-            continue;
-
-         if(!PositionSelectByTicket(ticket))
-            continue;
-
-         string position_symbol =
-            PositionGetString(
-               POSITION_SYMBOL
+         if(StringLen(response_text) > 0)
+         {
+            Print(
+               "RAYMOND BRIDGE | Response: ",
+               response_text
             );
+         }
 
-         if(position_symbol != symbol)
-            continue;
+         return true;
+      }
 
-         ENUM_POSITION_TYPE type =
-            (ENUM_POSITION_TYPE)
-            PositionGetInteger(
-               POSITION_TYPE
-            );
+      m_last_error =
+         "Backend returned HTTP " +
+         IntegerToString(http_code);
 
-         if(type == expected_type)
-            return true;
+      Print(
+         "RAYMOND BRIDGE | ",
+         m_last_error
+      );
+
+      if(StringLen(response_text) > 0)
+      {
+         Print(
+            "RAYMOND BRIDGE | Error response: ",
+            response_text
+         );
       }
 
       return false;
    }
 
    // ---------------------------------------------------------------
-   // EXECUTION STATUS
+   // Request AI decision from Raymond backend
+   // ---------------------------------------------------------------
+   //
+   // IMPORTANT:
+   //
+   // This method is READ ONLY.
+   //
+   // It asks the backend:
+   //
+   // MT5 market data
+   //      ↓
+   // indicators
+   //      ↓
+   // Raymond AI
+   //      ↓
+   // BUY / SELL / HOLD-WAIT
+   //
+   // It does NOT:
+   //
+   // - execute an order
+   // - authorize execution
+   // - modify a position
+   // - close a position
+   // - enable live trading
+   //
    // ---------------------------------------------------------------
 
-   string Status()
+   bool RequestAIDecision(
+      string symbol,
+      string timeframe,
+      int limit = 100
+   )
    {
-      string result =
-         "Raymond Execution: ";
+      m_last_success   = false;
+      m_last_http_code = 0;
+      m_last_error     = "";
 
-      result +=
-         "MT5";
+      m_last_ai_action     = "HOLD/WAIT";
+      m_last_ai_confidence = 0.0;
+      m_last_ai_response   = "";
 
-      result +=
-         " | Broker=Agnostic";
+      // -------------------------------------------------------------
+      // HARD SAFETY CHECK
+      // -------------------------------------------------------------
 
-      result +=
-         " | DEMO_ONLY=ON";
+      if(!IsConfigured())
+      {
+         m_last_error =
+            "Raymond bridge is not configured.";
 
-      result +=
-         " | LiveTrading=OFF";
+         Print(
+            "RAYMOND AI | ",
+            m_last_error
+         );
 
-      result +=
-         " | Credentials=External";
+         return false;
+      }
 
-      return result;
+      // Never permit an invalid candle request.
+      if(limit < 60)
+         limit = 60;
+
+      if(limit > 500)
+         limit = 500;
+
+      string url =
+         BuildDecisionUrl(
+            symbol,
+            timeframe,
+            limit
+         );
+
+      uchar request_data[];
+      uchar response_data[];
+      string response_headers;
+
+      // -------------------------------------------------------------
+      // READ-ONLY HTTP GET
+      // -------------------------------------------------------------
+      //
+      // Empty request body.
+      // No broker command is sent.
+      // -------------------------------------------------------------
+
+      ArrayResize(
+         request_data,
+         0
+      );
+
+      string headers =
+         "Accept: application/json\r\n"
+         "X-Raymond-Bridge: " +
+         RAYMOND_BRIDGE_VERSION +
+         "\r\n"
+         "X-Raymond-Mode: READ_ONLY\r\n";
+
+      ResetLastError();
+
+      int http_code = WebRequest(
+         "GET",
+         url,
+         headers,
+         m_timeout_ms,
+         request_data,
+         response_data,
+         response_headers
+      );
+
+      m_last_http_code = http_code;
+
+      if(http_code == -1)
+      {
+         int error_code = GetLastError();
+
+         m_last_error =
+            "AI decision WebRequest failed. MQL5 error=" +
+            IntegerToString(error_code);
+
+         Print(
+            "RAYMOND AI | ",
+            m_last_error
+         );
+
+         return false;
+      }
+
+      string response_text =
+         BytesToString(response_data);
+
+      m_last_ai_response =
+         response_text;
+
+      // -------------------------------------------------------------
+      // HTTP failure
+      // -------------------------------------------------------------
+
+      if(http_code < 200 || http_code >= 300)
+      {
+         m_last_error =
+            "AI decision backend returned HTTP " +
+            IntegerToString(http_code);
+
+         Print(
+            "RAYMOND AI | ",
+            m_last_error
+         );
+
+         if(StringLen(response_text) > 0)
+         {
+            Print(
+               "RAYMOND AI | Response: ",
+               response_text
+            );
+         }
+
+         // Fail closed.
+         m_last_ai_action =
+            "HOLD/WAIT";
+
+         m_last_ai_confidence =
+            0.0;
+
+         return false;
+      }
+
+      // -------------------------------------------------------------
+      // Parse only the read-only decision fields.
+      // -------------------------------------------------------------
+
+      string direction =
+         ExtractJsonString(
+            response_text,
+            "direction",
+            ""
+         );
+
+      string action =
+         ExtractJsonString(
+            response_text,
+            "action",
+            ""
+         );
+
+      double confidence =
+         ExtractJsonDouble(
+            response_text,
+            "confidence",
+            0.0
+         );
+
+      // -------------------------------------------------------------
+      // Normalize action.
+      // -------------------------------------------------------------
+
+      if(
+         action != "BUY" &&
+         action != "SELL" &&
+         action != "HOLD/WAIT"
+      )
+      {
+         if(
+            direction == "BUY" ||
+            direction == "SELL"
+         )
+         {
+            action = direction;
+         }
+         else
+         {
+            action = "HOLD/WAIT";
+         }
+      }
+
+      // -------------------------------------------------------------
+      // SAFETY: only accept known AI actions.
+      // -------------------------------------------------------------
+
+      if(
+         action != "BUY" &&
+         action != "SELL" &&
+         action != "HOLD/WAIT"
+      )
+      {
+         action = "HOLD/WAIT";
+         confidence = 0.0;
+      }
+
+      // -------------------------------------------------------------
+      // SAFETY: confidence must be sane.
+      // -------------------------------------------------------------
+
+      if(
+         confidence < 0.0 ||
+         confidence > 100.0
+      )
+      {
+         confidence = 0.0;
+      }
+
+      m_last_ai_action =
+         action;
+
+      m_last_ai_confidence =
+         confidence;
+
+      m_last_success = true;
+
+      PrintFormat(
+         "RAYMOND AI | READ_ONLY | Symbol=%s | TF=%s | Action=%s | Confidence=%.2f",
+         symbol,
+         timeframe,
+         action,
+         confidence
+      );
+
+      return true;
    }
 };
 
 #endif
+
+//+------------------------------------------------------------------+
+//| End of RaymondBridge.mqh                                         |
+//+------------------------------------------------------------------+
