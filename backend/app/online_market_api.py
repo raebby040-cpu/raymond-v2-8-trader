@@ -55,9 +55,11 @@ router = APIRouter(
 
 _ai = AITradingDecisionEngine()
 
-_YAHOO_BASE = (
-    "https://query1.finance.yahoo.com/v8/finance/chart"
-)
+# ---------------------------------------------------------------------------
+# BiQuote public market-data API
+# ---------------------------------------------------------------------------
+
+_BIQUOTE_BASE = "https://biquote.io/api"
 
 _INTERVALS = {
     "M1": "1m",
@@ -65,18 +67,8 @@ _INTERVALS = {
     "M15": "15m",
     "M30": "30m",
     "H1": "1h",
-    "H4": "1h",
+    "H4": "4h",
     "D1": "1d",
-}
-
-_RANGES = {
-    "M1": "1d",
-    "M5": "5d",
-    "M15": "10d",
-    "M30": "1mo",
-    "H1": "3mo",
-    "H4": "6mo",
-    "D1": "2y",
 }
 
 
@@ -86,7 +78,7 @@ def _utc() -> str:
 
 
 def _ticker(symbol: str) -> str:
-    """Convert a Raymond symbol into the public feed symbol."""
+    """Convert a Raymond symbol into the BiQuote symbol."""
     normalized = symbol.strip().upper()
 
     if normalized in {
@@ -94,7 +86,7 @@ def _ticker(symbol: str) -> str:
         "XAU/USD",
         "GOLD",
     }:
-        return "XAUUSD=X"
+        return "XAUUSD"
 
     raise HTTPException(
         status_code=400,
@@ -108,12 +100,88 @@ def _ticker(symbol: str) -> str:
     )
 
 
+def _bar_timestamp(value: Any) -> int:
+    """Convert an ISO timestamp into Unix seconds."""
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    if not isinstance(value, str):
+        raise ValueError("Invalid candle timestamp")
+
+    normalized = value.strip()
+
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+
+    parsed = datetime.fromisoformat(normalized)
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return int(parsed.timestamp())
+
+
+async def _fetch_price(symbol: str) -> dict[str, Any]:
+    """Fetch the latest XAUUSD price from BiQuote."""
+
+    ticker = _ticker(symbol)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers={
+                "User-Agent": "RAYMOND-v2.8/online-market",
+                "Accept": "application/json",
+            },
+        ) as client:
+            response = await client.get(
+                f"{_BIQUOTE_BASE}/{ticker}",
+            )
+
+            response.raise_for_status()
+            payload = response.json()
+
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Online market price unavailable",
+                "message": str(exc),
+                "timestamp": _utc(),
+            },
+        ) from exc
+
+    price = payload.get("mid")
+
+    if price is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Online market feed returned no price",
+                "timestamp": _utc(),
+            },
+        )
+
+    return {
+        "symbol": "XAUUSD",
+        "price": float(price),
+        "source": "BiQuote public MT5 reference feed",
+        "source_type": "public_reference_feed",
+        "market_timestamp": payload.get("timestamp"),
+        "market_state": payload.get("marketState"),
+        "stale": bool(payload.get("stale", False)),
+        "quote_age_seconds": payload.get("quoteAgeSeconds"),
+        "timestamp": _utc(),
+        "live_trading_enabled": False,
+    }
+
+
 async def _fetch_chart(
     symbol: str,
     timeframe: str,
     limit: int,
 ) -> dict[str, Any]:
-    """Fetch public XAUUSD candles."""
+    """Fetch public XAUUSD candles from BiQuote."""
 
     normalized_timeframe = timeframe.strip().upper()
 
@@ -130,24 +198,25 @@ async def _fetch_chart(
 
     ticker = _ticker(symbol)
 
+    # Request enough bars for technical calculations.
+    request_limit = max(limit, 100)
+
     params = {
         "interval": interval,
-        "range": _RANGES[normalized_timeframe],
-        "events": "history",
+        "limit": min(request_limit, 1000),
     }
 
     try:
         async with httpx.AsyncClient(
             timeout=10.0,
             headers={
-                "User-Agent": (
-                    "RAYMOND-v2.8/online-market"
-                )
+                "User-Agent": "RAYMOND-v2.8/online-market",
+                "Accept": "application/json",
             },
         ) as client:
 
             response = await client.get(
-                f"{_YAHOO_BASE}/{ticker}",
+                f"{_BIQUOTE_BASE}/{ticker}/ohlc",
                 params=params,
             )
 
@@ -164,93 +233,63 @@ async def _fetch_chart(
             },
         ) from exc
 
-    chart = payload.get("chart") or {}
+    bars = payload.get("bars") or []
 
-    results = chart.get("result") or []
-
-    result = results[0] if results else None
-
-    if not result:
+    if not bars:
         raise HTTPException(
             status_code=503,
             detail={
                 "error": (
                     "Online market feed returned "
-                    "no data"
+                    "no candle data"
                 ),
                 "timestamp": _utc(),
             },
         )
 
-    timestamps = result.get("timestamp") or []
-
-    indicators = result.get("indicators") or {}
-
-    quote_list = indicators.get("quote") or []
-
-    quote = quote_list[0] if quote_list else {}
-
-    opens = quote.get("open") or []
-    highs = quote.get("high") or []
-    lows = quote.get("low") or []
-    closes = quote.get("close") or []
-    volumes = quote.get("volume") or []
-
     candles: list[dict[str, Any]] = []
 
-    for index, timestamp in enumerate(timestamps):
+    for bar in bars:
+        try:
+            open_price = bar.get("open")
+            high_price = bar.get("high")
+            low_price = bar.get("low")
+            close_price = bar.get("close")
 
-        open_price = (
-            opens[index]
-            if index < len(opens)
-            else None
-        )
+            if any(
+                value is None
+                for value in (
+                    open_price,
+                    high_price,
+                    low_price,
+                    close_price,
+                )
+            ):
+                continue
 
-        high_price = (
-            highs[index]
-            if index < len(highs)
-            else None
-        )
-
-        low_price = (
-            lows[index]
-            if index < len(lows)
-            else None
-        )
-
-        close_price = (
-            closes[index]
-            if index < len(closes)
-            else None
-        )
-
-        if any(
-            value is None
-            for value in (
-                open_price,
-                high_price,
-                low_price,
-                close_price,
+            candles.append(
+                {
+                    "time": _bar_timestamp(
+                        bar.get("openTime")
+                    ),
+                    "open": float(open_price),
+                    "high": float(high_price),
+                    "low": float(low_price),
+                    "close": float(close_price),
+                    "volume": float(
+                        bar.get("volume")
+                        or bar.get("tickVolume")
+                        or 0
+                    ),
+                }
             )
-        ):
+
+        except (TypeError, ValueError):
             continue
 
-        volume = (
-            volumes[index]
-            if index < len(volumes)
-            else 0
-        )
-
-        candles.append(
-            {
-                "time": int(timestamp),
-                "open": float(open_price),
-                "high": float(high_price),
-                "low": float(low_price),
-                "close": float(close_price),
-                "volume": float(volume or 0),
-            }
-        )
+    # BiQuote returns newest-first.
+    # Raymond's indicator engine expects chronological order.
+    candles.sort(key=lambda candle: candle["time"])
 
     candles = candles[-limit:]
 
@@ -266,12 +305,8 @@ async def _fetch_chart(
             },
         )
 
-    meta = result.get("meta") or {}
-
-    price = meta.get("regularMarketPrice")
-
-    if price is None:
-        price = candles[-1]["close"]
+    # The latest candle close is the fallback price.
+    price = candles[-1]["close"]
 
     return {
         "symbol": "XAUUSD",
@@ -279,14 +314,10 @@ async def _fetch_chart(
         "timeframe": normalized_timeframe,
         "price": float(price),
         "candles": candles,
-        "source": (
-            "Yahoo Finance public chart feed"
-        ),
+        "source": "BiQuote public MT5 reference feed",
         "source_type": "public_reference_feed",
         "timestamp": _utc(),
-        "market_timestamp": meta.get(
-            "regularMarketTime"
-        ),
+        "market_timestamp": None,
         "live_trading_allowed": False,
     }
 
@@ -367,13 +398,15 @@ async def online_status():
         "online": True,
         "market_feed": True,
         "market_feed_source": (
-            "Yahoo Finance public chart feed"
+            "BiQuote public MT5 reference feed"
         ),
         "mt5_connected": mt5_connected,
         "paper_trading_enabled": True,
         "demo_trading_enabled": True,
 
-        # Safety lock.
+        # ---------------------------------------------------------------
+        # SAFETY LOCK — LIVE TRADING IS PERMANENTLY DISABLED HERE.
+        # ---------------------------------------------------------------
         "live_trading_enabled": False,
         "execution_authorized": False,
         "broker_orders_allowed": False,
@@ -400,20 +433,19 @@ async def online_price(
 ):
     """Return the latest available online XAUUSD price."""
 
-    data = await _fetch_chart(
-        symbol,
-        "M15",
-        60,
-    )
+    data = await _fetch_price(symbol)
 
     return {
         "symbol": data["symbol"],
         "price": data["price"],
         "source": data["source"],
         "source_type": data["source_type"],
-        "market_timestamp": (
-            data["market_timestamp"]
-        ),
+        "market_timestamp": data["market_timestamp"],
+        "market_state": data["market_state"],
+        "stale": data["stale"],
+        "quote_age_seconds": data[
+            "quote_age_seconds"
+        ],
         "timestamp": data["timestamp"],
 
         # Safety lock.
