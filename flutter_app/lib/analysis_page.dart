@@ -1,46 +1,40 @@
 import 'package:flutter/material.dart';
-
 import 'api_service.dart';
 
 class AnalysisPage extends StatefulWidget {
+  final ApiService api;
+
   const AnalysisPage({
     super.key,
     required this.api,
   });
-
-  final ApiService api;
 
   @override
   State<AnalysisPage> createState() => _AnalysisPageState();
 }
 
 class _AnalysisPageState extends State<AnalysisPage> {
-  static const gold = Color(0xFFF5B82E);
-  static const green = Color(0xFF00E59B);
-  static const red = Color(0xFFFF5C6C);
-  static const card = Color(0xFF091724);
-  static const border = Color(0xFF17334D);
-  static const muted = Color(0xFF8EA4B8);
-
   bool loading = true;
-  String errorMessage = '';
+  String? error;
 
   String symbol = 'XAUUSD';
-  String timeframe = 'H1';
+  String timeframe = 'M15';
 
-  double close = 0;
-  double ema20 = 0;
-  double ema50 = 0;
-  double rsi14 = 0;
-  double atr14 = 0;
-  double macd = 0;
-  double macdSignal = 0;
-  double macdHistogram = 0;
+  double close = 0.0;
+  double rsi = 0.0;
+  double macd = 0.0;
+  double macdSignal = 0.0;
+  double ema20 = 0.0;
+  double ema50 = 0.0;
+  double atr = 0.0;
 
   String trend = 'Neutral';
   String signal = 'WAIT';
-  int score = 50;
+  double score = 50.0;
   int candlesUsed = 0;
+
+  String reasoning = '';
+  String source = '';
 
   @override
   void initState() {
@@ -53,538 +47,577 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
     setState(() {
       loading = true;
-      errorMessage = '';
+      error = null;
     });
 
     try {
-      final data = await widget.api.marketIndicators(
+      final data = await widget.api.marketAnalysis(
         symbol: symbol,
+        timeframe: timeframe,
+        limit: 100,
       );
 
       if (!mounted) return;
 
+      final market = data['market'];
       final indicators = data['indicators'];
-      final analysis = data['analysis'];
+
+      final marketMap = market is Map
+          ? Map<String, dynamic>.from(market)
+          : <String, dynamic>{};
+
+      final indicatorsMap = indicators is Map
+          ? Map<String, dynamic>.from(indicators)
+          : <String, dynamic>{};
 
       setState(() {
-        symbol = '${data['symbol'] ?? symbol}';
-        timeframe = '${data['timeframe'] ?? timeframe}';
+        symbol = '${marketMap['symbol'] ?? symbol}';
+        timeframe = '${marketMap['timeframe'] ?? timeframe}';
 
-        close = _number(data['close']);
+        close = _number(marketMap['price']);
 
-        ema20 = _number(
-          indicators is Map ? indicators['ema20'] : null,
-        );
+        rsi = _number(indicatorsMap['rsi']);
+        macd = _number(indicatorsMap['macd']);
+        macdSignal = _number(indicatorsMap['macd_signal']);
+        ema20 = _number(indicatorsMap['ema20']);
+        ema50 = _number(indicatorsMap['ema50']);
+        atr = _number(indicatorsMap['atr']);
 
-        ema50 = _number(
-          indicators is Map ? indicators['ema50'] : null,
-        );
+        trend = '${data['trend'] ?? 'Neutral'}';
+        signal = '${data['signal'] ?? 'WAIT'}';
 
-        rsi14 = _number(
-          indicators is Map ? indicators['rsi14'] : null,
-        );
+        final scoreValue = data['technical_score'];
+        if (scoreValue is num) {
+          score = scoreValue.toDouble();
+        } else {
+          score = _number(indicatorsMap['score'], fallback: 50.0);
+        }
 
-        atr14 = _number(
-          indicators is Map ? indicators['atr14'] : null,
-        );
+        final candlesValue = indicatorsMap['candles_used'];
+        if (candlesValue is num) {
+          candlesUsed = candlesValue.toInt();
+        } else {
+          candlesUsed = 0;
+        }
 
-        macd = _number(
-          indicators is Map ? indicators['macd'] : null,
-        );
-
-        macdSignal = _number(
-          indicators is Map ? indicators['macd_signal'] : null,
-        );
-
-        macdHistogram = _number(
-          indicators is Map ? indicators['macd_histogram'] : null,
-        );
-
-        trend = analysis is Map
-            ? '${analysis['trend'] ?? 'Neutral'}'
-            : 'Neutral';
-
-        signal = analysis is Map
-            ? '${analysis['signal'] ?? 'WAIT'}'
-            : 'WAIT';
-
-        final scoreValue =
-            analysis is Map ? analysis['score'] : null;
-
-        score = scoreValue is num
-            ? scoreValue.toInt().clamp(0, 100)
-            : 50;
-
-        final candlesValue = data['candles_used'];
-
-        candlesUsed = candlesValue is num
-            ? candlesValue.toInt()
-            : 0;
+        reasoning = '${data['reasoning'] ?? ''}';
+        source = '${data['source'] ?? ''}';
 
         loading = false;
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
 
       setState(() {
         loading = false;
-        errorMessage = 'Unable to load market analysis';
+        error = 'Unable to load market analysis. Pull down to retry.';
       });
     }
   }
 
-  double _number(dynamic value) {
+  double _number(
+    dynamic value, {
+    double fallback = 0.0,
+  }) {
     if (value is num) {
       return value.toDouble();
     }
 
-    return 0;
+    if (value is String) {
+      return double.tryParse(value) ?? fallback;
+    }
+
+    return fallback;
   }
 
   Color _signalColor() {
     switch (signal.toUpperCase()) {
       case 'BUY':
-        return green;
+        return Colors.green;
       case 'SELL':
-        return red;
+        return Colors.red;
       default:
-        return gold;
+        return Colors.orange;
     }
   }
 
   Color _trendColor() {
     switch (trend.toLowerCase()) {
       case 'bullish':
-        return green;
+        return Colors.green;
       case 'bearish':
-        return red;
+        return Colors.red;
       default:
-        return gold;
+        return Colors.orange;
     }
+  }
+
+  String _formatNumber(double value, int decimals) {
+    return value.toStringAsFixed(decimals);
   }
 
   @override
   Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: _loadAnalysis,
-      child: SingleChildScrollView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(
-          16,
-          8,
-          16,
-          24,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Market Analysis'),
+        actions: [
+          IconButton(
+            onPressed: loading ? null : _loadAnalysis,
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh analysis',
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _loadAnalysis,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
           children: [
-            _pageHeader(),
+            _onlineBanner(),
 
-            const SizedBox(height: 14),
+            const SizedBox(height: 16),
 
-            if (errorMessage.isNotEmpty) _errorCard(),
-
-            _marketHeader(),
-
-            const SizedBox(height: 14),
-
-            _signalCard(),
-
-            const SizedBox(height: 14),
-
-            _indicatorCard(),
-
-            const SizedBox(height: 14),
-
-            _trendCard(),
-
-            const SizedBox(height: 14),
-
-            _safetyCard(),
+            if (loading) ...[
+              const SizedBox(height: 40),
+              const Center(
+                child: CircularProgressIndicator(),
+              ),
+              const SizedBox(height: 20),
+              const Center(
+                child: Text('Loading market analysis...'),
+              ),
+            ] else if (error != null) ...[
+              _errorCard(),
+            ] else ...[
+              _marketCard(),
+              const SizedBox(height: 12),
+              _signalCard(),
+              const SizedBox(height: 12),
+              _indicatorsCard(),
+              const SizedBox(height: 12),
+              _reasoningCard(),
+              const SizedBox(height: 12),
+              _dataCard(),
+              const SizedBox(height: 12),
+              _safetyCard(),
+            ],
           ],
         ),
       ),
     );
   }
 
-  Widget _pageHeader() {
-    return Row(
+  Widget _onlineBanner() {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 14,
+        vertical: 10,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.green.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Colors.green.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: const BoxDecoration(
+              color: Colors.green,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'ONLINE',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Colors.green,
+              ),
+            ),
+          ),
+          Text(
+            '$symbol • $timeframe',
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _marketCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Market',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: _valueTile(
+                    'Symbol',
+                    symbol,
+                  ),
+                ),
+                Expanded(
+                  child: _valueTile(
+                    'Timeframe',
+                    timeframe,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            _valueTile(
+              'Current Price',
+              _formatNumber(close, 2),
+              large: true,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _signalCard() {
+    final signalColor = _signalColor();
+    final trendColor = _trendColor();
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Trading Analysis',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: _analysisValue(
+                    'Trend',
+                    trend,
+                    trendColor,
+                  ),
+                ),
+                Expanded(
+                  child: _analysisValue(
+                    'Signal',
+                    signal,
+                    signalColor,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Technical Score',
+              style: TextStyle(
+                color: Theme.of(context)
+                    .textTheme
+                    .bodyMedium
+                    ?.color
+                    ?.withValues(alpha: 0.7),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: (score / 100).clamp(0.0, 1.0),
+                    minHeight: 10,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  '${score.toStringAsFixed(0)}/100',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _indicatorsCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Technical Indicators',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 14),
+            _indicatorRow(
+              'RSI',
+              _formatNumber(rsi, 2),
+            ),
+            _indicatorRow(
+              'MACD',
+              _formatNumber(macd, 4),
+            ),
+            _indicatorRow(
+              'MACD Signal',
+              _formatNumber(macdSignal, 4),
+            ),
+            _indicatorRow(
+              'EMA 20',
+              _formatNumber(ema20, 2),
+            ),
+            _indicatorRow(
+              'EMA 50',
+              _formatNumber(ema50, 2),
+            ),
+            _indicatorRow(
+              'ATR',
+              _formatNumber(atr, 4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _reasoningCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Analysis Reasoning',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              reasoning.isEmpty
+                  ? 'No additional reasoning was returned by the analysis engine.'
+                  : reasoning,
+              style: const TextStyle(
+                height: 1.5,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _dataCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Data',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _indicatorRow(
+              'Candles Used',
+              '$candlesUsed',
+            ),
+            if (source.isNotEmpty)
+              _indicatorRow(
+                'Market Source',
+                source,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _safetyCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  Icons.lock,
+                  color: Colors.green,
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'SAFE PAPER MODE',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'This analysis is read-only. Live broker order execution remains disabled.',
+              style: TextStyle(
+                height: 1.4,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _errorCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          children: [
+            const Icon(
+              Icons.error_outline,
+              size: 42,
+              color: Colors.red,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              error!,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 14),
+            ElevatedButton.icon(
+              onPressed: _loadAnalysis,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Retry'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _valueTile(
+    String label,
+    String value, {
+    bool large = false,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'MARKET ANALYSIS',
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1.0,
-                ),
-              ),
-              SizedBox(height: 3),
-              Text(
-                'Technical market intelligence',
-                style: TextStyle(
-                  color: muted,
-                  fontSize: 12,
-                ),
-              ),
-            ],
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            color: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.color
+                ?.withValues(alpha: 0.65),
           ),
         ),
-        IconButton(
-          tooltip: 'Refresh analysis',
-          onPressed: loading ? null : _loadAnalysis,
-          icon: const Icon(
-            Icons.refresh,
-            color: gold,
+        const SizedBox(height: 5),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: large ? 28 : 17,
+            fontWeight: FontWeight.bold,
           ),
         ),
       ],
     );
   }
 
-  Widget _marketHeader() {
-    return _card(
-      child: Row(
-        children: [
-          const Icon(
-            Icons.candlestick_chart,
-            color: gold,
-            size: 32,
+  Widget _analysisValue(
+    String label,
+    String value,
+    Color color,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.color
+                ?.withValues(alpha: 0.65),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  symbol,
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                Text(
-                  'Timeframe: $timeframe',
-                  style: const TextStyle(
-                    color: muted,
-                    fontSize: 13,
-                  ),
-                ),
-              ],
-            ),
+        ),
+        const SizedBox(height: 5),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.bold,
+            color: color,
           ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              const Text(
-                'PRICE',
-                style: TextStyle(
-                  color: muted,
-                  fontSize: 11,
-                ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                loading ? '--' : close.toStringAsFixed(2),
-                style: const TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _signalCard() {
-    final color = _signalColor();
-
-    return _card(
-      child: Column(
-        children: [
-          const Text(
-            'CURRENT SIGNAL',
-            style: TextStyle(
-              color: muted,
-              fontWeight: FontWeight.bold,
-              letterSpacing: .8,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            loading ? '--' : signal,
-            style: TextStyle(
-              color: color,
-              fontSize: 38,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 2,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Score: $score / 100',
-            style: const TextStyle(
-              color: muted,
-              fontSize: 14,
-            ),
-          ),
-          const SizedBox(height: 14),
-          LinearProgressIndicator(
-            value: score / 100.0,
-            minHeight: 7,
-            backgroundColor: border,
-            valueColor:
-                AlwaysStoppedAnimation<Color>(color),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _indicatorCard() {
-    return _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'TECHNICAL INDICATORS',
-            style: TextStyle(
-              color: gold,
-              fontWeight: FontWeight.bold,
-              letterSpacing: .8,
-            ),
-          ),
-          const SizedBox(height: 14),
-          _indicatorRow(
-            'EMA 20',
-            ema20,
-            close >= ema20,
-          ),
-          _indicatorRow(
-            'EMA 50',
-            ema50,
-            close >= ema50,
-          ),
-          _indicatorRow(
-            'RSI 14',
-            rsi14,
-            rsi14 >= 50,
-          ),
-          _indicatorRow(
-            'ATR 14',
-            atr14,
-            true,
-          ),
-          _indicatorRow(
-            'MACD',
-            macd,
-            macd >= macdSignal,
-          ),
-          _indicatorRow(
-            'MACD Signal',
-            macdSignal,
-            true,
-          ),
-          _indicatorRow(
-            'MACD Histogram',
-            macdHistogram,
-            macdHistogram >= 0,
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
   Widget _indicatorRow(
-    String name,
-    double value,
-    bool positive,
+    String label,
+    String value,
   ) {
-    final color = positive ? green : red;
-
-    final neutralIndicator =
-        name == 'ATR 14' || name == 'MACD Signal';
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(
-        horizontal: 12,
-        vertical: 11,
-      ),
-      decoration: BoxDecoration(
-        color: const Color(0xFF06111C),
-        borderRadius: BorderRadius.circular(10),
-      ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
       child: Row(
         children: [
           Expanded(
-            child: Text(
-              name,
-              style: const TextStyle(
-                color: muted,
-                fontSize: 13,
-              ),
-            ),
+            child: Text(label),
           ),
           Text(
-            loading ? '--' : value.toStringAsFixed(4),
-            style: TextStyle(
-              color: neutralIndicator ? Colors.white : color,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _trendCard() {
-    final color = _trendColor();
-
-    final trendIcon = trend.toLowerCase() == 'bullish'
-        ? Icons.trending_up
-        : trend.toLowerCase() == 'bearish'
-            ? Icons.trending_down
-            : Icons.trending_flat;
-
-    return _card(
-      child: Row(
-        children: [
-          Icon(
-            trendIcon,
-            color: color,
-            size: 34,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'MARKET TREND',
-                  style: TextStyle(
-                    color: muted,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  trend,
-                  style: TextStyle(
-                    color: color,
-                    fontSize: 21,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            '$candlesUsed candles',
+            value,
             style: const TextStyle(
-              color: muted,
-              fontSize: 12,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _safetyCard() {
-    return _card(
-      child: const Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            Icons.shield_outlined,
-            color: green,
-          ),
-          SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'READ-ONLY ANALYSIS',
-                  style: TextStyle(
-                    color: green,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                SizedBox(height: 5),
-                Text(
-                  'This screen only reads market data and '
-                  'technical indicators. It does not place, '
-                  'modify, or close trades.',
-                  style: TextStyle(
-                    color: muted,
-                    fontSize: 13,
-                    height: 1.4,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _errorCard() {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 14),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: red.withOpacity(.10),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: red.withOpacity(.30),
-        ),
-      ),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.warning_amber_rounded,
-            color: red,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              '$errorMessage. Pull down to retry.',
-              style: const TextStyle(
-                color: red,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _card({
-    required Widget child,
-  }) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: border,
-        ),
-      ),
-      child: child,
     );
   }
 }
