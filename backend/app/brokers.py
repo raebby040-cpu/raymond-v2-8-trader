@@ -1,20 +1,66 @@
 """
-RAYMOND v2.8 - Broker Adapters
-MT5 and Exness broker connectors for order execution and verification
+RAYMOND v2.8 - Safe Broker Adapters
+
+Broker configuration, connection-state reporting, and execution verification
+interfaces for MT5 and Exness.
+
+IMPORTANT SAFETY CONTRACT
+--------------------------
+This module is NOT a live trading engine.
+
+It deliberately does NOT:
+- place broker orders
+- close broker positions
+- modify broker positions
+- call MT5 order_send()
+- call Exness order APIs
+- authorize live trading
+- bypass the Risk Engine
+- bypass the Emergency Stop
+- execute AI decisions directly
+
+The canonical production execution path remains paper/demo only.
+
+Real broker execution, if ever implemented in a future release, must be
+introduced as a separately audited component with explicit authorization,
+risk checks, acknowledgement, fill reconciliation, slippage handling,
+disconnect recovery, and independent safety controls.
 """
 
+from __future__ import annotations
+
 import logging
-from datetime import datetime
-from typing import Dict, Optional
-from enum import Enum
 import os
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
 
 logger = logging.getLogger(__name__)
 
-# ==================== BROKER ENUMS ====================
+
+# ============================================================================
+# SAFETY CONSTANTS
+# ============================================================================
+
+LIVE_TRADING_ENABLED = False
+EXECUTION_AUTHORIZED = False
+REAL_BROKER_ORDERS_ALLOWED = False
+
+
+def _utc_now() -> str:
+    """Return a timezone-aware UTC timestamp."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ============================================================================
+# ENUMS
+# ============================================================================
+
 class BrokerType(str, Enum):
     MT5 = "mt5"
     EXNESS = "exness"
+
 
 class OrderStatus(str, Enum):
     PENDING = "pending"
@@ -24,370 +70,434 @@ class OrderStatus(str, Enum):
     CANCELLED = "cancelled"
     REJECTED = "rejected"
 
-# ==================== BASE BROKER ADAPTER ====================
+
+# ============================================================================
+# BASE BROKER ADAPTER
+# ============================================================================
+
 class BaseBrokerAdapter:
-    """Base class for broker adapters"""
-    
+    """
+    Safe broker adapter interface.
+
+    Broker adapters may report configuration and connection state, but this
+    implementation intentionally has no real-money execution capability.
+    """
+
     def __init__(self, broker_type: BrokerType):
         self.broker_type = broker_type
         self.is_connected = False
-        self.account_info = {}
-        self.open_orders = {}
-        self.closed_orders = {}
-        self.execution_history = []
-        
-        logger.info(f"Initializing {broker_type.value} broker adapter")
-    
+        self.account_info: Dict[str, Any] = {}
+        self.open_orders: Dict[str, Dict[str, Any]] = {}
+        self.closed_orders: Dict[str, Dict[str, Any]] = {}
+        self.execution_history: List[Dict[str, Any]] = []
+
+        logger.info(
+            "Initializing safe %s broker adapter; live execution disabled",
+            broker_type.value,
+        )
+
     async def connect(self) -> bool:
-        """Connect to broker"""
-        raise NotImplementedError
-    
-    async def disconnect(self) -> bool:
-        """Disconnect from broker"""
-        raise NotImplementedError
-    
-    async def place_order(self, order_data: Dict) -> Dict:
-        """Place a new order"""
-        raise NotImplementedError
-    
-    async def cancel_order(self, order_id: str) -> Dict:
-        """Cancel an open order"""
-        raise NotImplementedError
-    
-    async def close_position(self, position_id: str) -> Dict:
-        """Close an open position"""
-        raise NotImplementedError
-    
-    async def get_account_info(self) -> Dict:
-        """Get account information"""
-        raise NotImplementedError
-    
-    async def get_open_positions(self) -> Dict:
-        """Get all open positions"""
+        """Establish or validate a broker connection."""
         raise NotImplementedError
 
-# ==================== MT5 BROKER ADAPTER ====================
+    async def disconnect(self) -> bool:
+        """Disconnect from the broker."""
+        raise NotImplementedError
+
+    async def place_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Reject all broker order placement requests.
+
+        This method intentionally exists only for interface compatibility.
+        """
+        return self._execution_rejected("Broker order placement is disabled")
+
+    async def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        """
+        Reject broker order cancellation.
+
+        Cancellation of real broker orders is deliberately not implemented in
+        this safe adapter layer.
+        """
+        return self._execution_rejected(
+            "Broker order cancellation is disabled"
+        )
+
+    async def close_position(self, position_id: str) -> Dict[str, Any]:
+        """
+        Reject all broker position-closing requests.
+        """
+        return self._execution_rejected(
+            "Broker position closing is disabled"
+        )
+
+    async def get_account_info(self) -> Dict[str, Any]:
+        """Return read-only account information."""
+        raise NotImplementedError
+
+    async def get_open_positions(self) -> Dict[str, Any]:
+        """Return read-only position information."""
+        raise NotImplementedError
+
+    def status(self) -> Dict[str, Any]:
+        """Return the adapter's safety and connection state."""
+        return {
+            "broker": self.broker_type.value,
+            "connected": self.is_connected,
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "execution_authorized": False,
+            "real_orders_allowed": False,
+            "timestamp": _utc_now(),
+        }
+
+    def _execution_rejected(self, reason: str) -> Dict[str, Any]:
+        """Return a standardized fail-closed execution rejection."""
+        logger.warning(
+            "%s broker execution rejected: %s",
+            self.broker_type.value,
+            reason,
+        )
+
+        return {
+            "status": OrderStatus.REJECTED.value,
+            "broker": self.broker_type.value,
+            "execution_allowed": False,
+            "execution_authorized": False,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
+            "read_only": True,
+            "paper_only": True,
+            "reason": reason,
+            "timestamp": _utc_now(),
+        }
+
+
+# ============================================================================
+# MT5 BROKER ADAPTER
+# ============================================================================
+
 class MT5BrokerAdapter(BaseBrokerAdapter):
-    """MetaTrader 5 broker adapter"""
-    
+    """
+    Safe MetaTrader 5 adapter.
+
+    This class stores MT5 configuration and exposes read-only state only.
+    It does not import or invoke the MT5 trading API.
+    """
+
     def __init__(self):
         super().__init__(BrokerType.MT5)
-        self.login = os.getenv("MT5_LOGIN", "demo_login")
-        self.password = os.getenv("MT5_PASSWORD", "demo_password")
-        self.server = os.getenv("MT5_SERVER", "MT5-Demo")
-        self.account_type = os.getenv("MT5_ACCOUNT_TYPE", "demo")
-    
+
+        self.login = os.getenv("MT5_LOGIN", "")
+        self.password_configured = bool(os.getenv("MT5_PASSWORD"))
+        self.server = os.getenv("MT5_SERVER", "")
+        self.account_type = os.getenv("MT5_ACCOUNT_TYPE", "demo").lower()
+
     async def connect(self) -> bool:
-        """Connect to MT5 broker"""
-        try:
-            # In production, use actual MT5 API
-            # import MetaTrader5 as mt5
-            # if not mt5.initialize(login=self.login, password=self.password, server=self.server):
-            #     logger.error("MT5 initialization failed")
-            #     return False
-            
-            logger.info(f"Connected to MT5: {self.server} (Account: {self.account_type})")
-            self.is_connected = True
-            
-            # Mock account info
-            self.account_info = {
-                "login": self.login,
-                "server": self.server,
-                "balance": 10000.0,
-                "equity": 10000.0,
-                "margin": 0.0,
-                "free_margin": 10000.0,
-                "margin_level": 0.0,
-                "currency": "USD"
-            }
-            
-            return True
-        except Exception as e:
-            logger.error(f"MT5 connection failed: {e}")
-            self.is_connected = False
-            return False
-    
-    async def disconnect(self) -> bool:
-        """Disconnect from MT5"""
-        try:
-            # mt5.shutdown()
-            logger.info("Disconnected from MT5")
-            self.is_connected = False
-            return True
-        except Exception as e:
-            logger.error(f"MT5 disconnection failed: {e}")
-            return False
-    
-    async def place_order(self, order_data: Dict) -> Dict:
-        """Place order on MT5"""
-        if not self.is_connected:
-            return {"status": "error", "message": "Not connected to MT5"}
-        
-        try:
-            order_id = f"MT5-{len(self.open_orders) + 1:06d}"
-            symbol = order_data.get("symbol", "XAUUSD")
-            order_type = order_data.get("order_type", "market")
-            direction = order_data.get("direction", "buy")
-            quantity = order_data.get("quantity", 0.1)
-            price = order_data.get("price", 0.0)
-            
-            # In production: use mt5.order_send()
-            order_result = {
-                "order_id": order_id,
-                "symbol": symbol,
-                "type": order_type,
-                "direction": direction,
-                "quantity": quantity,
-                "price": price,
-                "status": OrderStatus.FILLED,
-                "filled_at": datetime.utcnow().isoformat(),
-                "broker": "mt5"
-            }
-            
-            self.open_orders[order_id] = order_result
-            self.execution_history.append(order_result)
-            
-            logger.info(f"MT5 Order placed: {order_id} ({symbol} {quantity} {direction})")
-            
-            return order_result
-        except Exception as e:
-            logger.error(f"MT5 order placement failed: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    async def cancel_order(self, order_id: str) -> Dict:
-        """Cancel MT5 order"""
-        if order_id not in self.open_orders:
-            return {"status": "error", "message": "Order not found"}
-        
-        order = self.open_orders.pop(order_id)
-        order["status"] = OrderStatus.CANCELLED
-        order["cancelled_at"] = datetime.utcnow().isoformat()
-        
-        logger.info(f"MT5 Order cancelled: {order_id}")
-        return order
-    
-    async def close_position(self, position_id: str) -> Dict:
-        """Close MT5 position"""
-        try:
-            # In production: use mt5.order_send() with opposite direction
-            result = {
-                "position_id": position_id,
-                "status": "closed",
-                "closed_at": datetime.utcnow().isoformat(),
-                "broker": "mt5"
-            }
-            
-            logger.info(f"MT5 Position closed: {position_id}")
-            return result
-        except Exception as e:
-            logger.error(f"MT5 position close failed: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    async def get_account_info(self) -> Dict:
-        """Get MT5 account info"""
-        return {
-            "broker": "mt5",
-            "account_info": self.account_info,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    
-    async def get_open_positions(self) -> Dict:
-        """Get MT5 open positions"""
-        return {
-            "broker": "mt5",
-            "positions": list(self.open_orders.values()),
-            "total": len(self.open_orders),
-            "timestamp": datetime.utcnow().isoformat()
+        """
+        Validate safe MT5 configuration.
+
+        This does not perform broker authentication and does not open a
+        trading connection.
+        """
+        self.is_connected = False
+
+        configured = bool(self.server) and bool(self.login)
+
+        self.account_info = {
+            "login_configured": bool(self.login),
+            "password_configured": self.password_configured,
+            "server_configured": bool(self.server),
+            "account_type": self.account_type,
+            "demo_account": self.account_type == "demo",
+            "live_account": self.account_type == "live",
+            "read_only": True,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
         }
 
-# ==================== EXNESS BROKER ADAPTER ====================
+        logger.info(
+            "MT5 adapter configuration checked: configured=%s account_type=%s",
+            configured,
+            self.account_type,
+        )
+
+        return configured
+
+    async def disconnect(self) -> bool:
+        """Clear adapter connection state."""
+        self.is_connected = False
+        logger.info("MT5 safe adapter disconnected")
+        return True
+
+    async def get_account_info(self) -> Dict[str, Any]:
+        """Return read-only MT5 adapter information."""
+        return {
+            "broker": BrokerType.MT5.value,
+            "account_info": dict(self.account_info),
+            "connected": self.is_connected,
+            "read_only": True,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
+            "timestamp": _utc_now(),
+        }
+
+    async def get_open_positions(self) -> Dict[str, Any]:
+        """
+        Return the adapter's locally known read-only state.
+
+        This does not query or alter live broker positions.
+        """
+        return {
+            "broker": BrokerType.MT5.value,
+            "positions": [],
+            "total": 0,
+            "source": "safe_adapter_local_state",
+            "live_broker_query": False,
+            "read_only": True,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
+            "timestamp": _utc_now(),
+        }
+
+
+# ============================================================================
+# EXNESS BROKER ADAPTER
+# ============================================================================
+
 class ExnessBrokerAdapter(BaseBrokerAdapter):
-    """Exness broker adapter"""
-    
+    """
+    Safe Exness adapter.
+
+    Configuration is retained for future integration, but no Exness trading
+    API is called and no real order is permitted.
+    """
+
     def __init__(self):
         super().__init__(BrokerType.EXNESS)
-        self.api_token = os.getenv("EXNESS_TOKEN", "demo_token")
-        self.account_id = os.getenv("EXNESS_ACCOUNT_ID", "demo_account")
-        self.account_type = os.getenv("EXNESS_ACCOUNT_TYPE", "demo")
+
+        self.api_token_configured = bool(os.getenv("EXNESS_TOKEN"))
+        self.account_id = os.getenv("EXNESS_ACCOUNT_ID", "")
+        self.account_type = os.getenv(
+            "EXNESS_ACCOUNT_TYPE",
+            "demo",
+        ).lower()
+
+        # Retained as configuration metadata only.
         self.api_base_url = "https://api.exness.com/v1"
-    
+
     async def connect(self) -> bool:
-        """Connect to Exness broker"""
-        try:
-            # In production: validate API token with Exness
-            logger.info(f"Connected to Exness: Account {self.account_id} (Type: {self.account_type})")
-            self.is_connected = True
-            
-            # Mock account info
-            self.account_info = {
-                "account_id": self.account_id,
-                "account_type": self.account_type,
-                "balance": 10000.0,
-                "equity": 10000.0,
-                "margin_used": 0.0,
-                "margin_available": 10000.0,
-                "margin_level": 0.0,
-                "currency": "USD"
-            }
-            
-            return True
-        except Exception as e:
-            logger.error(f"Exness connection failed: {e}")
-            self.is_connected = False
-            return False
-    
-    async def disconnect(self) -> bool:
-        """Disconnect from Exness"""
-        try:
-            logger.info("Disconnected from Exness")
-            self.is_connected = False
-            return True
-        except Exception as e:
-            logger.error(f"Exness disconnection failed: {e}")
-            return False
-    
-    async def place_order(self, order_data: Dict) -> Dict:
-        """Place order on Exness"""
-        if not self.is_connected:
-            return {"status": "error", "message": "Not connected to Exness"}
-        
-        try:
-            order_id = f"EXN-{len(self.open_orders) + 1:06d}"
-            symbol = order_data.get("symbol", "XAUUSD")
-            order_type = order_data.get("order_type", "market")
-            direction = order_data.get("direction", "buy")
-            quantity = order_data.get("quantity", 0.1)
-            price = order_data.get("price", 0.0)
-            
-            # In production: use Exness REST API
-            order_result = {
-                "order_id": order_id,
-                "symbol": symbol,
-                "type": order_type,
-                "direction": direction,
-                "quantity": quantity,
-                "price": price,
-                "status": OrderStatus.FILLED,
-                "filled_at": datetime.utcnow().isoformat(),
-                "broker": "exness"
-            }
-            
-            self.open_orders[order_id] = order_result
-            self.execution_history.append(order_result)
-            
-            logger.info(f"Exness Order placed: {order_id} ({symbol} {quantity} {direction})")
-            
-            return order_result
-        except Exception as e:
-            logger.error(f"Exness order placement failed: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    async def cancel_order(self, order_id: str) -> Dict:
-        """Cancel Exness order"""
-        if order_id not in self.open_orders:
-            return {"status": "error", "message": "Order not found"}
-        
-        order = self.open_orders.pop(order_id)
-        order["status"] = OrderStatus.CANCELLED
-        order["cancelled_at"] = datetime.utcnow().isoformat()
-        
-        logger.info(f"Exness Order cancelled: {order_id}")
-        return order
-    
-    async def close_position(self, position_id: str) -> Dict:
-        """Close Exness position"""
-        try:
-            # In production: use Exness REST API
-            result = {
-                "position_id": position_id,
-                "status": "closed",
-                "closed_at": datetime.utcnow().isoformat(),
-                "broker": "exness"
-            }
-            
-            logger.info(f"Exness Position closed: {position_id}")
-            return result
-        except Exception as e:
-            logger.error(f"Exness position close failed: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    async def get_account_info(self) -> Dict:
-        """Get Exness account info"""
-        return {
-            "broker": "exness",
-            "account_info": self.account_info,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    
-    async def get_open_positions(self) -> Dict:
-        """Get Exness open positions"""
-        return {
-            "broker": "exness",
-            "positions": list(self.open_orders.values()),
-            "total": len(self.open_orders),
-            "timestamp": datetime.utcnow().isoformat()
+        """
+        Validate safe Exness configuration.
+
+        This does not authenticate against Exness and does not establish a
+        live trading session.
+        """
+        self.is_connected = False
+
+        configured = bool(self.account_id)
+
+        self.account_info = {
+            "account_id_configured": bool(self.account_id),
+            "api_token_configured": self.api_token_configured,
+            "account_type": self.account_type,
+            "demo_account": self.account_type == "demo",
+            "live_account": self.account_type == "live",
+            "read_only": True,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
         }
 
-# ==================== BROKER FACTORY ====================
+        logger.info(
+            "Exness adapter configuration checked: configured=%s account_type=%s",
+            configured,
+            self.account_type,
+        )
+
+        return configured
+
+    async def disconnect(self) -> bool:
+        """Clear adapter connection state."""
+        self.is_connected = False
+        logger.info("Exness safe adapter disconnected")
+        return True
+
+    async def get_account_info(self) -> Dict[str, Any]:
+        """Return read-only Exness adapter information."""
+        return {
+            "broker": BrokerType.EXNESS.value,
+            "account_info": dict(self.account_info),
+            "connected": self.is_connected,
+            "read_only": True,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
+            "timestamp": _utc_now(),
+        }
+
+    async def get_open_positions(self) -> Dict[str, Any]:
+        """
+        Return safe local state only.
+
+        No Exness position query or trading operation is performed here.
+        """
+        return {
+            "broker": BrokerType.EXNESS.value,
+            "positions": [],
+            "total": 0,
+            "source": "safe_adapter_local_state",
+            "live_broker_query": False,
+            "read_only": True,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
+            "timestamp": _utc_now(),
+        }
+
+
+# ============================================================================
+# BROKER FACTORY
+# ============================================================================
+
 class BrokerFactory:
-    """Factory for creating broker adapters"""
-    
+    """Factory for creating safe broker adapters."""
+
     _adapters = {
         BrokerType.MT5: MT5BrokerAdapter,
-        BrokerType.EXNESS: ExnessBrokerAdapter
+        BrokerType.EXNESS: ExnessBrokerAdapter,
     }
-    
+
     @staticmethod
     def create_adapter(broker_type: BrokerType) -> BaseBrokerAdapter:
-        """Create broker adapter instance"""
+        """Create a safe broker adapter."""
+        if isinstance(broker_type, str):
+            try:
+                broker_type = BrokerType(broker_type.lower())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Unknown broker type: {broker_type}"
+                ) from exc
+
         adapter_class = BrokerFactory._adapters.get(broker_type)
+
         if not adapter_class:
             raise ValueError(f"Unknown broker type: {broker_type}")
+
         return adapter_class()
 
-# ==================== EXECUTION VERIFIER ====================
+
+# ============================================================================
+# EXECUTION VERIFIER
+# ============================================================================
+
 class ExecutionVerifier:
-    """Verify order execution across brokers"""
-    
+    """
+    Safe execution verifier.
+
+    Verification only examines the supplied adapter's read-only state.
+    It does not create, modify, cancel, or close orders.
+    """
+
     def __init__(self):
-        self.verification_history = []
-    
-    async def verify_order(self, order_data: Dict, broker_adapter: BaseBrokerAdapter) -> Dict:
-        """Verify order execution"""
-        verification = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "order_id": order_data.get("order_id"),
+        self.verification_history: List[Dict[str, Any]] = []
+
+    async def verify_order(
+        self,
+        order_data: Dict[str, Any],
+        broker_adapter: BaseBrokerAdapter,
+    ) -> Dict[str, Any]:
+        """
+        Verify whether an order appears in safe local adapter state.
+
+        Real broker execution is never assumed to have occurred.
+        """
+        order_id = order_data.get("order_id")
+
+        verification: Dict[str, Any] = {
+            "timestamp": _utc_now(),
+            "order_id": order_id,
             "broker": broker_adapter.broker_type.value,
             "expected_status": order_data.get("status"),
-            "verified": True,
-            "discrepancies": []
+            "verified": False,
+            "execution_confirmed": False,
+            "real_broker_execution": False,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
+            "discrepancies": [],
         }
-        
-        # Check if order exists in broker system
+
         positions = await broker_adapter.get_open_positions()
+
         order_found = any(
-            p["order_id"] == order_data.get("order_id") 
-            for p in positions.get("positions", [])
+            item.get("order_id") == order_id
+            for item in positions.get("positions", [])
+            if isinstance(item, dict)
         )
-        
-        if not order_found:
-            verification["verified"] = False
-            verification["discrepancies"].append("Order not found in broker system")
-        
+
+        if order_found:
+            verification["discrepancies"].append(
+                "Order appears in adapter state only; real broker execution "
+                "is not confirmed."
+            )
+        else:
+            verification["discrepancies"].append(
+                "Order not found in safe adapter state."
+            )
+
         self.verification_history.append(verification)
-        logger.info(f"Order verification: {order_data.get('order_id')} - {'PASSED' if verification['verified'] else 'FAILED'}")
-        
+
+        logger.info(
+            "Safe order verification: %s - broker execution confirmed=%s",
+            order_id,
+            verification["execution_confirmed"],
+        )
+
         return verification
-    
-    def get_verification_report(self) -> Dict:
-        """Get verification report"""
+
+    def get_verification_report(self) -> Dict[str, Any]:
+        """Return the verification history without implying live execution."""
         total = len(self.verification_history)
-        verified = sum(1 for v in self.verification_history if v["verified"])
-        
+
+        verified = sum(
+            1
+            for item in self.verification_history
+            if item.get("verified") is True
+        )
+
         return {
             "total_verifications": total,
             "verified_count": verified,
             "failed_count": total - verified,
-            "verification_rate": (verified / total * 100) if total > 0 else 0,
-            "recent_verifications": self.verification_history[-10:]
+            "verification_rate": (
+                verified / total * 100
+                if total > 0
+                else 0.0
+            ),
+            "real_broker_execution_confirmed": False,
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
+            "recent_verifications": self.verification_history[-10:],
         }
+
+
+# ============================================================================
+# SAFETY STATUS
+# ============================================================================
+
+def broker_execution_safety_status() -> Dict[str, Any]:
+    """
+    Return the absolute execution status exposed by this module.
+    """
+    return {
+        "live_trading_enabled": False,
+        "execution_authorized": False,
+        "real_broker_orders_allowed": False,
+        "read_only": True,
+        "paper_only": True,
+        "broker_order_placement": False,
+        "broker_position_closing": False,
+        "broker_position_modification": False,
+        "timestamp": _utc_now(),
+    }
+
+
+
