@@ -401,11 +401,9 @@ class AITradingDecisionEngine:
         points = 0.0
         possible = 0.0
 
-        # Existing technical score: 40%.
         points += context.score * 0.40
         possible += 40.0
 
-        # EMA alignment: 20%.
         if (
             context.ema20 is not None
             and context.ema50 is not None
@@ -420,7 +418,6 @@ class AITradingDecisionEngine:
                 if context.ema20 < context.ema50:
                     points += 20.0
 
-        # RSI alignment: 15%.
         if context.rsi14 is not None:
             possible += 15.0
 
@@ -436,7 +433,6 @@ class AITradingDecisionEngine:
                 elif 50 < context.rsi14 <= 55:
                     points += 7.0
 
-        # MACD alignment: 15%.
         if (
             context.macd is not None
             and context.macd_signal is not None
@@ -462,7 +458,6 @@ class AITradingDecisionEngine:
                 elif context.macd_histogram < 0:
                     points += 7.0
 
-        # Trend alignment: 10%.
         possible += 10.0
 
         if (
