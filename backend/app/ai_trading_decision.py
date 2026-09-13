@@ -1,26 +1,36 @@
 """
 RAYMOND v2.8 - AI Trading Decision Engine
 
-STEP 13:
+STEP 13 - MULTI-LAYER AI BRAIN
 
-- Interprets technical-indicator results.
-- Produces BUY / SELL / WAIT decisions.
-- Produces a conservative confidence score.
-- Produces risk-aware trade proposals.
-- Never places broker orders.
-- Never modifies positions.
-- Never bypasses the risk engine.
-- Never contacts MT5.
-- Paper/read-only decision support only.
+The AI brain evaluates technical market context through several
+deterministic layers:
 
-IMPORTANT:
+1. Market Regime
+2. Setup Detection
+3. Momentum / Confluence
+4. Direction
+5. Confidence
+6. WAIT filter
+7. Risk-aware trade proposal
 
-This module is intentionally deterministic.
+IMPORTANT SAFETY RULES
 
-It provides an AI-style decision layer without allowing
-an external model to directly control execution.
+The AI brain:
+- never places broker orders
+- never modifies broker positions
+- never closes broker positions
+- never contacts MT5
+- never contacts Exness
+- never bypasses the Risk Engine
+- never bypasses the Emergency Stop
+- never enables live trading
+
+The AI only produces a recommendation.
 
 The final authority remains the Risk Engine and safety gate.
+
+Execution type is always PAPER.
 """
 
 from __future__ import annotations
@@ -44,69 +54,49 @@ class AIDirection(str, Enum):
 
 @dataclass(frozen=True)
 class AIDecisionConfig:
-    """
-    Configuration for the AI decision layer.
-
-    The AI layer is deliberately conservative.
-
-    It does not decide whether a trade is ultimately
-    allowed to execute. That remains the responsibility
-    of the Risk Engine.
-    """
+    """Conservative configuration for the AI brain."""
 
     buy_score_threshold: int = 65
     sell_score_threshold: int = 35
 
     minimum_confidence: float = 60.0
-
     max_confidence: float = 95.0
 
     require_stop_loss: bool = True
-
     minimum_risk_reward: float = 1.5
 
+    # Additional AI-brain thresholds.
+    minimum_confluence: int = 60
+    strong_confluence: int = 75
+
     def validate(self) -> None:
-        if not (
-            0 <= self.buy_score_threshold <= 100
-        ):
+        if not 0 <= self.buy_score_threshold <= 100:
             raise AIDecisionError(
                 "buy_score_threshold must be between 0 and 100"
             )
 
-        if not (
-            0 <= self.sell_score_threshold <= 100
-        ):
+        if not 0 <= self.sell_score_threshold <= 100:
             raise AIDecisionError(
                 "sell_score_threshold must be between 0 and 100"
             )
 
-        if (
-            self.sell_score_threshold
-            >= self.buy_score_threshold
-        ):
+        if self.sell_score_threshold >= self.buy_score_threshold:
             raise AIDecisionError(
                 "sell_score_threshold must be below "
                 "buy_score_threshold"
             )
 
-        if not (
-            0 <= self.minimum_confidence <= 100
-        ):
+        if not 0 <= self.minimum_confidence <= 100:
             raise AIDecisionError(
                 "minimum_confidence must be between 0 and 100"
             )
 
-        if not (
-            0 < self.max_confidence <= 100
-        ):
+        if not 0 < self.max_confidence <= 100:
             raise AIDecisionError(
                 "max_confidence must be between 0 and 100"
             )
 
-        if (
-            self.minimum_confidence
-            > self.max_confidence
-        ):
+        if self.minimum_confidence > self.max_confidence:
             raise AIDecisionError(
                 "minimum_confidence cannot exceed max_confidence"
             )
@@ -116,16 +106,27 @@ class AIDecisionConfig:
                 "minimum_risk_reward must be greater than 0"
             )
 
+        if not 0 <= self.minimum_confluence <= 100:
+            raise AIDecisionError(
+                "minimum_confluence must be between 0 and 100"
+            )
+
+        if not 0 <= self.strong_confluence <= 100:
+            raise AIDecisionError(
+                "strong_confluence must be between 0 and 100"
+            )
+
 
 @dataclass(frozen=True)
 class TechnicalContext:
     """
-    Technical information supplied to the AI decision layer.
+    Technical information supplied to the AI brain.
 
-    This is intentionally independent of MT5.
+    Existing fields are preserved for compatibility with the
+    current trading pipeline, MT5 decision bridge and tests.
 
-    The values can come from the existing technical
-    indicator engine or from tests/backtesting.
+    The additional fields are optional so older callers continue
+    working without modification.
     """
 
     symbol: str
@@ -149,25 +150,24 @@ class TechnicalContext:
 
     candles_used: int
 
+    # Optional future-facing context.
+    # Existing callers do not need to provide these.
+    volatility: Optional[str] = None
+    previous_close: Optional[float] = None
+
     def validate(self) -> None:
         if not self.symbol.strip():
-            raise AIDecisionError(
-                "symbol is required"
-            )
+            raise AIDecisionError("symbol is required")
 
         if not self.timeframe.strip():
-            raise AIDecisionError(
-                "timeframe is required"
-            )
+            raise AIDecisionError("timeframe is required")
 
         if self.close <= 0:
             raise AIDecisionError(
                 "close must be greater than zero"
             )
 
-        if not (
-            0 <= self.score <= 100
-        ):
+        if not 0 <= self.score <= 100:
             raise AIDecisionError(
                 "score must be between 0 and 100"
             )
@@ -207,6 +207,7 @@ class TechnicalContext:
             "macd": self.macd,
             "macd_signal": self.macd_signal,
             "macd_histogram": self.macd_histogram,
+            "previous_close": self.previous_close,
         }
 
         for name, value in numeric_fields.items():
@@ -227,9 +228,7 @@ class TechnicalContext:
                 )
 
         if self.rsi14 is not None:
-            if not (
-                0 <= self.rsi14 <= 100
-            ):
+            if not 0 <= self.rsi14 <= 100:
                 raise AIDecisionError(
                     "rsi14 must be between 0 and 100"
                 )
@@ -240,16 +239,16 @@ class TechnicalContext:
                     "atr14 cannot be negative"
                 )
 
+        if self.previous_close is not None:
+            if self.previous_close <= 0:
+                raise AIDecisionError(
+                    "previous_close must be greater than zero"
+                )
+
 
 @dataclass(frozen=True)
 class AITradeProposal:
-    """
-    Risk-aware paper trade proposal.
-
-    This is a proposal only.
-
-    It is NOT an executable broker order.
-    """
+    """Risk-aware paper trade proposal."""
 
     direction: AIDirection
 
@@ -278,7 +277,7 @@ class AITradeProposal:
 
 @dataclass(frozen=True)
 class AIDecision:
-    """Complete AI decision result."""
+    """Complete AI brain decision."""
 
     direction: AIDirection
 
@@ -306,36 +305,34 @@ class AIDecision:
 
     risk_engine_required: bool = True
 
+    # New AI-brain diagnostics.
+    market_regime: str = "uncertain"
+
+    setup: str = "no_setup"
+
+    confluence_score: int = 0
+
 
 class AITradingDecisionEngine:
     """
-    Conservative AI-style trading decision engine.
+    Conservative multi-layer AI-style decision engine.
 
-    Responsibilities:
-    - interpret technical context
-    - calculate decision confidence
-    - produce trade proposals
-    - explain why the decision was made
+    The engine interprets technical context and creates a
+    paper-only proposal.
 
-    Explicitly NOT responsible for:
-    - placing orders
-    - modifying orders
-    - closing positions
-    - calling MT5
-    - calling Exness
-    - overriding the risk engine
-    - overriding the emergency stop
+    It never performs execution.
     """
 
     def __init__(
         self,
         config: Optional[AIDecisionConfig] = None,
     ) -> None:
-        self.config = (
-            config or AIDecisionConfig()
-        )
-
+        self.config = config or AIDecisionConfig()
         self.config.validate()
+
+    # ==========================================================
+    # GENERAL HELPERS
+    # ==========================================================
 
     @staticmethod
     def _clamp(
@@ -359,9 +356,11 @@ class AITradingDecisionEngine:
         if direction == AIDirection.BUY:
             risk = entry - stop_loss
             reward = take_profit - entry
+
         elif direction == AIDirection.SELL:
             risk = stop_loss - entry
             reward = entry - take_profit
+
         else:
             raise AIDecisionError(
                 "WAIT does not have a risk/reward calculation"
@@ -379,53 +378,228 @@ class AITradingDecisionEngine:
 
         return reward / risk
 
-    def _base_confidence(
+    # ==========================================================
+    # LAYER 1 - MARKET REGIME BRAIN
+    # ==========================================================
+
+    def _market_regime(
         self,
         context: TechnicalContext,
-    ) -> float:
+    ) -> str:
         """
-        Convert technical strength into conservative confidence.
+        Determine the broad market regime.
 
-        The confidence value is NOT a probability.
+        This is deliberately conservative.
 
-        It is a decision-strength score.
+        The engine prefers uncertainty over inventing a regime.
         """
 
-        distance_from_neutral = abs(
-            context.score - 50
-        )
+        if (
+            context.ema20 is None
+            or context.ema50 is None
+        ):
+            return "uncertain"
 
-        confidence = (
-            50.0
-            + distance_from_neutral
-        )
+        if context.ema20 > context.ema50:
+            if context.trend == "Bullish":
+                return "trending_up"
 
-        if context.trend == "Bullish":
-            confidence += 5.0
+            return "bullish_transition"
 
-        elif context.trend == "Bearish":
-            confidence += 5.0
+        if context.ema20 < context.ema50:
+            if context.trend == "Bearish":
+                return "trending_down"
+
+            return "bearish_transition"
+
+        return "ranging"
+
+    # ==========================================================
+    # LAYER 2 - SETUP DETECTION BRAIN
+    # ==========================================================
+
+    def _setup_type(
+        self,
+        context: TechnicalContext,
+        regime: str,
+    ) -> str:
+        """
+        Detect a broad trading setup.
+
+        This does not place trades.
+
+        It classifies the technical situation.
+        """
 
         if context.signal == "WAIT":
-            confidence -= 5.0
+            return "no_setup"
 
-        return self._clamp(
-            confidence,
-            0.0,
-            self.config.max_confidence,
+        if (
+            context.signal == "BUY"
+            and context.trend == "Bullish"
+        ):
+            if regime == "trending_up":
+                return "bullish_continuation"
+
+            if regime == "bullish_transition":
+                return "bullish_transition"
+
+        if (
+            context.signal == "SELL"
+            and context.trend == "Bearish"
+        ):
+            if regime == "trending_down":
+                return "bearish_continuation"
+
+            if regime == "bearish_transition":
+                return "bearish_transition"
+
+        if context.signal == "BUY":
+            return "bullish_setup"
+
+        if context.signal == "SELL":
+            return "bearish_setup"
+
+        return "no_setup"
+
+    # ==========================================================
+    # LAYER 3 - MOMENTUM / CONFLUENCE BRAIN
+    # ==========================================================
+
+    def _confluence_score(
+        self,
+        context: TechnicalContext,
+    ) -> int:
+        """
+        Combine independent technical confirmations.
+
+        Maximum score = 100.
+
+        Components:
+
+        - existing technical score
+        - EMA alignment
+        - RSI alignment
+        - MACD alignment
+        - trend alignment
+        """
+
+        points = 0
+        possible = 0
+
+        # Existing indicator score.
+        points += context.score * 0.40
+        possible += 40
+
+        # EMA alignment.
+        if (
+            context.ema20 is not None
+            and context.ema50 is not None
+        ):
+            possible += 20
+
+            if context.signal == "BUY":
+                if context.ema20 > context.ema50:
+                    points += 20
+
+            elif context.signal == "SELL":
+                if context.ema20 < context.ema50:
+                    points += 20
+
+        # RSI alignment.
+        if context.rsi14 is not None:
+            possible += 15
+
+            if context.signal == "BUY":
+                if 50 <= context.rsi14 <= 70:
+                    points += 15
+
+                elif 45 <= context.rsi14 < 50:
+                    points += 7
+
+            elif context.signal == "SELL":
+                if 30 <= context.rsi14 <= 50:
+                    points += 15
+
+                elif 50 < context.rsi14 <= 55:
+                    points += 7
+
+        # MACD alignment.
+        if (
+            context.macd is not None
+            and context.macd_signal is not None
+            and context.macd_histogram is not None
+        ):
+            possible += 15
+
+            if context.signal == "BUY":
+                if (
+                    context.macd > context.macd_signal
+                    and context.macd_histogram > 0
+                ):
+                    points += 15
+
+                elif context.macd_histogram > 0:
+                    points += 7
+
+            elif context.signal == "SELL":
+                if (
+                    context.macd < context.macd_signal
+                    and context.macd_histogram < 0
+                ):
+                    points += 15
+
+                elif context.macd_histogram < 0:
+                    points += 7
+
+        # Trend alignment.
+        possible += 10
+
+        if (
+            context.signal == "BUY"
+            and context.trend == "Bullish"
+        ):
+            points += 10
+
+        elif (
+            context.signal == "SELL"
+            and context.trend == "Bearish"
+        ):
+            points += 10
+
+        if possible <= 0:
+            return 0
+
+        return int(
+            self._clamp(
+                (points / possible) * 100,
+                0,
+                100,
+            )
         )
+
+    # ==========================================================
+    # LAYER 4 - DIRECTION BRAIN
+    # ==========================================================
 
     def _determine_direction(
         self,
         context: TechnicalContext,
+        confluence: int,
     ) -> AIDirection:
         """
-        Determine direction conservatively.
+        Determine BUY / SELL / WAIT.
 
-        Technical signal and trend must agree.
+        Agreement is mandatory.
 
-        Otherwise the engine returns WAIT.
+        Weak confluence produces WAIT.
         """
+
+        if context.signal == "WAIT":
+            return AIDirection.WAIT
+
+        if confluence < self.config.minimum_confluence:
+            return AIDirection.WAIT
 
         if (
             context.signal == "BUY"
@@ -445,10 +619,141 @@ class AITradingDecisionEngine:
 
         return AIDirection.WAIT
 
+    # ==========================================================
+    # LAYER 5 - CONFIDENCE BRAIN
+    # ==========================================================
+
+    def _base_confidence(
+        self,
+        context: TechnicalContext,
+        confluence: int,
+    ) -> float:
+        """
+        Calculate decision strength.
+
+        This is NOT a probability.
+
+        It is an internal confidence/strength score.
+        """
+
+        distance_from_neutral = abs(
+            context.score - 50
+        )
+
+        confidence = (
+            45.0
+            + distance_from_neutral * 0.55
+        )
+
+        # Confluence contributes additional confidence.
+        confidence += (
+            confluence - 50
+        ) * 0.20
+
+        # Trend agreement.
+        if context.trend in {
+            "Bullish",
+            "Bearish",
+        }:
+            confidence += 5.0
+
+        # Signal agreement.
+        if (
+            context.signal in {
+                "BUY",
+                "SELL",
+            }
+            and context.trend != "Neutral"
+        ):
+            confidence += 5.0
+
+        # WAIT receives a penalty.
+        if context.signal == "WAIT":
+            confidence -= 10.0
+
+        # Extreme RSI can indicate exhaustion.
+        if context.rsi14 is not None:
+            if context.signal == "BUY":
+                if context.rsi14 > 75:
+                    confidence -= 10.0
+
+            elif context.signal == "SELL":
+                if context.rsi14 < 25:
+                    confidence -= 10.0
+
+        return self._clamp(
+            confidence,
+            0.0,
+            self.config.max_confidence,
+        )
+
+    # ==========================================================
+    # LAYER 6 - AI WAIT FILTER
+    # ==========================================================
+
+    def _wait_reason(
+        self,
+        context: TechnicalContext,
+        regime: str,
+        setup: str,
+        confluence: int,
+        confidence: float,
+    ) -> str:
+        """Explain why the AI decided to WAIT."""
+
+        reasons = []
+
+        if context.signal == "WAIT":
+            reasons.append(
+                "the technical signal is WAIT"
+            )
+
+        if context.trend == "Neutral":
+            reasons.append(
+                "the market trend is neutral"
+            )
+
+        if confluence < self.config.minimum_confluence:
+            reasons.append(
+                "technical confluence is below the minimum threshold"
+            )
+
+        if confidence < self.config.minimum_confidence:
+            reasons.append(
+                "AI confidence is below the minimum threshold"
+            )
+
+        if setup == "no_setup":
+            reasons.append(
+                "no valid trading setup was detected"
+            )
+
+        if regime == "uncertain":
+            reasons.append(
+                "market regime cannot be determined reliably"
+            )
+
+        if not reasons:
+            reasons.append(
+                "technical evidence is not sufficiently aligned"
+            )
+
+        return (
+            "WAIT: "
+            + "; ".join(reasons)
+            + "."
+        )
+
+    # ==========================================================
+    # BUY PROPOSAL
+    # ==========================================================
+
     def _build_buy_proposal(
         self,
         context: TechnicalContext,
         confidence: float,
+        setup: str,
+        confluence: int,
     ) -> AITradeProposal:
         if context.atr14 is None:
             raise AIDecisionError(
@@ -462,7 +767,6 @@ class AITradingDecisionEngine:
 
         entry = context.close
 
-        # Conservative ATR-based structure.
         stop_loss = (
             entry
             - context.atr14
@@ -483,6 +787,17 @@ class AITradingDecisionEngine:
             take_profit=take_profit,
         )
 
+        if self.config.require_stop_loss:
+            if stop_loss <= 0:
+                raise AIDecisionError(
+                    "calculated BUY stop loss is invalid"
+                )
+
+        if risk_reward < self.config.minimum_risk_reward:
+            raise AIDecisionError(
+                "BUY risk/reward is below minimum"
+            )
+
         return AITradeProposal(
             direction=AIDirection.BUY,
             symbol=context.symbol,
@@ -492,15 +807,21 @@ class AITradingDecisionEngine:
             risk_reward=risk_reward,
             confidence=confidence,
             reason=(
-                "Bullish technical alignment passed "
-                "the AI decision threshold."
+                "Bullish setup detected with "
+                f"{confluence}% technical confluence."
             ),
         )
+
+    # ==========================================================
+    # SELL PROPOSAL
+    # ==========================================================
 
     def _build_sell_proposal(
         self,
         context: TechnicalContext,
         confidence: float,
+        setup: str,
+        confluence: int,
     ) -> AITradeProposal:
         if context.atr14 is None:
             raise AIDecisionError(
@@ -534,6 +855,17 @@ class AITradingDecisionEngine:
             take_profit=take_profit,
         )
 
+        if self.config.require_stop_loss:
+            if stop_loss <= 0:
+                raise AIDecisionError(
+                    "calculated SELL stop loss is invalid"
+                )
+
+        if risk_reward < self.config.minimum_risk_reward:
+            raise AIDecisionError(
+                "SELL risk/reward is below minimum"
+            )
+
         return AITradeProposal(
             direction=AIDirection.SELL,
             symbol=context.symbol,
@@ -543,42 +875,99 @@ class AITradingDecisionEngine:
             risk_reward=risk_reward,
             confidence=confidence,
             reason=(
-                "Bearish technical alignment passed "
-                "the AI decision threshold."
+                "Bearish setup detected with "
+                f"{confluence}% technical confluence."
             ),
         )
+
+    # ==========================================================
+    # MAIN AI EVALUATION
+    # ==========================================================
 
     def evaluate(
         self,
         context: TechnicalContext,
     ) -> AIDecision:
         """
-        Evaluate technical context.
+        Run the complete AI brain.
 
-        The result is always read-only.
+        Pipeline:
 
-        No broker or MT5 calls occur.
+        Market Regime
+              ↓
+        Setup Detection
+              ↓
+        Confluence
+              ↓
+        Direction
+              ↓
+        Confidence
+              ↓
+        WAIT Filter
+              ↓
+        Paper Proposal
+
+        No execution happens here.
         """
 
         context.validate()
 
-        direction = self._determine_direction(
+        # ------------------------------------------------------
+        # Layer 1
+        # ------------------------------------------------------
+
+        regime = self._market_regime(
             context
         )
+
+        # ------------------------------------------------------
+        # Layer 2
+        # ------------------------------------------------------
+
+        setup = self._setup_type(
+            context,
+            regime,
+        )
+
+        # ------------------------------------------------------
+        # Layer 3
+        # ------------------------------------------------------
+
+        confluence = self._confluence_score(
+            context
+        )
+
+        # ------------------------------------------------------
+        # Layer 4
+        # ------------------------------------------------------
+
+        direction = self._determine_direction(
+            context,
+            confluence,
+        )
+
+        # ------------------------------------------------------
+        # Layer 5
+        # ------------------------------------------------------
 
         confidence = self._base_confidence(
-            context
+            context,
+            confluence,
         )
 
-        if (
-            confidence
-            < self.config.minimum_confidence
-        ):
+        # ------------------------------------------------------
+        # Layer 6
+        # ------------------------------------------------------
+
+        if confidence < self.config.minimum_confidence:
             direction = AIDirection.WAIT
 
-        # ----------------------------------------------------
+        if confluence < self.config.minimum_confluence:
+            direction = AIDirection.WAIT
+
+        # ------------------------------------------------------
         # WAIT
-        # ----------------------------------------------------
+        # ------------------------------------------------------
 
         if direction == AIDirection.WAIT:
             return AIDecision(
@@ -590,22 +979,31 @@ class AITradingDecisionEngine:
                 trend=context.trend,
                 signal=context.signal,
                 proposal=None,
-                reasoning=(
-                    "Technical evidence is not strong "
-                    "or aligned enough for a trade proposal."
+                reasoning=self._wait_reason(
+                    context=context,
+                    regime=regime,
+                    setup=setup,
+                    confluence=confluence,
+                    confidence=confidence,
                 ),
+                market_regime=regime,
+                setup=setup,
+                confluence_score=confluence,
             )
 
-        # ----------------------------------------------------
+        # ------------------------------------------------------
         # BUY
-        # ----------------------------------------------------
+        # ------------------------------------------------------
 
         if direction == AIDirection.BUY:
             try:
                 proposal = self._build_buy_proposal(
-                    context,
-                    confidence,
+                    context=context,
+                    confidence=confidence,
+                    setup=setup,
+                    confluence=confluence,
                 )
+
             except AIDecisionError as exc:
                 return AIDecision(
                     direction=AIDirection.WAIT,
@@ -617,9 +1015,12 @@ class AITradingDecisionEngine:
                     signal=context.signal,
                     proposal=None,
                     reasoning=(
-                        "BUY proposal rejected by "
-                        f"AI safety validation: {exc}"
+                        "BUY proposal rejected by AI safety "
+                        f"validation: {exc}"
                     ),
+                    market_regime=regime,
+                    setup=setup,
+                    confluence_score=confluence,
                 )
 
             return AIDecision(
@@ -632,22 +1033,30 @@ class AITradingDecisionEngine:
                 signal=context.signal,
                 proposal=proposal,
                 reasoning=(
-                    "BUY proposal created. "
-                    "Risk Engine approval is still required "
-                    "before any execution."
+                    "BUY setup passed the AI brain. "
+                    f"Regime={regime}; "
+                    f"Setup={setup}; "
+                    f"Confluence={confluence}%. "
+                    "Risk Engine approval is still required."
                 ),
+                market_regime=regime,
+                setup=setup,
+                confluence_score=confluence,
             )
 
-        # ----------------------------------------------------
+        # ------------------------------------------------------
         # SELL
-        # ----------------------------------------------------
+        # ------------------------------------------------------
 
         if direction == AIDirection.SELL:
             try:
                 proposal = self._build_sell_proposal(
-                    context,
-                    confidence,
+                    context=context,
+                    confidence=confidence,
+                    setup=setup,
+                    confluence=confluence,
                 )
+
             except AIDecisionError as exc:
                 return AIDecision(
                     direction=AIDirection.WAIT,
@@ -659,9 +1068,12 @@ class AITradingDecisionEngine:
                     signal=context.signal,
                     proposal=None,
                     reasoning=(
-                        "SELL proposal rejected by "
-                        f"AI safety validation: {exc}"
+                        "SELL proposal rejected by AI safety "
+                        f"validation: {exc}"
                     ),
+                    market_regime=regime,
+                    setup=setup,
+                    confluence_score=confluence,
                 )
 
             return AIDecision(
@@ -674,70 +1086,45 @@ class AITradingDecisionEngine:
                 signal=context.signal,
                 proposal=proposal,
                 reasoning=(
-                    "SELL proposal created. "
-                    "Risk Engine approval is still required "
-                    "before any execution."
+                    "SELL setup passed the AI brain. "
+                    f"Regime={regime}; "
+                    f"Setup={setup}; "
+                    f"Confluence={confluence}%. "
+                    "Risk Engine approval is still required."
                 ),
+                market_regime=regime,
+                setup=setup,
+                confluence_score=confluence,
             )
 
-        raise AIDecisionError(
-            "Unexpected AI direction"
+        # Defensive fallback.
+        return AIDecision(
+            direction=AIDirection.WAIT,
+            symbol=context.symbol,
+            timeframe=context.timeframe,
+            confidence=confidence,
+            technical_score=context.score,
+            trend=context.trend,
+            signal=context.signal,
+            proposal=None,
+            reasoning=(
+                "WAIT: defensive fallback reached."
+            ),
+            market_regime=regime,
+            setup=setup,
+            confluence_score=confluence,
         )
 
 
-def ai_decision_to_dict(
-    decision: AIDecision,
-) -> dict:
-    """Serialize an AI decision safely."""
+def create_ai_decision_engine(
+    config: Optional[AIDecisionConfig] = None,
+) -> AITradingDecisionEngine:
+    """
+    Factory for the Step 13 AI brain.
 
-    proposal = decision.proposal
+    Always creates the deterministic, paper-only engine.
+    """
 
-    proposal_data = None
-
-    if proposal is not None:
-        proposal_data = {
-            "direction": (
-                proposal.direction.value
-            ),
-            "symbol": proposal.symbol,
-            "entry_price": proposal.entry_price,
-            "stop_loss": proposal.stop_loss,
-            "take_profit": proposal.take_profit,
-            "risk_reward": proposal.risk_reward,
-            "confidence": proposal.confidence,
-            "reason": proposal.reason,
-            "execution_type": (
-                proposal.execution_type
-            ),
-            "read_only": proposal.read_only,
-            "broker_order_required": (
-                proposal.broker_order_required
-            ),
-            "risk_engine_required": (
-                proposal.risk_engine_required
-            ),
-        }
-
-    return {
-        "direction": decision.direction.value,
-        "symbol": decision.symbol,
-        "timeframe": decision.timeframe,
-        "confidence": decision.confidence,
-        "technical_score": (
-            decision.technical_score
-        ),
-        "trend": decision.trend,
-        "signal": decision.signal,
-        "proposal": proposal_data,
-        "reasoning": decision.reasoning,
-        "execution_type": (
-            decision.execution_type
-        ),
-        "read_only": decision.read_only,
-        "broker_order_required": (
-            decision.broker_order_required
-        ),
-        "risk_engine_required": (
-            decision.risk_engine_required
-        ),
-  }
+    return AITradingDecisionEngine(
+        config=config
+    )
