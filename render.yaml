@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: raymond-v2-8-backend
+    name: raymond-v2-8-trader
     runtime: docker
     plan: free
     region: singapore
 
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
 
     healthCheckPath: /health
 
