@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //| RaymondEA.mq5                                                    |
 //| RAYMOND v2.8 - MT5 Trading Bridge                                |
-//| STEP 11B-7: SAFETY + DEMO EXECUTION + POSITION MANAGEMENT        |
+//| STEP 11B-8: AI READ-ONLY DECISION + SAFETY + DEMO                |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "0.7.1"
+#property version   "0.8.0"
 #property description "RAYMOND v2.8 broker-agnostic MT5 bridge"
-#property description "Telemetry, safety, DEMO execution and position protection"
+#property description "Telemetry, READ-ONLY AI decisions, safety and DEMO protection"
 #property description "LIVE TRADING HARD-LOCKED OFF"
 
 #include "RaymondBridge.mqh"
@@ -25,6 +25,13 @@ input int InpTimerSeconds = 5;
 input string InpBackendUrl = "";
 input string InpTelemetryPath = "/api/mt5/telemetry";
 input int InpBackendTimeoutMs = 5000;
+
+// -------------------------------------------------------------------
+// AI READ-ONLY SETTINGS
+// -------------------------------------------------------------------
+
+input int InpAIDecisionIntervalSeconds = 15;
+input int InpAICandleLimit = 100;
 
 // -------------------------------------------------------------------
 // SAFETY
@@ -69,7 +76,45 @@ RaymondPositionManager RaymondPositionManagerEngine;
 // -------------------------------------------------------------------
 
 bool g_initialized = false;
+
 datetime g_last_status_log = 0;
+datetime g_last_ai_request = 0;
+
+string g_ai_action = "HOLD/WAIT";
+double g_ai_confidence = 0.0;
+
+//+------------------------------------------------------------------+
+//| Convert MT5 timeframe enum to Raymond API timeframe              |
+//+------------------------------------------------------------------+
+string RaymondTimeframe()
+{
+   switch(InpTimeframe)
+   {
+      case PERIOD_M1:
+         return "M1";
+
+      case PERIOD_M5:
+         return "M5";
+
+      case PERIOD_M15:
+         return "M15";
+
+      case PERIOD_M30:
+         return "M30";
+
+      case PERIOD_H1:
+         return "H1";
+
+      case PERIOD_H4:
+         return "H4";
+
+      case PERIOD_D1:
+         return "D1";
+
+      default:
+         return "M15";
+   }
+}
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                            |
@@ -78,8 +123,8 @@ int OnInit()
 {
    Print("==================================================");
    Print("RAYMOND v2.8 MT5 EA");
-   Print("STEP 11B-7");
-   Print("MODE: DEMO / SAFETY / POSITION MANAGEMENT");
+   Print("STEP 11B-8");
+   Print("MODE: READ-ONLY AI / DEMO / SAFETY");
    Print("LIVE TRADING: HARD LOCKED OFF");
    Print("Symbol: ", InpSymbol);
    Print("Timeframe: ", EnumToString(InpTimeframe));
@@ -91,7 +136,10 @@ int OnInit()
 
    if(TRADING_ENABLED)
    {
-      Print("FATAL SAFETY ERROR: TRADING_ENABLED must remain FALSE.");
+      Print(
+         "FATAL SAFETY ERROR: TRADING_ENABLED must remain FALSE."
+      );
+
       return INIT_FAILED;
    }
 
@@ -113,43 +161,91 @@ int OnInit()
 
    if(InpBackendTimeoutMs < 100)
    {
-      Print("ERROR: Backend timeout must be at least 100 ms.");
+      Print(
+         "ERROR: Backend timeout must be at least 100 ms."
+      );
+
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpAIDecisionIntervalSeconds < 1)
+   {
+      Print(
+         "ERROR: AI decision interval must be at least 1 second."
+      );
+
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpAICandleLimit < 60)
+   {
+      Print(
+         "ERROR: AI candle limit must be at least 60."
+      );
+
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpAICandleLimit > 500)
+   {
+      Print(
+         "ERROR: AI candle limit cannot exceed 500."
+      );
+
       return INIT_PARAMETERS_INCORRECT;
    }
 
    if(InpMaxSpread <= 0.0)
    {
-      Print("ERROR: Maximum spread must be greater than zero.");
+      Print(
+         "ERROR: Maximum spread must be greater than zero."
+      );
+
       return INIT_PARAMETERS_INCORRECT;
    }
 
    if(InpMaxDecisionAgeSeconds < 1)
    {
-      Print("ERROR: Maximum decision age must be greater than zero.");
+      Print(
+         "ERROR: Maximum decision age must be greater than zero."
+      );
+
       return INIT_PARAMETERS_INCORRECT;
    }
 
    if(InpDeviationPoints < 1)
    {
-      Print("ERROR: Deviation must be greater than zero.");
+      Print(
+         "ERROR: Deviation must be greater than zero."
+      );
+
       return INIT_PARAMETERS_INCORRECT;
    }
 
    if(InpBreakEvenTrigger < 0.0)
    {
-      Print("ERROR: Break-even trigger cannot be negative.");
+      Print(
+         "ERROR: Break-even trigger cannot be negative."
+      );
+
       return INIT_PARAMETERS_INCORRECT;
    }
 
    if(InpProfitLockTrigger < 0.0)
    {
-      Print("ERROR: Profit-lock trigger cannot be negative.");
+      Print(
+         "ERROR: Profit-lock trigger cannot be negative."
+      );
+
       return INIT_PARAMETERS_INCORRECT;
    }
 
    if(InpProfitLockDistance <= 0.0)
    {
-      Print("ERROR: Profit-lock distance must be greater than zero.");
+      Print(
+         "ERROR: Profit-lock distance must be greater than zero."
+      );
+
       return INIT_PARAMETERS_INCORRECT;
    }
 
@@ -172,7 +268,7 @@ int OnInit()
    }
 
    // ---------------------------------------------------------------
-   // TELEMETRY BRIDGE
+   // TELEMETRY + AI BRIDGE
    // ---------------------------------------------------------------
 
    Raymond.Configure(
@@ -185,12 +281,19 @@ int OnInit()
 
    if(Raymond.IsConfigured())
    {
-      Print("RAYMOND BRIDGE: Backend URL configured.");
+      Print(
+         "RAYMOND BRIDGE: Backend URL configured."
+      );
    }
    else
    {
-      Print("RAYMOND BRIDGE: Backend URL not configured.");
-      Print("Telemetry will remain inactive until a backend URL is supplied.");
+      Print(
+         "RAYMOND BRIDGE: Backend URL not configured."
+      );
+
+      Print(
+         "Telemetry and AI decision requests will remain inactive."
+      );
    }
 
    // ---------------------------------------------------------------
@@ -232,7 +335,7 @@ int OnInit()
       InpDeviationPoints
    );
 
-   // Emergency stop remains ON at this stage.
+   // Emergency stop remains ON.
    RaymondPositionManagerEngine.SetEmergencyStop(true);
 
    // Live trading remains disabled.
@@ -256,6 +359,10 @@ int OnInit()
 
    g_initialized = true;
    g_last_status_log = TimeCurrent();
+   g_last_ai_request = 0;
+
+   g_ai_action = "HOLD/WAIT";
+   g_ai_confidence = 0.0;
 
    // ---------------------------------------------------------------
    // STARTUP STATUS
@@ -263,6 +370,7 @@ int OnInit()
 
    Print("--------------------------------------------------");
    Print("RAYMOND SAFETY STATUS");
+
    Print(
       "Emergency Stop: ",
       RaymondSafetyEngine.EmergencyStopActive()
@@ -298,9 +406,18 @@ int OnInit()
       : "NO"
    );
 
+   Print(
+      "AI Decision Mode: READ_ONLY"
+   );
+
+   Print(
+      "AI Decision Execution: DISABLED"
+   );
+
    Print("--------------------------------------------------");
    Print("RAYMOND EA initialized successfully.");
    Print("LIVE TRADING IS HARD-LOCKED OFF.");
+   Print("AI MAY RECOMMEND, BUT THIS EA WILL NOT EXECUTE THE AI SIGNAL.");
    Print("==================================================");
 
    return INIT_SUCCEEDED;
@@ -340,7 +457,10 @@ void OnTimer()
    if(!g_initialized)
       return;
 
-   // Absolute safety lock.
+   // ---------------------------------------------------------------
+   // ABSOLUTE SAFETY LOCK
+   // ---------------------------------------------------------------
+
    if(TRADING_ENABLED)
    {
       Print(
@@ -350,25 +470,50 @@ void OnTimer()
       return;
    }
 
-   // Market monitoring.
+   // ---------------------------------------------------------------
+   // MARKET
+   // ---------------------------------------------------------------
+
    MonitorMarket();
 
-   // Account monitoring.
+   // ---------------------------------------------------------------
+   // ACCOUNT
+   // ---------------------------------------------------------------
+
    MonitorAccount();
 
-   // Position monitoring.
+   // ---------------------------------------------------------------
+   // POSITIONS
+   // ---------------------------------------------------------------
+
    MonitorPositions();
 
-   // Position protection.
+   // ---------------------------------------------------------------
+   // POSITION PROTECTION
+   // ---------------------------------------------------------------
    //
-   // The position manager has its emergency stop ON by default.
-   // Therefore this cannot modify positions at this stage.
+   // Emergency stop remains ON, so the existing position manager
+   // remains blocked from modifying positions.
+   // ---------------------------------------------------------------
+
    RaymondPositionManagerEngine.MonitorAllPositions();
 
-   // Backend telemetry.
+   // ---------------------------------------------------------------
+   // READ-ONLY AI DECISION
+   // ---------------------------------------------------------------
+
+   RequestAIDecisionIfDue();
+
+   // ---------------------------------------------------------------
+   // BACKEND TELEMETRY
+   // ---------------------------------------------------------------
+
    SendTelemetry();
 
-   // Periodic status.
+   // ---------------------------------------------------------------
+   // PERIODIC STATUS
+   // ---------------------------------------------------------------
+
    PrintStatusPeriodically();
 }
 
@@ -568,6 +713,128 @@ void MonitorPositions()
 }
 
 //+------------------------------------------------------------------+
+//| Request AI decision when interval has elapsed                     |
+//+------------------------------------------------------------------+
+void RequestAIDecisionIfDue()
+{
+   // ---------------------------------------------------------------
+   // ABSOLUTE SAFETY LOCK
+   // ---------------------------------------------------------------
+
+   if(TRADING_ENABLED)
+   {
+      Print(
+         "RAYMOND AI | Request blocked because trading flag is TRUE."
+      );
+
+      return;
+   }
+
+   if(!Raymond.IsConfigured())
+      return;
+
+   datetime now = TimeCurrent();
+
+   if(
+      g_last_ai_request != 0 &&
+      (now - g_last_ai_request) <
+      InpAIDecisionIntervalSeconds
+   )
+   {
+      return;
+   }
+
+   g_last_ai_request = now;
+
+   string timeframe =
+      RaymondTimeframe();
+
+   Print(
+      "RAYMOND AI | Requesting READ_ONLY decision | Symbol=",
+      InpSymbol,
+      " | Timeframe=",
+      timeframe
+   );
+
+   bool result =
+      Raymond.RequestAIDecision(
+         InpSymbol,
+         timeframe,
+         InpAICandleLimit
+      );
+
+   if(!result)
+   {
+      // ------------------------------------------------------------
+      // FAIL CLOSED
+      // ------------------------------------------------------------
+
+      g_ai_action = "HOLD/WAIT";
+      g_ai_confidence = 0.0;
+
+      Print(
+         "RAYMOND AI | Decision request failed."
+      );
+
+      Print(
+         "RAYMOND AI | HTTP=",
+         Raymond.LastHttpCode(),
+         " | Error=",
+         Raymond.LastError()
+      );
+
+      return;
+   }
+
+   // ---------------------------------------------------------------
+   // Store only the read-only AI result.
+   // ---------------------------------------------------------------
+
+   g_ai_action =
+      Raymond.LastAIAction();
+
+   g_ai_confidence =
+      Raymond.LastAIConfidence();
+
+   PrintFormat(
+      "RAYMOND AI | READ_ONLY RESULT | Action=%s | Confidence=%.2f",
+      g_ai_action,
+      g_ai_confidence
+   );
+
+   // ---------------------------------------------------------------
+   // CRITICAL:
+   //
+   // The result is NOT sent to RaymondExecutionEngine.
+   // The result is NOT sent to CTrade.
+   // The result is NOT used to open a position.
+   //
+   // AI recommendation ends here.
+   // Risk and execution remain separate.
+   // ---------------------------------------------------------------
+
+   if(
+      g_ai_action == "BUY" ||
+      g_ai_action == "SELL"
+   )
+   {
+      Print(
+         "RAYMOND AI | Recommendation received."
+      );
+
+      Print(
+         "RAYMOND AI | Execution remains DISABLED."
+      );
+   }
+   else
+   {
+      Print(
+         "RAYMOND AI | HOLD/WAIT - no trading action."
+      );
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Telemetry                                                        |
 //+------------------------------------------------------------------+
 void SendTelemetry()
@@ -657,9 +924,15 @@ void PrintStatusPeriodically()
 
    Print("--------------------------------------------------");
    Print("RAYMOND PERIODIC STATUS");
+
    Print(
       "Symbol: ",
       InpSymbol
+   );
+
+   Print(
+      "Timeframe: ",
+      RaymondTimeframe()
    );
 
    Print(
@@ -689,6 +962,24 @@ void PrintStatusPeriodically()
 
    Print(
       "Execution Mode: DEMO ONLY"
+   );
+
+   Print(
+      "AI Mode: READ_ONLY"
+   );
+
+   Print(
+      "AI Action: ",
+      g_ai_action
+   );
+
+   PrintFormat(
+      "AI Confidence: %.2f",
+      g_ai_confidence
+   );
+
+   Print(
+      "AI Execution: DISABLED"
    );
 
    Print(
