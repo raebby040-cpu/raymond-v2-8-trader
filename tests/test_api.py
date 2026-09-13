@@ -1,180 +1,265 @@
-"""Tests for API endpoints"""
-import pytest
+"""Production API tests for RAYMOND v2.8.
+
+These tests target the current online production entrypoint and preserve the
+paper-only / read-only safety contract. They intentionally do not place,
+close, or modify real broker orders.
+"""
+
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
-from app.main import app
+
+from online_main import app
+from app import online_market_api
 
 
 client = TestClient(app)
 
 
-class TestHealthEndpoints:
-    """Test health check endpoints"""
-    
-    def test_health_check(self):
-        """Test /health endpoint"""
-        response = client.get("/health")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "healthy"
-        assert "version" in data
-        assert "live_trading_enabled" in data
-    
-    def test_root_endpoint(self):
-        """Test / root endpoint"""
-        response = client.get("/")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "name" in data
-        assert "description" in data
-        assert "endpoints" in data
+def test_health_endpoint_is_healthy_and_live_trading_is_disabled():
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["service"] == "raymond-v2-8-trader"
+    assert "timestamp" in data
+    assert data["live_trading_enabled"] is False
 
 
-class TestMarketDataEndpoints:
-    """Test market data endpoints"""
-    
-    def test_get_current_price(self):
-        """Test /api/market/price endpoint"""
-        response = client.get("/api/market/price?symbol=XAUUSD")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["symbol"] == "XAUUSD"
-        assert "price" in data
-        assert "bid" in data
-        assert "ask" in data
-        assert "timestamp" in data
-    
-    def test_get_candlesticks(self):
-        """Test /api/market/candlesticks endpoint"""
-        response = client.get("/api/market/candlesticks?symbol=XAUUSD&timeframe=H1&limit=10")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["symbol"] == "XAUUSD"
-        assert data["timeframe"] == "H1"
-        assert "candlesticks" in data
-        assert "total" in data
-    
-    def test_get_indicators(self):
-        """Test /api/market/indicators endpoint"""
-        response = client.get("/api/market/indicators?symbol=XAUUSD")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["symbol"] == "XAUUSD"
-        assert "indicators" in data
-        assert "ema20" in data["indicators"]
-        assert "ema50" in data["indicators"]
-        assert "rsi" in data["indicators"]
-        assert "atr" in data["indicators"]
+def test_online_status_is_read_only():
+    response = client.get("/api/online/status")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["online"] is True
+    assert data["market_feed"] is True
+    assert data["paper_trading_enabled"] is True
+    assert data["demo_trading_enabled"] is True
+
+    assert data["live_trading_enabled"] is False
+    assert data["execution_authorized"] is False
+    assert data["broker_orders_allowed"] is False
+
+    assert data["trading_permissions"]["market_read"] is True
+    assert data["trading_permissions"]["analysis"] is True
+    assert data["trading_permissions"]["paper"] is True
+    assert data["trading_permissions"]["live"] is False
 
 
-class TestTradingEndpoints:
-    """Test trading endpoints"""
-    
-    def test_place_order(self):
-        """Test POST /api/trading/place-order endpoint"""
-        order_data = {
+def test_online_candlesticks_rejects_unsupported_symbol():
+    response = client.get(
+        "/api/online/candlesticks"
+        "?symbol=EURUSD&timeframe=H1&limit=60"
+    )
+
+    assert response.status_code == 400
+
+    detail = response.json()["detail"]
+
+    assert "supports XAUUSD only" in detail["error"]
+
+
+def test_online_candlesticks_rejects_unsupported_timeframe():
+    response = client.get(
+        "/api/online/candlesticks"
+        "?symbol=XAUUSD&timeframe=M2&limit=60"
+    )
+
+    assert response.status_code == 400
+
+    detail = response.json()["detail"]
+
+    assert detail["error"] == "Unsupported timeframe"
+
+
+def test_online_price_is_read_only(monkeypatch):
+    async def fake_fetch_chart(symbol, timeframe, limit):
+        return {
             "symbol": "XAUUSD",
-            "order_type": "market",
-            "direction": "buy",
-            "quantity": 0.5
+            "source_symbol": "XAUUSD=X",
+            "timeframe": timeframe,
+            "price": 5000.25,
+            "candles": [],
+            "source": "test feed",
+            "source_type": "test",
+            "timestamp": "2026-09-13T00:00:00+00:00",
+            "market_timestamp": 1234567890,
+            "live_trading_allowed": False,
         }
-        response = client.post("/api/trading/place-order", json=order_data)
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "order_id" in data
-        assert data["status"] == "placed"
-        assert data["symbol"] == "XAUUSD"
-        assert data["execution_type"] in ["paper", "live"]
-    
-    def test_get_positions(self):
-        """Test GET /api/trading/positions endpoint"""
-        response = client.get("/api/trading/positions")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "positions" in data
-        assert "total_positions" in data
-    
-    def test_close_position(self):
-        """Test POST /api/trading/close-position endpoint"""
-        response = client.post("/api/trading/close-position?position_id=POS-001")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["position_id"] == "POS-001"
-        assert data["status"] == "closed"
+
+    monkeypatch.setattr(
+        online_market_api,
+        "_fetch_chart",
+        fake_fetch_chart,
+    )
+
+    response = client.get("/api/online/price?symbol=XAUUSD")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["symbol"] == "XAUUSD"
+    assert data["price"] == 5000.25
+    assert data["live_trading_enabled"] is False
+    assert data["source_type"] == "test"
 
 
-class TestStrategyEndpoints:
-    """Test strategy endpoints"""
-    
-    def test_get_strategy_decision(self):
-        """Test GET /api/strategy/decision endpoint"""
-        response = client.get("/api/strategy/decision?symbol=XAUUSD")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["symbol"] == "XAUUSD"
-        assert "decision" in data
-        assert "confidence" in data
-        assert "reason" in data
-    
-    def test_run_backtest(self):
-        """Test POST /api/strategy/backtest endpoint"""
-        backtest_config = {
+def test_online_candlesticks_returns_read_only_market_data(monkeypatch):
+    candles = [
+        {
+            "time": 1234560000 + index * 3600,
+            "open": 5000.0 + index,
+            "high": 5001.0 + index,
+            "low": 4999.0 + index,
+            "close": 5000.5 + index,
+            "volume": 100.0,
+        }
+        for index in range(60)
+    ]
+
+    async def fake_fetch_chart(symbol, timeframe, limit):
+        return {
             "symbol": "XAUUSD",
-            "start_date": "2026-01-01",
-            "end_date": "2026-09-01"
+            "source_symbol": "XAUUSD=X",
+            "timeframe": timeframe,
+            "price": candles[-1]["close"],
+            "candles": candles[-limit:],
+            "source": "test feed",
+            "source_type": "test",
+            "timestamp": "2026-09-13T00:00:00+00:00",
+            "market_timestamp": 1234567890,
+            "live_trading_allowed": False,
         }
-        response = client.post("/api/strategy/backtest", json=backtest_config)
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "backtest_id" in data
-        assert data["status"] == "completed"
-        assert "total_trades" in data
-        assert "win_rate" in data
+
+    monkeypatch.setattr(
+        online_market_api,
+        "_fetch_chart",
+        fake_fetch_chart,
+    )
+
+    response = client.get(
+        "/api/online/candlesticks"
+        "?symbol=XAUUSD&timeframe=H1&limit=60"
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["symbol"] == "XAUUSD"
+    assert data["timeframe"] == "H1"
+    assert len(data["candles"]) == 60
+    assert data["live_trading_allowed"] is False
 
 
-class TestJournalEndpoints:
-    """Test journal endpoints"""
-    
-    def test_get_trade_journal(self):
-        """Test GET /api/journal/trades endpoint"""
-        response = client.get("/api/journal/trades?limit=10&offset=0")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "trades" in data
-        assert "total" in data
-        assert "limit" in data
-        assert "offset" in data
+def test_online_analysis_returns_wait_when_ai_has_no_trade_signal(
+    monkeypatch,
+):
+    candles = [
+        {
+            "time": 1234560000 + index * 900,
+            "open": 5000.0,
+            "high": 5001.0,
+            "low": 4999.0,
+            "close": 5000.0,
+            "volume": 100.0,
+        }
+        for index in range(60)
+    ]
 
+    async def fake_fetch_chart(symbol, timeframe, limit):
+        return {
+            "symbol": "XAUUSD",
+            "source_symbol": "XAUUSD=X",
+            "timeframe": timeframe,
+            "price": 5000.0,
+            "candles": candles,
+            "source": "test feed",
+            "source_type": "test",
+            "timestamp": "2026-09-13T00:00:00+00:00",
+            "market_timestamp": 1234567890,
+            "live_trading_allowed": False,
+        }
 
-class TestAdminEndpoints:
-    """Test admin endpoints"""
-    
-    def test_admin_status(self):
-        """Test GET /api/admin/status endpoint"""
-        response = client.get("/api/admin/status")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "status" in data
-        assert "live_trading_enabled" in data
-        assert "environment" in data
-    
-    def test_emergency_stop(self):
-        """Test POST /api/admin/emergency-stop endpoint"""
-        response = client.post("/api/admin/emergency-stop")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "emergency_stop_activated"
-        assert data["all_positions_closed"] is True
-        assert data["new_orders_blocked"] is True
+    indicators = SimpleNamespace(
+        symbol="XAUUSD",
+        timeframe="M15",
+        close=5000.0,
+        ema20=5000.0,
+        ema50=5000.0,
+        rsi14=50.0,
+        atr14=10.0,
+        macd=0.0,
+        macd_signal=0.0,
+        macd_histogram=0.0,
+        trend="sideways",
+        score=50,
+        signal="HOLD",
+        candles_used=60,
+    )
+
+    decision = SimpleNamespace(
+        direction=SimpleNamespace(value="WAIT"),
+        confidence=0.0,
+        technical_score=50,
+        trend="sideways",
+        signal="HOLD",
+        reasoning="No validated setup.",
+        execution_type="paper",
+        read_only=True,
+        broker_order_required=False,
+        risk_engine_required=True,
+        proposal=None,
+    )
+
+    monkeypatch.setattr(
+        online_market_api,
+        "_fetch_chart",
+        fake_fetch_chart,
+    )
+
+    monkeypatch.setattr(
+        online_market_api,
+        "calculate_indicators",
+        lambda **kwargs: indicators,
+    )
+
+    monkeypatch.setattr(
+        online_market_api._ai,
+        "evaluate",
+        lambda context: decision,
+    )
+
+    monkeypatch.setattr(
+        online_market_api,
+        "indicator_result_to_dict",
+        lambda value: {
+            "signal": "HOLD",
+            "score": 50,
+        },
+    )
+
+    response = client.get(
+        "/api/online/analysis"
+        "?symbol=XAUUSD&timeframe=M15&limit=60"
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["accepted"] is True
+
+    assert data["decision"]["direction"] == "WAIT"
+    assert data["decision"]["action"] == "HOLD/WAIT"
+    assert data["decision"]["execution_type"] == "paper"
+    assert data["decision"]["read_only"] is True
+    assert data["decision"]["broker_order_required"] is False
+
+    assert data["safety"]["live_trading_enabled"] is False
+    assert data["safety"]["execution_authorized"] is False
+    assert data["safety"]["broker_order_allowed"] is False
+    assert data["safety"]["read_only"] is True
