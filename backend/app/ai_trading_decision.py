@@ -488,12 +488,18 @@ class AITradingDecisionEngine:
         context: TechnicalContext,
         confluence: int,
     ) -> AIDirection:
-        """Determine BUY, SELL, or WAIT."""
+        """
+        Determine BUY, SELL, or WAIT.
+
+        Confluence is advisory intelligence here.
+        It is deliberately not a hard directional gate because
+        the established signal/trend/score rules remain the
+        primary directional authority.
+
+        Risk Engine and safety controls remain mandatory.
+        """
 
         if context.signal == "WAIT":
-            return AIDirection.WAIT
-
-        if confluence < self.config.minimum_confluence:
             return AIDirection.WAIT
 
         if (
@@ -591,12 +597,6 @@ class AITradingDecisionEngine:
         if context.trend == "Neutral":
             reasons.append(
                 "the market trend is neutral"
-            )
-
-        if confluence < self.config.minimum_confluence:
-            reasons.append(
-                "technical confluence is below "
-                "the minimum threshold"
             )
 
         if confidence < self.config.minimum_confidence:
@@ -794,9 +794,6 @@ class AITradingDecisionEngine:
         )
 
         if confidence < self.config.minimum_confidence:
-            direction = AIDirection.WAIT
-
-        if confluence < self.config.minimum_confluence:
             direction = AIDirection.WAIT
 
         if direction == AIDirection.WAIT:
