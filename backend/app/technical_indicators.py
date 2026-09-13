@@ -109,10 +109,12 @@ def _extract_ohlc(
                 candle["high"],
                 f"candle[{index}].high",
             )
+
             low = _number(
                 candle["low"],
                 f"candle[{index}].low",
             )
+
             close = _number(
                 candle["close"],
                 f"candle[{index}].close",
@@ -122,6 +124,7 @@ def _extract_ohlc(
                 candle.get("open", close),
                 f"candle[{index}].open",
             )
+
         except KeyError as exc:
             raise TechnicalIndicatorError(
                 f"Missing candle field: {exc.args[0]}."
@@ -187,9 +190,10 @@ def ema(
 
     multiplier = 2.0 / (period + 1.0)
 
-    seed = sum(
-        numeric[:period]
-    ) / period
+    seed = (
+        sum(numeric[:period])
+        / period
+    )
 
     result = [seed]
 
@@ -197,7 +201,8 @@ def ema(
 
     for value in numeric[period:]:
         current = (
-            (value - previous) * multiplier
+            (value - previous)
+            * multiplier
             + previous
         )
 
@@ -211,7 +216,10 @@ def latest_ema(
     values: Sequence[float],
     period: int,
 ) -> Optional[float]:
-    result = ema(values, period)
+    result = ema(
+        values,
+        period,
+    )
 
     if not result:
         return None
@@ -248,7 +256,10 @@ def rsi(
     gains: List[float] = []
     losses: List[float] = []
 
-    for index in range(1, len(numeric)):
+    for index in range(
+        1,
+        len(numeric),
+    ):
         change = (
             numeric[index]
             - numeric[index - 1]
@@ -284,7 +295,9 @@ def rsi(
 
             return 100.0
 
-        relative_strength = gain / loss
+        relative_strength = (
+            gain / loss
+        )
 
         return 100.0 - (
             100.0
@@ -395,15 +408,22 @@ def true_ranges(
     ):
         high = numeric_highs[index]
         low = numeric_lows[index]
-        previous_close = numeric_closes[
-            index - 1
-        ]
+
+        previous_close = (
+            numeric_closes[index - 1]
+        )
 
         ranges.append(
             max(
                 high - low,
-                abs(high - previous_close),
-                abs(low - previous_close),
+                abs(
+                    high
+                    - previous_close
+                ),
+                abs(
+                    low
+                    - previous_close
+                ),
             )
         )
 
@@ -595,7 +615,8 @@ def macd(
         "macd": macd_value,
         "signal": signal_value,
         "histogram": (
-            macd_value - signal_value
+            macd_value
+            - signal_value
         ),
     }
 
@@ -635,6 +656,14 @@ def determine_trend(
     - BUY
     - SELL
     - WAIT
+
+    Trend values intentionally use:
+    - Bullish
+    - Bearish
+    - Neutral
+
+    These exact values are required by the
+    downstream AI decision engine.
     """
 
     score = 50
@@ -650,6 +679,7 @@ def determine_trend(
         if close > ema20_value:
             bullish_points += 1
             score += 8
+
         elif close < ema20_value:
             bearish_points += 1
             score -= 8
@@ -665,6 +695,7 @@ def determine_trend(
         if ema20_value > ema50_value:
             bullish_points += 2
             score += 12
+
         elif ema20_value < ema50_value:
             bearish_points += 2
             score -= 12
@@ -677,13 +708,16 @@ def determine_trend(
         if 50.0 < rsi_value < 70.0:
             bullish_points += 1
             score += 8
+
         elif 30.0 < rsi_value < 50.0:
             bearish_points += 1
             score -= 8
+
         elif rsi_value >= 70.0:
             # Overbought is not automatically bearish,
             # therefore only a small penalty.
             score -= 3
+
         elif rsi_value <= 30.0:
             # Oversold is not automatically bullish,
             # therefore only a small positive adjustment.
@@ -700,6 +734,7 @@ def determine_trend(
         if macd_value > macd_signal_value:
             bullish_points += 1
             score += 8
+
         elif macd_value < macd_signal_value:
             bearish_points += 1
             score -= 8
@@ -714,23 +749,27 @@ def determine_trend(
         bullish_points >= 3
         and bullish_points > bearish_points
     ):
-        trend = "BULLISH"
+        trend = "Bullish"
+
     elif (
         bearish_points >= 3
         and bearish_points > bullish_points
     ):
-        trend = "BEARISH"
+        trend = "Bearish"
+
     else:
-        trend = "NEUTRAL"
+        trend = "Neutral"
 
     # --------------------------------------------------------
     # Conservative signal
     # --------------------------------------------------------
 
-    if trend == "BULLISH" and score >= 65:
+    if trend == "Bullish" and score >= 65:
         signal = "BUY"
-    elif trend == "BEARISH" and score <= 35:
+
+    elif trend == "Bearish" and score <= 35:
         signal = "SELL"
+
     else:
         signal = "WAIT"
 
@@ -875,7 +914,9 @@ def indicator_result_to_dict(
             "atr14": result.atr14,
             "macd": result.macd,
             "macd_signal": result.macd_signal,
-            "macd_histogram": result.macd_histogram,
+            "macd_histogram": (
+                result.macd_histogram
+            ),
         },
         "analysis": {
             "trend": result.trend,
