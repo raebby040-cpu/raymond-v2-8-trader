@@ -2,18 +2,14 @@ name: Build Raymond V2.8 Android APK
 
 on:
   workflow_dispatch:
-
   push:
     tags:
       - "v*.*.*"
-
   release:
-    types:
-      - published
+    types: [published]
 
 jobs:
-  build-apk:
-    name: Build Raymond V2.8 APK
+  build-android:
     runs-on: ubuntu-latest
 
     defaults:
@@ -21,41 +17,21 @@ jobs:
         working-directory: flutter_app
 
     steps:
-      - name: Checkout Raymond V2.8
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.35.2"
           channel: stable
           cache: true
 
-      - name: Show tool versions
-        run: |
-          echo "===== JAVA ====="
-          java -version
-          echo "===== FLUTTER ====="
-          flutter --version
-          echo "===== DART ====="
-          dart --version
-
       - name: Check Flutter project
         run: |
-          test -f pubspec.yaml || {
-            echo "ERROR: pubspec.yaml missing"
-            exit 1
-          }
-
-          test -f lib/main.dart || {
-            echo "ERROR: lib/main.dart missing"
-            exit 1
-          }
+          flutter --version
+          test -f pubspec.yaml
+          echo "Flutter project found."
 
       - name: Create Android platform if missing
         run: |
@@ -66,35 +42,38 @@ jobs:
             echo "Android directory already exists."
           fi
 
-      - name: Get dependencies
+      - name: Ensure Android Internet permission
+        run: |
+          grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml || \
+          sed -i '/<application/i\    <uses-permission android:name="android.permission.INTERNET"/>' \
+          android/app/src/main/AndroidManifest.xml
+
+          echo "Checking Internet permission..."
+          grep 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
+
+      - name: Get Flutter dependencies
         run: flutter pub get
 
       - name: Analyze Flutter project
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        run: flutter analyze
+
       - name: Run Flutter tests
         run: flutter test
 
-      - name: Build release APKs
+      - name: Build Android APKs
         run: flutter build apk --release --split-per-abi
 
       - name: Verify APKs
         run: |
-          echo "===== APK OUTPUT ====="
-          ls -lah build/app/outputs/flutter-apk/
-
-          APK_COUNT=$(find build/app/outputs/flutter-apk -name "*.apk" | wc -l)
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERROR: No APK files were generated."
-            exit 1
-          fi
-
-          echo "Successfully generated $APK_COUNT APK file(s)."
+          ls -lh build/app/outputs/flutter-apk/
+          test -f build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          test -f build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+          test -f build/app/outputs/flutter-apk/app-x86_64-release.apk
+          echo "All APKs verified successfully."
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: raymond-v2-8-apks
           path: flutter_app/build/app/outputs/flutter-apk/*.apk
-          if-no-files-found: error
           retention-days: 30
