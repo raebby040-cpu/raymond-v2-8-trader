@@ -1,29 +1,27 @@
-version: '3.8'
-
 services:
-  # FastAPI Backend
-  backend:
+  raymond:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
-    container_name: raymond-backend
+    container_name: raymond-v2-8-trader
     ports:
       - "8000:8000"
 
     environment:
-      - DATABASE_URL=sqlite:///./raymond.db
-      - LIVE_TRADING_ENABLED=false
-      - RAYMOND_ENV=development
-      - MT5_LOGIN=demo_login
-      - MT5_PASSWORD=demo_password
-      - MT5_SERVER=MT5-Demo
-      - EMERGENCY_API_KEY=${EMERGENCY_API_KEY:-your_key_here}
+      DATABASE_URL: sqlite:///./raymond.db
+      LIVE_TRADING_ENABLED: "false"
+      RAYMOND_ENV: development
+      LOG_LEVEL: INFO
 
-    volumes:
-      - ./backend:/app
-      - raymond_data:/app/data
+      MT5_LOGIN: demo_login
+      MT5_PASSWORD: demo_password
+      MT5_SERVER: MT5-Demo
+      MT5_ACCOUNT_TYPE: demo
 
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command:
+      - sh
+      - -c
+      - uvicorn online_main:app --host 0.0.0.0 --port 8000
 
     healthcheck:
       test:
@@ -37,7 +35,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-volumes:
-  raymond_data:
-    driver: local
