@@ -1,18 +1,15 @@
 """
 RAYMOND v2.8 - Database Migration Layer
 
-Purpose
--------
-Provides explicit, idempotent database schema upgrades for the
-RAYMOND trading system.
+Provides explicit, idempotent database schema upgrades.
 
 Stage 16.2
-----------
-Adds persistent Position state required for restart recovery.
+-----------
+Persistent Position State and restart recovery.
 
 Stage 16.3
-----------
-Adds persistent trade thesis storage to the Position table.
+-----------
+Persistent Trade Thesis.
 
 Safety
 ------
@@ -21,8 +18,7 @@ Safety
 - Missing columns are added individually.
 - Migrations are idempotent.
 - Migration failures are not silently ignored.
-- Application startup should fail if the required schema cannot
-  be upgraded successfully.
+- Application startup fails closed when schema migration fails.
 """
 
 from sqlalchemy import inspect, text
@@ -36,21 +32,17 @@ except ImportError:
 
 
 # -------------------------------------------------------------------
-# POSITION SCHEMA
+# POSITION COLUMNS
 # -------------------------------------------------------------------
 
 POSITION_COLUMNS = {
-    # Stage 16.2 - persistent position identity
+    # Stage 16.2
     "trade_id": "VARCHAR",
-
-    # Original trade state
     "original_quantity": "FLOAT",
     "initial_stop_loss": "FLOAT",
     "take_profit_1": "FLOAT",
     "take_profit_2": "FLOAT",
     "risk_1r": "FLOAT",
-
-    # Live position state
     "current_price": "FLOAT",
     "current_stop_loss": "FLOAT",
     "remaining_quantity": "FLOAT",
@@ -58,15 +50,13 @@ POSITION_COLUMNS = {
     "take_profit": "FLOAT",
     "pnl": "FLOAT",
     "pnl_percent": "FLOAT",
-
-    # Entry thesis context
     "regime": "VARCHAR",
     "setup": "VARCHAR",
     "technical_score": "FLOAT",
     "confluence": "FLOAT",
     "confidence": "FLOAT",
 
-    # Stage 16.3 - persistent trade thesis
+    # Stage 16.3
     "trade_thesis": "VARCHAR",
 
     # Management state
@@ -91,6 +81,7 @@ def get_table_columns(connection, table_name):
     """
     Return the existing column names for a database table.
     """
+
     inspector = inspect(connection)
 
     if not inspector.has_table(table_name):
@@ -109,13 +100,10 @@ def add_missing_column(
     column_definition,
 ):
     """
-    Add one database column if it does not already exist.
+    Add a column only when it does not already exist.
 
-    Returns
-    -------
-    bool
-        True when a column was added.
-        False when it already existed.
+    Returns True when the column was added.
+    Returns False when it already existed.
     """
 
     existing_columns = get_table_columns(
@@ -126,24 +114,21 @@ def add_missing_column(
     if column_name in existing_columns:
         return False
 
-    statement = text(
-        f"ALTER TABLE {table_name} "
-        f"ADD COLUMN {column_name} {column_definition}"
+    connection.execute(
+        text(
+            f"ALTER TABLE {table_name} "
+            f"ADD COLUMN {column_name} {column_definition}"
+        )
     )
-
-    connection.execute(statement)
 
     return True
 
 
 def create_trade_id_index(connection):
     """
-    Create the trade_id index when possible.
+    Create the trade_id index when trade_id exists.
 
-    The index is created only when trade_id exists.
-
-    SQLite and PostgreSQL both support CREATE INDEX IF NOT EXISTS,
-    which makes this operation safe to run repeatedly.
+    CREATE INDEX IF NOT EXISTS keeps this operation idempotent.
     """
 
     existing_columns = get_table_columns(
@@ -169,15 +154,12 @@ def create_trade_id_index(connection):
 # STAGE 16.2
 # -------------------------------------------------------------------
 
-def migrate_stage_16_2(connection):
+def _migrate_stage_16_2(connection):
     """
-    Upgrade the positions table for Stage 16.2.
+    Internal Stage 16.2 migration implementation.
 
-    Stage 16.2 establishes persistent Position state so that
-    open paper positions can survive application/database session
-    restarts.
-
-    The migration is intentionally additive.
+    This function receives an existing database connection so the
+    complete migration can run inside the same transaction.
     """
 
     if not inspect(connection).has_table("positions"):
@@ -188,13 +170,12 @@ def migrate_stage_16_2(connection):
 
     added_columns = []
 
-    stage_16_2_columns = {
-        name: definition
-        for name, definition in POSITION_COLUMNS.items()
-        if name != "trade_thesis"
-    }
+    for column_name, column_definition in POSITION_COLUMNS.items():
 
-    for column_name, column_definition in stage_16_2_columns.items():
+        # Stage 16.3 is handled separately.
+        if column_name == "trade_thesis":
+            continue
+
         if add_missing_column(
             connection,
             "positions",
@@ -213,21 +194,40 @@ def migrate_stage_16_2(connection):
     }
 
 
+def migrate_stage_16_2(connection=None):
+    """
+    Public Stage 16.2 migration.
+
+    Compatibility:
+    - Existing callers may call migrate_stage_16_2()
+      without arguments.
+    - The main migration runner may provide an existing
+      transaction connection.
+
+    This preserves the original Stage 16.2 API used by the
+    existing test suite.
+    """
+
+    if connection is not None:
+        return _migrate_stage_16_2(connection)
+
+    create_tables()
+
+    with engine.begin() as migration_connection:
+        return _migrate_stage_16_2(
+            migration_connection
+        )
+
+
 # -------------------------------------------------------------------
 # STAGE 16.3
 # -------------------------------------------------------------------
 
-def migrate_stage_16_3(connection):
+def _migrate_stage_16_3(connection):
     """
-    Upgrade the positions table for Stage 16.3.
+    Internal Stage 16.3 migration implementation.
 
-    Stage 16.3 adds persistent trade thesis storage.
-
-    The thesis belongs to the Position because the thesis is part
-    of the original decision context that should remain available
-    after a restart.
-
-    This migration is additive and idempotent.
+    Adds persistent trade_thesis storage to positions.
     """
 
     if not inspect(connection).has_table("positions"):
@@ -254,22 +254,43 @@ def migrate_stage_16_3(connection):
     }
 
 
+def migrate_stage_16_3(connection=None):
+    """
+    Public Stage 16.3 migration.
+
+    Supports both:
+        migrate_stage_16_3()
+
+    and:
+        migrate_stage_16_3(connection)
+    """
+
+    if connection is not None:
+        return _migrate_stage_16_3(connection)
+
+    create_tables()
+
+    with engine.begin() as migration_connection:
+        return _migrate_stage_16_3(
+            migration_connection
+        )
+
+
 # -------------------------------------------------------------------
 # MAIN MIGRATION ENTRY POINT
 # -------------------------------------------------------------------
 
 def run_database_migrations():
     """
-    Run all required RAYMOND database migrations.
+    Run all required database migrations in stage order.
 
-    Migrations are executed in stage order.
+    Both Stage 16.2 and Stage 16.3 execute inside the same
+    database transaction.
 
-    A failure raises an exception so that application startup can
-    fail closed rather than running against an incomplete schema.
+    Any failure raises an exception and prevents the application
+    from silently starting against an incomplete schema.
     """
 
-    # Ensure ORM-created tables exist before applying additive
-    # schema migrations.
     create_tables()
 
     results = []
