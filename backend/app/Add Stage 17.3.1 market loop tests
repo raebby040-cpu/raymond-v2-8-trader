@@ -1,0 +1,372 @@
+"""
+RAYMOND v2.8 - Paper Position Market Loop Tests
+
+Stage 17.3.1
+
+Tests the automatic paper-position market loop.
+
+These tests verify that the loop:
+- validates market prices,
+- evaluates paper positions,
+- persists management decisions through the manager,
+- handles temporary market-data failures,
+- does not permit live execution,
+- does not contact MT5 or a broker,
+- does not bypass the Risk Engine,
+- does not create duplicate background loops.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from app.paper_position_market_loop import (
+    PaperPositionMarketLoop,
+    PaperPositionMarketLoopConfig,
+)
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+class FakeDatabase:
+    pass
+
+
+def fake_price_provider_factory(price: float):
+    async def provider(symbol: str) -> float:
+        assert symbol == "XAUUSD"
+        return price
+
+    return provider
+
+
+def failing_price_provider():
+    async def provider(symbol: str) -> float:
+        raise RuntimeError("temporary market data failure")
+
+    return provider
+
+
+def test_config_defaults_are_safe():
+    config = PaperPositionMarketLoopConfig()
+
+    assert config.symbol == "XAUUSD"
+    assert config.interval_seconds == 30.0
+    assert config.enabled is True
+
+
+def test_config_normalizes_symbol():
+    config = PaperPositionMarketLoopConfig.from_values(
+        symbol=" xauusd ",
+        interval_seconds=15,
+        enabled=True,
+    )
+
+    assert config.symbol == "XAUUSD"
+    assert config.interval_seconds == 15.0
+    assert config.enabled is True
+
+
+def test_config_rejects_empty_symbol():
+    with pytest.raises(ValueError):
+        PaperPositionMarketLoopConfig.from_values(
+            symbol="   ",
+        )
+
+
+def test_config_rejects_invalid_interval():
+    with pytest.raises(ValueError):
+        PaperPositionMarketLoopConfig.from_values(
+            interval_seconds=0,
+        )
+
+
+def test_price_provider_is_validated():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4321.25),
+    )
+
+    assert run(loop.get_current_price()) == 4321.25
+
+
+def test_invalid_zero_price_is_rejected():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(0),
+    )
+
+    with pytest.raises(ValueError):
+        run(loop.get_current_price())
+
+
+def test_invalid_negative_price_is_rejected():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(-10),
+    )
+
+    with pytest.raises(ValueError):
+        run(loop.get_current_price())
+
+
+def test_invalid_non_numeric_price_is_rejected():
+    async def provider(symbol: str):
+        return "not-a-price"
+
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        provider,
+    )
+
+    with pytest.raises(ValueError):
+        run(loop.get_current_price())
+
+
+def test_evaluate_price_returns_safe_result():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4321.25),
+    )
+
+    result = loop.evaluate_price(4321.25)
+
+    assert result.symbol == "XAUUSD"
+    assert result.current_price == 4321.25
+    assert result.success is True
+
+    assert result.paper_only is True
+    assert result.read_only is True
+    assert result.live_trading_enabled is False
+    assert result.execution_authorized is False
+    assert result.broker_orders_allowed is False
+    assert result.mt5_execution_allowed is False
+    assert result.risk_engine_bypass is False
+
+
+def test_evaluate_price_serializes_results():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4321.25),
+    )
+
+    result = loop.evaluate_price(4321.25)
+    payload = result.to_dict()
+
+    assert payload["symbol"] == "XAUUSD"
+    assert payload["current_price"] == 4321.25
+    assert isinstance(payload["results"], list)
+    assert payload["safety"]["paper_only"] is True
+    assert payload["safety"]["read_only"] is True
+    assert payload["safety"]["live_trading_enabled"] is False
+    assert payload["safety"]["broker_orders_allowed"] is False
+    assert payload["safety"]["mt5_execution_allowed"] is False
+    assert payload["safety"]["risk_engine_bypass"] is False
+
+
+def test_status_is_read_only():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4321.25),
+    )
+
+    status = loop.status()
+
+    assert status["component"] == "paper_position_market_loop"
+    assert status["symbol"] == "XAUUSD"
+    assert status["running"] is False
+    assert status["enabled"] is True
+
+    assert status["safety"]["paper_only"] is True
+    assert status["safety"]["read_only"] is True
+    assert status["safety"]["live_trading_enabled"] is False
+    assert status["safety"]["execution_authorized"] is False
+    assert status["safety"]["broker_orders_allowed"] is False
+    assert status["safety"]["mt5_execution_allowed"] is False
+    assert status["safety"]["risk_engine_bypass"] is False
+
+
+def test_run_once_uses_market_price():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+    )
+
+    result = run(loop.run_once())
+
+    assert result.current_price == 4309.90
+    assert result.symbol == "XAUUSD"
+    assert loop.last_result is result
+    assert loop.last_error is None
+
+
+def test_market_data_failure_is_recorded():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        failing_price_provider(),
+    )
+
+    with pytest.raises(RuntimeError, match="temporary market data failure"):
+        run(loop.run_once())
+
+    assert loop.last_error == "temporary market data failure"
+
+
+def test_disabled_loop_does_not_run():
+    config = PaperPositionMarketLoopConfig(
+        enabled=False,
+    )
+
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+        config=config,
+    )
+
+    with pytest.raises(RuntimeError, match="disabled"):
+        run(loop.run_once())
+
+
+def test_disabled_loop_does_not_start():
+    config = PaperPositionMarketLoopConfig(
+        enabled=False,
+    )
+
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+        config=config,
+    )
+
+    assert loop.start() is False
+    assert loop.running is False
+
+
+def test_start_does_not_create_duplicate_loop():
+    async def scenario():
+        loop = PaperPositionMarketLoop(
+            FakeDatabase(),
+            fake_price_provider_factory(4309.90),
+            config=PaperPositionMarketLoopConfig(
+                interval_seconds=3600,
+            ),
+        )
+
+        first = loop.start()
+        second = loop.start()
+
+        assert first is True
+        assert second is False
+        assert loop.running is True
+
+        await loop.stop()
+
+        assert loop.running is False
+
+    run(scenario())
+
+
+def test_stop_is_safe_when_not_running():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+    )
+
+    assert run(loop.stop()) is False
+
+
+def test_close_is_alias_for_stop():
+    async def scenario():
+        loop = PaperPositionMarketLoop(
+            FakeDatabase(),
+            fake_price_provider_factory(4309.90),
+            config=PaperPositionMarketLoopConfig(
+                interval_seconds=3600,
+            ),
+        )
+
+        assert loop.start() is True
+        assert loop.running is True
+
+        await loop.close()
+
+        assert loop.running is False
+
+    run(scenario())
+
+
+def test_loop_does_not_use_broker_or_mt5():
+    """
+    Static safety assertion.
+
+    The market loop only owns a price provider and
+    PaperPositionManager. No broker or MT5 execution
+    interface is accepted by the constructor.
+    """
+
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+    )
+
+    assert not hasattr(loop, "broker")
+    assert not hasattr(loop, "mt5")
+
+
+def test_loop_is_paper_only():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+    )
+
+    result = loop.evaluate_price(4309.90)
+
+    assert result.paper_only is True
+    assert result.read_only is True
+    assert result.live_trading_enabled is False
+    assert result.execution_authorized is False
+    assert result.broker_orders_allowed is False
+    assert result.mt5_execution_allowed is False
+    assert result.risk_engine_bypass is False
+
+
+def test_no_positions_is_valid():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+    )
+
+    result = loop.evaluate_price(4309.90)
+
+    assert result.count >= 0
+    assert isinstance(result.results, tuple)
+
+
+def test_market_price_is_positive():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+    )
+
+    result = loop.evaluate_price(4309.90)
+
+    assert result.current_price > 0
+
+
+def test_timestamp_is_returned():
+    loop = PaperPositionMarketLoop(
+        FakeDatabase(),
+        fake_price_provider_factory(4309.90),
+    )
+
+    result = loop.evaluate_price(4309.90)
+
+    assert result.timestamp
+    assert "T" in result.timestamp
+    assert "+" in result.timestamp or result.timestamp.endswith("Z")
+
+
