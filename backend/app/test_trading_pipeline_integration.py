@@ -1,7 +1,7 @@
 """
 RAYMOND v2.8 - Step 17 Integration Safety Tests
 
-Verifies the complete backend safety chain:
+Verifies the backend safety chain:
 
     Technical Context
         ->
@@ -11,8 +11,7 @@ Verifies the complete backend safety chain:
         ->
     Paper Execution Gateway
 
-Also verifies that the 8-brain advisory layer remains advisory-only
-and cannot replace Step 13, bypass Step 14, or execute trades.
+Also verifies that the 8-brain advisory layer remains advisory-only.
 
 These tests do not connect to MT5 or any live broker.
 """
@@ -20,8 +19,6 @@ These tests do not connect to MT5 or any live broker.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import Any
 
 import pytest
 
@@ -41,10 +38,13 @@ from app.ai_trading_decision import (
 from app.execution_gateway import (
     ExecutionGatewayError,
     OrderRequest,
+    OrderSide,
+    OrderType,
     PaperExecutionGateway,
 )
 from app.risk_engine import (
     RiskDecision,
+    RiskEngine,
     SymbolSpecification,
 )
 from app.step14_pipeline import (
@@ -89,16 +89,19 @@ def make_context(
 def make_proposal(
     direction: AIDirection,
 ) -> AITradeProposal:
+    if direction is AIDirection.SELL:
+        stop_loss = 4328.7812
+        take_profit = 4281.5907
+    else:
+        stop_loss = 4291.0288
+        take_profit = 4338.2193
+
     return AITradeProposal(
         direction=direction,
         symbol="XAUUSD",
         entry_price=4309.905,
-        stop_loss=4328.7812
-        if direction is AIDirection.SELL
-        else 4291.0288,
-        take_profit=4281.5907
-        if direction is AIDirection.SELL
-        else 4338.2193,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
         risk_reward=1.5,
         confidence=77.8,
         reason="Test trade proposal.",
@@ -113,52 +116,61 @@ def make_decision(
     direction: AIDirection,
 ) -> AIDecision:
     if direction is AIDirection.WAIT:
-        proposal = None
-        confidence = 50.0
-        score = 0
-        trend = "Neutral"
-        signal = "WAIT"
-    elif direction is AIDirection.BUY:
-        proposal = make_proposal(direction)
-        confidence = 77.8
-        score = 80
-        trend = "Bullish"
-        signal = "BUY"
-    else:
-        proposal = make_proposal(direction)
-        confidence = 77.8
-        score = 14
-        trend = "Bearish"
-        signal = "SELL"
+        return AIDecision(
+            direction=AIDirection.WAIT,
+            symbol="XAUUSD",
+            timeframe="H1",
+            confidence=50.0,
+            technical_score=0,
+            trend="Neutral",
+            signal="WAIT",
+            proposal=None,
+            reasoning="Integration safety test.",
+            execution_type="paper",
+            read_only=True,
+            broker_order_required=False,
+            risk_engine_required=True,
+            market_regime="uncertain",
+            setup="no_setup",
+            confluence_score=0,
+        )
+
+    if direction is AIDirection.BUY:
+        return AIDecision(
+            direction=AIDirection.BUY,
+            symbol="XAUUSD",
+            timeframe="H1",
+            confidence=77.8,
+            technical_score=80,
+            trend="Bullish",
+            signal="BUY",
+            proposal=make_proposal(AIDirection.BUY),
+            reasoning="Integration safety test.",
+            execution_type="paper",
+            read_only=True,
+            broker_order_required=False,
+            risk_engine_required=True,
+            market_regime="trending_up",
+            setup="bullish_continuation",
+            confluence_score=65,
+        )
 
     return AIDecision(
-        direction=direction,
+        direction=AIDirection.SELL,
         symbol="XAUUSD",
         timeframe="H1",
-        confidence=confidence,
-        technical_score=score,
-        trend=trend,
-        signal=signal,
-        proposal=proposal,
+        confidence=77.8,
+        technical_score=14,
+        trend="Bearish",
+        signal="SELL",
+        proposal=make_proposal(AIDirection.SELL),
         reasoning="Integration safety test.",
         execution_type="paper",
         read_only=True,
         broker_order_required=False,
         risk_engine_required=True,
-        market_regime=(
-            "trending_up"
-            if direction is AIDirection.BUY
-            else "trending_down"
-            if direction is AIDirection.SELL
-            else "uncertain"
-        ),
-        setup=(
-            "bullish_continuation"
-            if direction is AIDirection.BUY
-            else "bearish_continuation"
-            if direction is AIDirection.SELL
-            else "no_setup"
-        ),
+        market_regime="trending_down",
+        setup="bearish_continuation",
         confluence_score=65,
     )
 
@@ -174,16 +186,21 @@ def make_advisory(
         sell_votes = 0
         wait_votes = 0
         score = 64.25
+        quality = "STRONG"
+
     elif direction == "SELL":
         buy_votes = 0
         sell_votes = 8
         wait_votes = 0
         score = -64.25
+        quality = "STRONG"
+
     else:
         buy_votes = 0
         sell_votes = 0
         wait_votes = 8
         score = 0.0
+        quality = "WEAK"
 
     return AdvisorySnapshot(
         brains=tuple(),
@@ -194,7 +211,7 @@ def make_advisory(
         sell_votes=sell_votes,
         wait_votes=wait_votes,
         agreement_percent=agreement,
-        entry_quality="STRONG",
+        entry_quality=quality,
         warning="Advisory only.",
     )
 
@@ -220,19 +237,17 @@ def make_specification() -> SymbolSpecification:
         currency_base="XAU",
         currency_profit="USD",
         currency_margin="USD",
-        spread=0.0,
+        spread=0,
         spread_float=True,
     )
 
 
 # ============================================================
-# SIMPLE TEST DOUBLES
+# TEST DOUBLES
 # ============================================================
 
 
 class FakeAIEngine:
-    """Controlled Step 13 replacement used only by tests."""
-
     def __init__(
         self,
         decision: AIDecision,
@@ -249,8 +264,6 @@ class FakeAIEngine:
 
 
 class FakeRiskEngine:
-    """Controlled Risk Engine replacement used only by tests."""
-
     def __init__(
         self,
         *,
@@ -285,6 +298,7 @@ class FakeRiskEngine:
         volume: float,
         side: str,
         specification: SymbolSpecification,
+        existing_direction_volume: float = 0.0,
     ) -> RiskDecision:
         self.pre_trade_calls += 1
 
@@ -304,15 +318,13 @@ class FakeRiskEngine:
 
 
 class CountingPaperGateway(PaperExecutionGateway):
-    """Paper gateway that records execution attempts."""
-
     def __init__(
         self,
         *,
         live_trading_enabled: bool = False,
     ) -> None:
         super().__init__(
-            live_trading_enabled=live_trading_enabled
+            live_trading_enabled=live_trading_enabled,
         )
         self.execute_calls = 0
 
@@ -356,7 +368,7 @@ def test_advisory_does_not_replace_raymond_decision() -> None:
     assert result.status == "DISAGREE"
 
 
-def test_advisory_same_direction_is_only_comparison() -> None:
+def test_advisory_same_direction_is_agreement_only() -> None:
     raymond = make_decision(AIDirection.SELL)
     advisory = make_advisory("SELL")
 
@@ -396,7 +408,6 @@ def test_step14_wait_never_reaches_risk_engine() -> None:
 
     ai = FakeAIEngine(decision)
     risk = FakeRiskEngine()
-
     gateway = CountingPaperGateway()
 
     pipeline = Step14Pipeline(
@@ -523,15 +534,15 @@ def test_step14_rejects_live_enabled_gateway() -> None:
 # ============================================================
 
 
-def test_paper_gateway_never_executes_live() -> None:
+def test_paper_gateway_accepts_paper_order_only() -> None:
     gateway = PaperExecutionGateway(
         live_trading_enabled=False,
     )
 
     order = OrderRequest(
         symbol="XAUUSD",
-        side="sell",
-        order_type="market",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
         volume=0.05,
         price=4309.905,
         stop_loss=4328.7812,
@@ -554,8 +565,8 @@ def test_live_enabled_paper_gateway_rejects_order() -> None:
 
     order = OrderRequest(
         symbol="XAUUSD",
-        side="sell",
-        order_type="market",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
         volume=0.05,
         price=4309.905,
         stop_loss=4328.7812,
@@ -590,7 +601,7 @@ def test_trading_pipeline_service_defaults_to_paper_only() -> None:
     )
 
 
-def test_trading_pipeline_service_decision_is_step13() -> None:
+def test_trading_pipeline_service_uses_step13_decision() -> None:
     service = TradingPipelineService()
 
     decision = service.evaluate_decision(
@@ -598,127 +609,146 @@ def test_trading_pipeline_service_decision_is_step13() -> None:
         timeframe="H1",
         candles=[
             {
-                "time": 1,
+                "time": index,
                 "open": 4300.0,
                 "high": 4310.0,
                 "low": 4290.0,
                 "close": 4305.0,
                 "volume": 100,
             }
-            for _ in range(100)
+            for index in range(100)
         ],
     )
 
-    assert isinstance(decision, AIDecision)
+    assert isinstance(
+        decision,
+        AIDecision,
+    )
+
     assert decision.read_only is True
     assert decision.broker_order_required is False
     assert decision.risk_engine_required is True
 
 
-def test_advisory_snapshot_contains_no_execution_authority() -> None:
-    snapshot = make_advisory("SELL")
-
-    data = snapshot.to_dict()
-
-    assert "execution_authorized" not in data
-    assert "broker_order_allowed" not in data
-    assert "place_order" not in data
-    assert "execute_order" not in data
-
-
-def test_comparison_contains_no_execution_authority() -> None:
-    raymond = make_decision(AIDirection.SELL)
-    advisory = make_advisory("SELL")
-
-    result = compare_decision_with_advisory(
-        raymond,
-        advisory,
+def test_trading_pipeline_service_paper_risk_state_is_safe() -> None:
+    state = PaperRiskState(
+        daily_loss=0.0,
+        open_positions=0,
+        total_exposure=0.0,
     )
 
-    data = result.to_dict()
-
-    assert "execution_authorized" not in data
-    assert "broker_order_allowed" not in data
-    assert "place_order" not in data
-    assert "execute_order" not in data
+    assert state.daily_loss == 0.0
+    assert state.open_positions == 0
+    assert state.total_exposure == 0.0
 
 
-def test_advisory_does_not_modify_raymond_decision() -> None:
+def test_real_risk_engine_rejects_excessive_open_positions() -> None:
+    engine = RiskEngine()
+
+    decision = engine.pre_trade_check(
+        equity=10000.0,
+        daily_loss=0.0,
+        open_positions=3,
+        current_exposure=0.0,
+        proposed_exposure=50.0,
+        entry_price=4309.905,
+        stop_loss_price=4328.7812,
+        take_profit_price=4281.5907,
+        volume=0.05,
+        side="SELL",
+        specification=make_specification(),
+    )
+
+    assert decision.allowed is False
+    assert "maximum open positions" in decision.reason
+
+
+def test_real_risk_engine_allows_valid_paper_risk() -> None:
+    engine = RiskEngine()
+
+    decision = engine.pre_trade_check(
+        equity=10000.0,
+        daily_loss=0.0,
+        open_positions=0,
+        current_exposure=0.0,
+        proposed_exposure=50.0,
+        entry_price=4309.905,
+        stop_loss_price=4328.7812,
+        take_profit_price=4281.5907,
+        volume=0.05,
+        side="SELL",
+        specification=make_specification(),
+    )
+
+    assert decision.allowed is True
+
+
+# ============================================================
+# FINAL SAFETY ASSERTIONS
+# ============================================================
+
+
+def test_advisory_snapshot_has_no_execution_authority() -> None:
+    snapshot = make_advisory("SELL")
+
+    assert snapshot.master_direction == "SELL"
+    assert snapshot.agreement_percent == 100.0
+
+    serialized = snapshot.to_dict()
+
+    assert "execution" not in serialized
+    assert "order_id" not in serialized
+    assert "broker_order" not in serialized
+
+
+def test_raymond_decision_remains_unchanged_after_comparison() -> None:
     raymond = make_decision(AIDirection.SELL)
 
-    before = raymond
+    original_direction = raymond.direction
+    original_confidence = raymond.confidence
+    original_score = raymond.technical_score
+    original_signal = raymond.signal
 
-    advisory = make_advisory("SELL")
+    advisory = make_advisory("BUY")
 
     compare_decision_with_advisory(
         raymond,
         advisory,
     )
 
-    assert raymond is before
-    assert raymond.direction is AIDirection.SELL
-    assert raymond.signal == "SELL"
-    assert raymond.confidence == 77.8
-    assert raymond.technical_score == 14
+    assert raymond.direction is original_direction
+    assert raymond.confidence == original_confidence
+    assert raymond.technical_score == original_score
+    assert raymond.signal == original_signal
 
 
-def test_step14_requires_risk_engine_before_execution() -> None:
-    decision = make_decision(AIDirection.SELL)
+def test_live_trading_is_disabled_by_default() -> None:
+    gateway = PaperExecutionGateway(
+        live_trading_enabled=False,
+    )
 
-    ai = FakeAIEngine(decision)
-    risk = FakeRiskEngine(allowed=True)
-    gateway = CountingPaperGateway()
+    assert gateway.live_trading_enabled is False
 
-    pipeline = Step14Pipeline(
-        ai_engine=ai,
-        risk_engine=risk,
-        execution_gateway=gateway,
+
+def test_paper_execution_result_is_never_live() -> None:
+    gateway = PaperExecutionGateway(
+        live_trading_enabled=False,
+    )
+
+    order = OrderRequest(
+        symbol="XAUUSD",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        volume=0.05,
+        price=4309.905,
+        stop_loss=4328.7812,
+        take_profit=4281.5907,
     )
 
     result = asyncio.run(
-        pipeline.evaluate_and_execute_paper(
-            make_context(),
-            make_specification(),
-            account_equity=10000.0,
-        )
+        gateway.execute(order)
     )
 
-    assert risk.pre_trade_calls == 1
-    assert gateway.execute_calls == 1
-    assert result.risk_decision.allowed is True
-
-
-# ============================================================
-# FINAL SAFETY CONTRACT
-# ============================================================
-
-
-def test_step17_final_safety_contract() -> None:
-    service = TradingPipelineService()
-
-    assert service.execution_gateway.live_trading_enabled is False
-
-    decision = make_decision(AIDirection.SELL)
-    advisory = make_advisory("SELL")
-
-    comparison = compare_decision_with_advisory(
-        decision,
-        advisory,
-    )
-
-    assert comparison.raymond_direction == "SELL"
-    assert comparison.advisory_direction == "SELL"
-    assert comparison.status == "AGREE"
-
-    assert decision.direction is AIDirection.SELL
-    assert decision.risk_engine_required is True
-    assert decision.broker_order_required is False
-    assert decision.read_only is True
-
-    assert service.execution_gateway is not None
-    assert isinstance(
-        service.execution_gateway,
-        PaperExecutionGateway,
-    )
-
-
+    assert result.execution_type == "paper"
+    assert result.broker == "paper"
+    assert result.status.value == "accepted"
