@@ -95,7 +95,6 @@ def test_position_survives_database_session_restart(
 
     assert position.status == PositionStatus.OPEN
 
-    # Simulate normal position management before restart.
     PositionRepository.mark_break_even(
         db,
         position.position_id,
@@ -114,14 +113,11 @@ def test_position_survives_database_session_restart(
         4310.0,
     )
 
-    # Capture the persistent database path before closing everything.
     assert database_path.exists()
 
-    # Simulate application/database shutdown.
     db.close()
     engine.dispose()
 
-    # Simulate a fresh application/database startup.
     recovery_engine = create_engine(
         f"sqlite:///{database_path}",
         connect_args={"check_same_thread": False},
@@ -154,17 +150,14 @@ def test_position_survives_database_session_restart(
         assert recovered.original_quantity == 1.0
         assert recovered.remaining_quantity == 0.50
 
-        # Original risk must survive restart.
         assert recovered.initial_stop_loss == 4290.0
         assert recovered.risk_1r == 10.0
 
-        # Current management state must survive restart.
         assert recovered.current_stop_loss == 4300.0
         assert recovered.stop_loss == 4300.0
         assert recovered.break_even_applied == 1
         assert recovered.partial_close_applied == 1
 
-        # Current market state must survive restart.
         assert recovered.current_price == 4310.0
 
         # After the 50% partial close, only 0.50 quantity remains.
@@ -174,7 +167,6 @@ def test_position_survives_database_session_restart(
         assert recovered.pnl == 5.0
         assert recovered.max_profit == 5.0
 
-        # Strategy context must survive restart.
         assert recovered.regime == "trending_up"
         assert recovered.setup == "bullish_continuation"
         assert recovered.technical_score == 78.0
@@ -212,6 +204,11 @@ def test_open_position_recovery_returns_only_open_positions(
         take_profit_1=4315.0,
     )
 
+    # Store the identifier as a normal Python string before the
+    # SQLAlchemy session is closed. The ORM object itself becomes
+    # detached after db.close().
+    open_position_id = open_position.position_id
+
     closed_position = PositionRepository.create(
         db,
         position_id="POS-RECOVERY-CLOSED",
@@ -224,14 +221,15 @@ def test_open_position_recovery_returns_only_open_positions(
         take_profit_1=4285.0,
     )
 
+    closed_position_id = closed_position.position_id
+
     # Close one position through the repository.
     #
-    # IMPORTANT:
     # PositionRepository.close() accepts exit_price.
     # It does not accept close_price or reason.
     closed = PositionRepository.close(
         db,
-        closed_position.position_id,
+        closed_position_id,
         exit_price=4290.0,
     )
 
@@ -266,14 +264,13 @@ def test_open_position_recovery_returns_only_open_positions(
             for position in open_positions
         }
 
-        assert open_position.position_id in recovered_ids
-        assert closed_position.position_id not in recovered_ids
+        assert open_position_id in recovered_ids
+        assert closed_position_id not in recovered_ids
 
         recovered_open = next(
             position
             for position in open_positions
-            if position.position_id
-            == open_position.position_id
+            if position.position_id == open_position_id
         )
 
         assert recovered_open.status == PositionStatus.OPEN
@@ -338,7 +335,6 @@ def test_restart_recovery_does_not_create_duplicate_position(
         assert recovered is not None
         assert recovered.position_id == original_id
 
-        # Retry the same creation after the simulated restart.
         retry = PositionRepository.create(
             recovered_db,
             position_id="POS-IDEMPOTENT-RESTART-RETRY",
