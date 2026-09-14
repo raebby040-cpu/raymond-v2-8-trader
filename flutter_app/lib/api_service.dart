@@ -144,7 +144,101 @@ class ApiService {
       },
     );
 
-    return _asMap(response.data);
+    final raw = response.data;
+
+    if (raw is! Map) {
+      throw const FormatException(
+        'Invalid advisory analysis response.',
+      );
+    }
+
+    final data = Map<String, dynamic>.from(raw);
+
+    /*
+     * The backend returns advisory_comparison in this structure:
+     *
+     * advisory_comparison:
+     *   raymond: {...}
+     *   advisory:
+     *     direction
+     *     confidence
+     *     score
+     *     buy_votes
+     *     sell_votes
+     *     wait_votes
+     *     agreement_percent
+     *     entry_quality
+     *   comparison:
+     *     status
+     *     summary
+     *     warning
+     *   brains:
+     *     [...]
+     *
+     * The Flutter terminal historically reads the master advisory
+     * fields from the comparison object itself.
+     *
+     * Normalize the response here so the rest of the terminal can
+     * use one consistent contract.
+     */
+
+    final rawComparison = data['advisory_comparison'];
+
+    if (rawComparison is Map) {
+      final comparison =
+          Map<String, dynamic>.from(rawComparison);
+
+      final rawAdvisory = comparison['advisory'];
+
+      if (rawAdvisory is Map) {
+        final advisory =
+            Map<String, dynamic>.from(rawAdvisory);
+
+        comparison['advisory_direction'] =
+            advisory['direction'];
+
+        comparison['advisory_confidence'] =
+            advisory['confidence'];
+
+        comparison['advisory_score'] =
+            advisory['score'];
+
+        comparison['buy_votes'] =
+            advisory['buy_votes'];
+
+        comparison['sell_votes'] =
+            advisory['sell_votes'];
+
+        comparison['wait_votes'] =
+            advisory['wait_votes'];
+
+        comparison['agreement_percent'] =
+            advisory['agreement_percent'];
+
+        comparison['entry_quality'] =
+            advisory['entry_quality'];
+      }
+
+      final rawResult = comparison['comparison'];
+
+      if (rawResult is Map) {
+        final result =
+            Map<String, dynamic>.from(rawResult);
+
+        comparison['status'] =
+            result['status'];
+
+        comparison['summary'] =
+            result['summary'];
+
+        comparison['warning'] =
+            result['warning'];
+      }
+
+      data['advisory_comparison'] = comparison;
+    }
+
+    return data;
   }
 
   /// Persistent PAPER positions maintained by RAYMOND.
