@@ -1097,6 +1097,22 @@ def build_symbol_specification(
 def persist_step15_paper_execution(
     result,
 ) -> Optional[dict]:
+    """
+    Persist one successfully accepted paper execution.
+
+    Stage 16.2:
+    - Persist TradeJournal row.
+    - Persist Position row.
+    - Link both using the paper execution order_id.
+
+    Stage 16.3:
+    - Persist Step 13 AI reasoning as trade_thesis.
+
+    IMPORTANT:
+    ExecutionResult uses enums for status/side in some fields.
+    Always normalize enum values through _enum_value() before
+    comparing them with plain strings.
+    """
 
     execution = getattr(
         result,
@@ -1105,33 +1121,73 @@ def persist_step15_paper_execution(
     )
 
     if execution is None:
+        logger.info(
+            "Paper execution persistence skipped: "
+            "execution_result is None."
+        )
         return None
 
-    execution_type = str(
+    execution_type = _safe_string(
         getattr(
             execution,
             "execution_type",
-            "",
+            None,
         )
-    ).lower().strip()
+    )
+
+    if execution_type is None:
+        raise TradingPipelineServiceError(
+            "Paper execution did not provide an execution type."
+        )
+
+    execution_type = execution_type.lower()
 
     if execution_type != "paper":
         raise TradingPipelineServiceError(
             "Step 16.2 persistence rejected a non-paper execution."
         )
 
-    status = str(
+    # --------------------------------------------------------
+    # CRITICAL FIX:
+    #
+    # ExecutionResult.status is ExecutionStatus.ACCEPTED,
+    # an Enum whose .value is "accepted".
+    #
+    # str(ExecutionStatus.ACCEPTED) becomes something similar
+    # to "ExecutionStatus.ACCEPTED", which caused the previous
+    # persistence function to return None.
+    #
+    # _enum_value() correctly extracts "accepted".
+    # --------------------------------------------------------
+
+    status_value = _enum_value(
         getattr(
             execution,
             "status",
-            "",
+            None,
         )
-    ).lower().strip()
+    )
+
+    status = _safe_string(
+        status_value
+    )
+
+    if status is None:
+        raise TradingPipelineServiceError(
+            "Paper execution did not provide an execution status."
+        )
+
+    status = status.lower()
 
     if status not in {
         "accepted",
         "filled",
     }:
+        logger.info(
+            "Paper execution persistence skipped: "
+            "execution status=%s",
+            status,
+        )
         return None
 
     decision = getattr(
@@ -1165,17 +1221,28 @@ def persist_step15_paper_execution(
             "Paper execution did not provide an order ID."
         )
 
-    side = getattr(
-        execution,
-        "side",
-        None,
+    # --------------------------------------------------------
+    # SIDE IS ALSO NORMALIZED THROUGH _enum_value().
+    # --------------------------------------------------------
+
+    side_value = _enum_value(
+        getattr(
+            execution,
+            "side",
+            None,
+        )
     )
 
-    direction = str(
-        _enum_value(side)
-        if _enum_value(side) is not None
-        else side
-    ).lower().strip()
+    direction = _safe_string(
+        side_value
+    )
+
+    if direction is None:
+        raise TradingPipelineServiceError(
+            "Paper execution did not provide a trade direction."
+        )
+
+    direction = direction.lower()
 
     if direction not in {
         "buy",
@@ -1230,6 +1297,8 @@ def persist_step15_paper_execution(
 
     if not symbol:
         symbol = "XAUUSD"
+
+    symbol = symbol.upper()
 
     execution_stop_loss = getattr(
         execution,
@@ -1305,8 +1374,59 @@ def persist_step15_paper_execution(
             ValueError,
         ):
             logger.warning(
-                "Unable to parse paper execution timestamp."
+                "Unable to parse paper execution timestamp; "
+                "using current UTC time."
             )
+
+    # --------------------------------------------------------
+    # STEP 13 THESIS DATA
+    # --------------------------------------------------------
+
+    regime = _safe_string(
+        _get_decision_attribute(
+            decision,
+            "regime",
+        )
+    )
+
+    setup = _safe_string(
+        _get_decision_attribute(
+            decision,
+            "setup",
+        )
+    )
+
+    technical_score = _safe_float(
+        _get_decision_attribute(
+            decision,
+            "technical_score",
+        )
+    )
+
+    confluence = _safe_float(
+        _get_decision_attribute(
+            decision,
+            "confluence",
+        )
+    )
+
+    confidence = _safe_float(
+        _get_decision_attribute(
+            decision,
+            "confidence",
+        )
+    )
+
+    trade_thesis = _safe_string(
+        _get_decision_attribute(
+            decision,
+            "reasoning",
+        )
+    )
+
+    # --------------------------------------------------------
+    # BUILD DEMO TRADE
+    # --------------------------------------------------------
 
     trade = DemoTrade(
         trade_id=order_id,
@@ -1320,70 +1440,130 @@ def persist_step15_paper_execution(
         opened_at=opened_at,
     )
 
+    position_id = (
+        f"POSITION-{order_id}"
+    )
+
+    risk_1r = abs(
+        entry_price - stop_loss
+    )
+
+    if risk_1r <= 0:
+        raise TradingPipelineServiceError(
+            "Persistent position requires a positive 1R "
+            "distance."
+        )
+
     db = SessionLocal()
 
     try:
+        # ----------------------------------------------------
+        # IDEMPOTENCY CHECK
+        # ----------------------------------------------------
+
+        existing_position = (
+            PositionRepository.get_by_trade_id(
+                db,
+                order_id,
+            )
+        )
+
+        if existing_position is not None:
+            logger.info(
+                "Persistent position already exists: "
+                "position_id=%s trade_id=%s",
+                existing_position.position_id,
+                order_id,
+            )
+
+            existing_trade = (
+                db.query(
+                    TradeJournal.__annotations__.get(
+                        "Trade",
+                    )
+                )
+                if False
+                else None
+            )
+
+            # The journal serializer remains authoritative for
+            # the Trade row. We deliberately do not manufacture
+            # a second trade.
+            journal = TradeJournal(db)
+
+            rows, _ = journal.list_trades(
+                limit=1,
+                offset=0,
+                execution_type="paper",
+            )
+
+            persisted_trade = None
+
+            for row in rows:
+                if getattr(
+                    row,
+                    "trade_id",
+                    None,
+                ) == order_id:
+                    persisted_trade = (
+                        TradeJournal.serialize_trade(
+                            row
+                        )
+                    )
+                    break
+
+            if persisted_trade is None:
+                # The position exists but the journal lookup did
+                # not find its matching row. Return the position
+                # safely without creating a duplicate trade.
+                persisted_trade = {
+                    "trade_id": order_id,
+                    "status": "open",
+                    "execution_type": "paper",
+                }
+
+            return {
+                "trade": persisted_trade,
+                "position": (
+                    serialize_persistent_position(
+                        existing_position
+                    )
+                ),
+            }
+
+        # ----------------------------------------------------
+        # JOURNAL
+        # ----------------------------------------------------
+
+        logger.info(
+            "Persisting paper trade journal row: "
+            "trade_id=%s symbol=%s direction=%s",
+            order_id,
+            symbol,
+            direction,
+        )
+
         journal = TradeJournal(db)
 
         row = journal.save_demo_trade(
             trade
         )
 
-        position_id = (
-            f"POSITION-{order_id}"
+        logger.info(
+            "Paper trade journal persisted: "
+            "trade_id=%s",
+            order_id,
         )
 
-        risk_1r = abs(
-            entry_price - stop_loss
-        )
+        # ----------------------------------------------------
+        # POSITION
+        # ----------------------------------------------------
 
-        if risk_1r <= 0:
-            raise TradingPipelineServiceError(
-                "Persistent position requires a positive 1R "
-                "distance."
-            )
-
-        regime = _safe_string(
-            _get_decision_attribute(
-                decision,
-                "regime",
-            )
-        )
-
-        setup = _safe_string(
-            _get_decision_attribute(
-                decision,
-                "setup",
-            )
-        )
-
-        technical_score = _safe_float(
-            _get_decision_attribute(
-                decision,
-                "technical_score",
-            )
-        )
-
-        confluence = _safe_float(
-            _get_decision_attribute(
-                decision,
-                "confluence",
-            )
-        )
-
-        confidence = _safe_float(
-            _get_decision_attribute(
-                decision,
-                "confidence",
-            )
-        )
-
-        # STEP 16.3
-        trade_thesis = _safe_string(
-            _get_decision_attribute(
-                decision,
-                "reasoning",
-            )
+        logger.info(
+            "Persisting paper position: "
+            "position_id=%s trade_id=%s",
+            position_id,
+            order_id,
         )
 
         position = PositionRepository.create(
@@ -1410,11 +1590,13 @@ def persist_step15_paper_execution(
 
         logger.info(
             "Persistent paper position created: "
-            "position_id=%s trade_id=%s symbol=%s direction=%s",
+            "position_id=%s trade_id=%s symbol=%s direction=%s "
+            "trade_thesis_present=%s",
             position_id,
             order_id,
             symbol,
             direction,
+            bool(trade_thesis),
         )
 
         return {
@@ -1433,9 +1615,11 @@ def persist_step15_paper_execution(
     except Exception as exc:
         db.rollback()
 
-        logger.error(
-            "Paper trade persistence failed: %s",
-            exc,
+        logger.exception(
+            "Paper trade persistence failed: "
+            "trade_id=%s position_id=%s",
+            order_id,
+            position_id,
         )
 
         raise TradingPipelineServiceError(
@@ -3320,3 +3504,5 @@ if __name__ == "__main__":
         port=8000,
         reload=True,
     )
+
+
