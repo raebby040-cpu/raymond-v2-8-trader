@@ -39,58 +39,42 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 try:
-    from .advisory_comparison import (
-        analyze_and_compare,
-    )
+    from .advisory_comparison import analyze_and_compare
     from .ai_trading_decision import (
         AIDecisionError,
         AITradingDecisionEngine,
     )
-    from .database import (
-        get_db,
-    )
-    from .models import (
-        Position,
-    )
+    from .database import get_db
+    from .models import Position
     from .online_market_api import (
         _context,
         _decision_payload,
         _fetch_chart,
     )
-    from .position_repository import (
-        PositionRepository,
-    )
+    from .position_repository import PositionRepository
     from .technical_indicators import (
         TechnicalIndicatorError,
         calculate_indicators,
         indicator_result_to_dict,
     )
 except ImportError:
-    from advisory_comparison import (
-        analyze_and_compare,
-    )
+    from advisory_comparison import analyze_and_compare
     from ai_trading_decision import (
         AIDecisionError,
         AITradingDecisionEngine,
     )
-    from database import (
-        get_db,
-    )
-    from models import (
-        Position,
-    )
+    from database import get_db
+    from models import Position
     from online_market_api import (
         _context,
         _decision_payload,
         _fetch_chart,
     )
-    from position_repository import (
-        PositionRepository,
-    )
+    from position_repository import PositionRepository
     from technical_indicators import (
         TechnicalIndicatorError,
         calculate_indicators,
@@ -501,7 +485,7 @@ def paper_positions(
         0,
         ge=0,
     ),
-    db: Session = None,
+    db: Session = Depends(get_db),
 ):
     """
     Return persistent PAPER positions for the trading terminal.
@@ -519,22 +503,6 @@ def paper_positions(
     It simply exposes the authoritative persistent position
     state already maintained by PositionRepository.
     """
-
-    # FastAPI normally supplies the database dependency.
-    # Keeping this explicit makes the endpoint safe when mounted
-    # alongside the existing application dependency system.
-    if db is None:
-        try:
-            db = next(get_db())
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": "Database session unavailable",
-                    "message": str(exc),
-                    "timestamp": _utc(),
-                },
-            ) from exc
 
     try:
         normalized_status = (
