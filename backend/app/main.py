@@ -780,6 +780,11 @@ def serialize_persistent_position(
             "confidence",
             None,
         ),
+        "trade_thesis": getattr(
+            position,
+            "trade_thesis",
+            None,
+        ),
 
         # MANAGEMENT STATE
         "break_even_applied": bool(
@@ -1405,6 +1410,17 @@ def persist_step15_paper_execution(
             )
         )
 
+        # ----------------------------------------------------
+        # STEP 16.3 - PERSIST TRADE THESIS
+        # ----------------------------------------------------
+
+        trade_thesis = _safe_string(
+            _get_decision_attribute(
+                decision,
+                "reasoning",
+            )
+        )
+
         position = PositionRepository.create(
             db,
             position_id=position_id,
@@ -1422,12 +1438,13 @@ def persist_step15_paper_execution(
             technical_score=technical_score,
             confluence=confluence,
             confidence=confidence,
+            trade_thesis=trade_thesis,
             current_price=entry_price,
             management_status="open",
         )
 
         logger.info(
-            "Stage 16.2 persistent position created: "
+            "Stage 16.3 persistent position created: "
             "position_id=%s trade_id=%s symbol=%s direction=%s",
             position_id,
             order_id,
@@ -1452,13 +1469,13 @@ def persist_step15_paper_execution(
         db.rollback()
 
         logger.error(
-            "Step 16.2 paper trade persistence failed: %s",
+            "Step 16.3 paper trade persistence failed: %s",
             exc,
         )
 
         raise TradingPipelineServiceError(
             "Unable to persist Step 15 paper trade and "
-            f"Stage 16.2 position: {exc}"
+            f"Stage 16.3 position: {exc}"
         ) from exc
 
     finally:
@@ -1536,6 +1553,7 @@ async def health_check():
         "live_trading_enabled": live_trading_enabled(),
         "step15_pipeline": True,
         "step16_2_persistent_positions": True,
+        "step16_3_persistent_trade_thesis": True,
         "execution_mode": "paper_only",
         "mt5_telemetry": True,
         "mt5_ai_decision_bridge": True,
@@ -1572,6 +1590,14 @@ async def root():
             "enabled": True,
             "persistent_positions": True,
             "management_execution": "not implemented",
+            "live_trading": False,
+        },
+
+        "step16_3": {
+            "enabled": True,
+            "persistent_trade_thesis": True,
+            "source": "Step 13 AI reasoning",
+            "position_field": "trade_thesis",
             "live_trading": False,
         },
 
@@ -2220,7 +2246,7 @@ async def get_strategy_decision(
 
 
 # ============================================================
-# STEP 15 + STEP 16.2 - COMPLETE PAPER TRADE PIPELINE
+# STEP 15 + STEP 16.2 + STEP 16.3 - COMPLETE PAPER TRADE PIPELINE
 # ============================================================
 
 @app.post("/api/strategy/paper-trade")
@@ -2232,7 +2258,7 @@ async def run_strategy_paper_trade(
             status_code=503,
             detail={
                 "error": (
-                    "Step 15/16.2 refuses to run while "
+                    "Step 15/16.3 refuses to run while "
                     "LIVE_TRADING_ENABLED=true."
                 ),
                 "timestamp": utc_timestamp(),
@@ -2306,7 +2332,7 @@ async def run_strategy_paper_trade(
             {
                 "status": "ok",
                 "timestamp": utc_timestamp(),
-                "source": "step15_step16_2",
+                "source": "step15_step16_3",
                 "execution_mode": "paper_only",
                 "paper_equity": paper_equity,
                 "risk_state": {
@@ -2319,6 +2345,7 @@ async def run_strategy_paper_trade(
                     ),
                 },
                 "persistent_position_state": True,
+                "persistent_trade_thesis": True,
                 "live_trading_enabled": False,
             }
         )
@@ -2927,6 +2954,13 @@ async def admin_status():
             "enabled": True,
             "persistent_positions": True,
             "management_execution": False,
+            "live_trading": False,
+        },
+
+        "step16_3": {
+            "enabled": True,
+            "persistent_trade_thesis": True,
+            "source": "Step 13 AI reasoning",
             "live_trading": False,
         },
 
