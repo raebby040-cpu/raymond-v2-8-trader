@@ -50,38 +50,72 @@ class Trade(Base):
     __tablename__ = "trades"
 
     id = Column(Integer, primary_key=True, index=True)
-    trade_id = Column(String, unique=True, index=True)
-    symbol = Column(String, default="XAUUSD")
+
+    trade_id = Column(
+        String,
+        unique=True,
+        index=True,
+    )
+
+    symbol = Column(
+        String,
+        default="XAUUSD",
+    )
+
     direction = Column(
         SQLEnum(TradeDirection),
         default=TradeDirection.BUY,
     )
+
     entry_price = Column(Float)
-    exit_price = Column(Float, nullable=True)
+
+    exit_price = Column(
+        Float,
+        nullable=True,
+    )
+
     quantity = Column(Float)
-    pnl = Column(Float, default=0.0)
-    pnl_percent = Column(Float, default=0.0)
+
+    pnl = Column(
+        Float,
+        default=0.0,
+    )
+
+    pnl_percent = Column(
+        Float,
+        default=0.0,
+    )
+
     status = Column(
         SQLEnum(PositionStatus),
         default=PositionStatus.OPEN,
     )
-    execution_type = Column(String, default="paper")
+
+    execution_type = Column(
+        String,
+        default="paper",
+    )
+
     opened_at = Column(
         DateTime,
         default=datetime.utcnow,
     )
+
     closed_at = Column(
         DateTime,
         nullable=True,
     )
+
     stop_loss = Column(
         Float,
         nullable=True,
     )
+
     take_profit = Column(
         Float,
         nullable=True,
     )
+
     notes = Column(
         String,
         nullable=True,
@@ -91,61 +125,80 @@ class Trade(Base):
 class Order(Base):
     __tablename__ = "orders"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
     order_id = Column(
         String,
         unique=True,
         index=True,
     )
+
     trade_id = Column(
         String,
         nullable=True,
     )
+
     symbol = Column(
         String,
         default="XAUUSD",
     )
+
     order_type = Column(
         SQLEnum(OrderType),
         default=OrderType.MARKET,
     )
+
     direction = Column(
         SQLEnum(TradeDirection),
         default=TradeDirection.BUY,
     )
+
     quantity = Column(Float)
+
     price = Column(
         Float,
         nullable=True,
     )
+
     fill_price = Column(
         Float,
         nullable=True,
     )
+
     filled_quantity = Column(
         Float,
         default=0.0,
     )
+
     status = Column(
         SQLEnum(OrderStatus),
         default=OrderStatus.PENDING,
     )
+
     broker = Column(
         String,
         nullable=True,
     )
+
     created_at = Column(
         DateTime,
         default=datetime.utcnow,
     )
+
     filled_at = Column(
         DateTime,
         nullable=True,
     )
+
     commission = Column(
         Float,
         default=0.0,
     )
+
     notes = Column(
         String,
         nullable=True,
@@ -158,6 +211,8 @@ class Position(Base):
 
     This model is the foundation for Stage 16 trade management.
 
+    Stage 16.3 adds persistent trade thesis storage.
+
     Important compatibility rules:
     - Existing quantity is retained.
     - Existing stop_loss is retained.
@@ -165,6 +220,7 @@ class Position(Base):
     - New management fields are added alongside them.
     - Existing positions can therefore be upgraded without losing data.
     - trade_id is used as the paper-execution/idempotency linkage key.
+    - trade_thesis is nullable so existing Stage 16.2 positions remain valid.
     """
 
     __tablename__ = "positions"
@@ -340,6 +396,20 @@ class Position(Base):
     )
 
     # --------------------------------------------------------
+    # STAGE 16.3 - PERSISTENT TRADE THESIS
+    # --------------------------------------------------------
+    #
+    # Stores the human/AI-readable explanation for why the
+    # position was opened.
+    #
+    # Nullable because positions created before Stage 16.3 do
+    # not have this field populated.
+    trade_thesis = Column(
+        String,
+        nullable=True,
+    )
+
+    # --------------------------------------------------------
     # MANAGEMENT STATE
     # --------------------------------------------------------
 
@@ -451,6 +521,7 @@ class StrategyMetric(Base):
     ask = Column(Float)
     ai_decision = Column(String)
     ai_confidence = Column(Float)
+
     reason = Column(
         String,
         nullable=True,
@@ -473,6 +544,7 @@ class BacktestResult(Base):
     )
 
     start_date = Column(DateTime)
+
     end_date = Column(DateTime)
 
     total_trades = Column(
@@ -536,6 +608,9 @@ def create_tables():
 
     Stage 16.2 therefore adds a separate idempotent schema
     upgrade before relying on the new Position columns.
+
+    Stage 16.3 similarly requires the database migration to add
+    trade_thesis to an existing positions table.
     """
     Base.metadata.create_all(
         bind=engine
@@ -543,5 +618,3 @@ def create_tables():
 
 
 create_tables()
-
-
