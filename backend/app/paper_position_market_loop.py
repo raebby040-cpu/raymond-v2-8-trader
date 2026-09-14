@@ -87,7 +87,9 @@ class PaperPositionMarketLoopConfig:
         interval = float(interval_seconds)
 
         if interval <= 0:
-            raise ValueError("interval_seconds must be greater than zero")
+            raise ValueError(
+                "interval_seconds must be greater than zero"
+            )
 
         return cls(
             symbol=normalized_symbol,
@@ -129,6 +131,10 @@ class PaperPositionMarketLoopResult:
     risk_engine_bypass: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """
+        Serialize the result safely.
+        """
+
         return {
             "symbol": self.symbol,
             "current_price": self.current_price,
@@ -153,13 +159,21 @@ def _utc() -> str:
 
 
 def _validate_price(price: Any) -> float:
+    """
+    Validate and normalize a market price.
+    """
+
     try:
         normalized = float(price)
     except (TypeError, ValueError) as exc:
-        raise ValueError("market price must be numeric") from exc
+        raise ValueError(
+            "market price must be numeric"
+        ) from exc
 
     if normalized <= 0:
-        raise ValueError("market price must be greater than zero")
+        raise ValueError(
+            "market price must be greater than zero"
+        )
 
     return normalized
 
@@ -181,14 +195,29 @@ class PaperPositionMarketLoop:
     ) -> None:
         self.db = db
         self.price_provider = price_provider
-        self.config = config or PaperPositionMarketLoopConfig()
-        self.manager = manager or PaperPositionManager(db)
+        self.config = (
+            config
+            or PaperPositionMarketLoopConfig()
+        )
+        self.manager = (
+            manager
+            or PaperPositionManager(db)
+        )
 
-        self._task: Optional[asyncio.Task[None]] = None
-        self._stop_event: Optional[asyncio.Event] = None
+        self._task: Optional[
+            asyncio.Task[None]
+        ] = None
+
+        self._stop_event: Optional[
+            asyncio.Event
+        ] = None
 
         self._running = False
-        self._last_result: Optional[PaperPositionMarketLoopResult] = None
+
+        self._last_result: Optional[
+            PaperPositionMarketLoopResult
+        ] = None
+
         self._last_error: Optional[str] = None
 
     @property
@@ -196,7 +225,9 @@ class PaperPositionMarketLoop:
         return self._running
 
     @property
-    def last_result(self) -> Optional[PaperPositionMarketLoopResult]:
+    def last_result(
+        self,
+    ) -> Optional[PaperPositionMarketLoopResult]:
         return self._last_result
 
     @property
@@ -207,15 +238,20 @@ class PaperPositionMarketLoop:
         """
         Return a safe status declaration.
 
-        This method performs no market request and no position mutation.
+        This method performs no market request and no
+        position mutation.
         """
 
         return {
-            "component": "paper_position_market_loop",
+            "component": (
+                "paper_position_market_loop"
+            ),
             "symbol": self.config.symbol,
             "enabled": self.config.enabled,
             "running": self._running,
-            "interval_seconds": self.config.interval_seconds,
+            "interval_seconds": (
+                self.config.interval_seconds
+            ),
             "last_error": self._last_error,
             "last_result": (
                 self._last_result.to_dict()
@@ -239,7 +275,9 @@ class PaperPositionMarketLoop:
         Obtain and validate the current public market price.
         """
 
-        price = await self.price_provider(self.config.symbol)
+        price = await self.price_provider(
+            self.config.symbol
+        )
 
         return _validate_price(price)
 
@@ -250,11 +288,13 @@ class PaperPositionMarketLoop:
         """
         Run one management cycle using a supplied price.
 
-        This synchronous method is intentionally exposed for tests and
-        for callers that already have a current market price.
+        This synchronous method is intentionally exposed for
+        tests and callers that already have a current price.
         """
 
-        price = _validate_price(current_price)
+        price = _validate_price(
+            current_price
+        )
 
         try:
             management_results: list[
@@ -272,7 +312,9 @@ class PaperPositionMarketLoop:
             result = PaperPositionMarketLoopResult(
                 symbol=self.config.symbol,
                 current_price=price,
-                count=len(serialized_results),
+                count=len(
+                    serialized_results
+                ),
                 results=serialized_results,
                 timestamp=_utc(),
             )
@@ -287,14 +329,18 @@ class PaperPositionMarketLoop:
 
         except Exception:
             logger.exception(
-                "Paper position market cycle failed for %s",
+                "Paper position market cycle failed "
+                "for %s",
                 self.config.symbol,
             )
             raise
 
-    async def run_once(self) -> PaperPositionMarketLoopResult:
+    async def run_once(
+        self,
+    ) -> PaperPositionMarketLoopResult:
         """
-        Fetch the current public market price and run one management cycle.
+        Fetch the current public market price and run
+        one management cycle.
         """
 
         if not self.config.enabled:
@@ -303,15 +349,20 @@ class PaperPositionMarketLoop:
             )
 
         try:
-            current_price = await self.get_current_price()
+            current_price = (
+                await self.get_current_price()
+            )
 
-            return self.evaluate_price(current_price)
+            return self.evaluate_price(
+                current_price
+            )
 
         except Exception as exc:
             self._last_error = str(exc)
 
             logger.exception(
-                "Paper position market loop cycle failed"
+                "Paper position market loop "
+                "cycle failed"
             )
 
             raise
@@ -320,8 +371,9 @@ class PaperPositionMarketLoop:
         """
         Internal recurring loop.
 
-        Errors are isolated to the individual cycle so one temporary
-        market-data failure does not permanently kill the worker.
+        Errors are isolated to the individual cycle so
+        one temporary market-data failure does not
+        permanently kill the worker.
         """
 
         if self._stop_event is None:
@@ -338,14 +390,18 @@ class PaperPositionMarketLoop:
                 self._last_error = str(exc)
 
                 logger.exception(
-                    "Paper position market loop cycle error"
+                    "Paper position market loop "
+                    "cycle error"
                 )
 
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
-                    timeout=self.config.interval_seconds,
+                    timeout=(
+                        self.config.interval_seconds
+                    ),
                 )
+
             except asyncio.TimeoutError:
                 continue
 
@@ -353,8 +409,8 @@ class PaperPositionMarketLoop:
         """
         Start the background loop.
 
-        Returns True if a new task was created.
-        Returns False if the loop was already running or disabled.
+        Returns True when a new task was created.
+        Returns False when already running or disabled.
         """
 
         if not self.config.enabled:
@@ -367,7 +423,9 @@ class PaperPositionMarketLoop:
 
         self._task = asyncio.create_task(
             self._run_loop(),
-            name="raymond-paper-position-market-loop",
+            name=(
+                "raymond-paper-position-market-loop"
+            ),
         )
 
         self._running = True
@@ -412,7 +470,4 @@ __all__ = [
     "PaperPositionMarketLoopConfig",
     "PaperPositionMarketLoopResult",
     "PriceProvider",
-]
-
-
-
+  ]
