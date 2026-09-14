@@ -146,14 +146,26 @@ except ImportError:
 
 try:
     from .database import SessionLocal
+    from .database_migration import run_database_migrations
     from .demo_trading import DemoTrade
     from .journal import TradeJournal
     from .position_repository import PositionRepository
 except ImportError:
     from database import SessionLocal
+    from database_migration import run_database_migrations
     from demo_trading import DemoTrade
     from journal import TradeJournal
     from position_repository import PositionRepository
+
+
+# ============================================================
+# STEP 16.2 - DATABASE TABLE INITIALIZATION
+# ============================================================
+
+try:
+    from .models import create_tables
+except ImportError:
+    from models import create_tables
 
 
 # ============================================================
@@ -242,6 +254,50 @@ app = FastAPI(
     ),
     version="2.8.0",
 )
+
+
+# ============================================================
+# STEP 16.2 - DATABASE STARTUP INITIALIZATION
+# ============================================================
+
+@app.on_event("startup")
+async def initialize_database():
+    """
+    Initialize the SQLAlchemy schema and then run the
+    idempotent Stage 16.2 migration.
+
+    Safety:
+    - Existing rows are never deleted.
+    - Existing tables are never dropped.
+    - Migration failures are not swallowed.
+    - The application startup fails if the persistent
+      position schema cannot be prepared.
+    """
+
+    try:
+        logger.info(
+            "Initializing RAYMOND database tables..."
+        )
+
+        create_tables()
+
+        logger.info(
+            "Running RAYMOND Stage 16.2 database migration..."
+        )
+
+        migration_result = run_database_migrations()
+
+        logger.info(
+            "RAYMOND Stage 16.2 database migration completed: %s",
+            migration_result,
+        )
+
+    except Exception:
+        logger.exception(
+            "RAYMOND database initialization/migration failed. "
+            "Application startup will stop."
+        )
+        raise
 
 
 # ============================================================
@@ -396,8 +452,8 @@ def safe_position_response(
     position: dict,
 ) -> dict:
     """
-    Convert a raw MT5 position into the stable
-    RAYMOND position format.
+    Convert a raw MT5 position into the stable RAYMOND
+    position format.
 
     READ ONLY.
     """
@@ -873,7 +929,6 @@ def build_paper_risk_state() -> PaperRiskState:
 
     except TradingPipelineServiceError:
         raise
-
     except Exception as exc:
         raise TradingPipelineServiceError(
             f"Unable to build paper risk state: {exc}"
@@ -910,8 +965,8 @@ def build_symbol_specification(
     specification: dict,
 ) -> SymbolSpecification:
     """
-    Convert the MT5 specification dictionary into
-    the Risk Engine SymbolSpecification object.
+    Convert the MT5 specification dictionary into the
+    Risk Engine SymbolSpecification object.
     """
 
     required_fields = [
@@ -997,14 +1052,10 @@ def build_symbol_specification(
                 ]
             ),
             trade_stops_level=int(
-                specification[
-                    "trade_stops_level"
-                ]
+                specification["trade_stops_level"]
             ),
             trade_freeze_level=int(
-                specification[
-                    "trade_freeze_level"
-                ]
+                specification["trade_freeze_level"]
             ),
             currency_base=str(
                 specification["currency_base"]
@@ -1035,6 +1086,7 @@ def build_symbol_specification(
 
     try:
         result.validate()
+
     except Exception as exc:
         raise TradingPipelineServiceError(
             f"MT5 symbol specification failed validation: {exc}"
@@ -1265,6 +1317,7 @@ def persist_step15_paper_execution(
                         "+00:00",
                     )
                 )
+
         except (
             TypeError,
             ValueError,
@@ -1505,6 +1558,7 @@ async def root():
         "broker_support": "MT5-compatible brokers",
         "live_trading_enabled": live_trading_enabled(),
         "execution_mode": "paper_only",
+
         "step15_pipeline": {
             "enabled": True,
             "path": (
@@ -1513,23 +1567,27 @@ async def root():
                 "PaperExecutionGateway"
             ),
         },
+
         "step16_2": {
             "enabled": True,
             "persistent_positions": True,
             "management_execution": "not implemented",
             "live_trading": False,
         },
+
         "mt5_telemetry": {
             "enabled": True,
             "endpoint": "/api/mt5/telemetry",
             "mode": "READ_ONLY",
         },
+
         "mt5_ai_decision_bridge": {
             "enabled": True,
             "endpoint": "/api/mt5/decision",
             "mode": "READ_ONLY",
             "execution_authorized": False,
         },
+
         "endpoints": {
             "health": "/health",
             "mt5_connect": "/api/mt5/connect",
@@ -2201,7 +2259,6 @@ async def run_strategy_paper_trade(
         )
 
         risk_state = build_paper_risk_state()
-
         paper_equity = get_paper_equity()
 
         result = (
@@ -2493,6 +2550,7 @@ async def run_backtest(
             ),
             "live_trading_enabled": False,
             "source": "mt5_historical_data",
+
             "config": {
                 "symbol": config.symbol,
                 "timeframe": config.timeframe,
@@ -2519,11 +2577,13 @@ async def run_backtest(
                 "candle_limit": candle_limit,
                 "candles_used": len(candles),
             },
+
             "symbol_specification": (
                 safe_symbol_specification_response(
                     raw_specification
                 )
             ),
+
             "result": {
                 "status": result.status,
                 "symbol": result.symbol,
@@ -2533,9 +2593,7 @@ async def run_backtest(
                 "starting_balance": (
                     result.starting_balance
                 ),
-                "ending_balance": (
-                    result.ending_balance
-                ),
+                "ending_balance": result.ending_balance,
                 "net_profit": result.net_profit,
                 "net_profit_percent": (
                     result.net_profit_percent
@@ -2593,6 +2651,7 @@ async def run_backtest(
                     result.equity_curve
                 ),
             },
+
             "timestamp": utc_timestamp(),
         }
 
@@ -2858,27 +2917,32 @@ async def admin_status():
                 False,
             )
         ),
+
         "step15_pipeline": {
             "enabled": True,
             "execution_mode": "paper_only",
         },
+
         "step16_2": {
             "enabled": True,
             "persistent_positions": True,
             "management_execution": False,
             "live_trading": False,
         },
+
         "mt5_telemetry": {
             "enabled": True,
             "endpoint": "/api/mt5/telemetry",
             "mode": "READ_ONLY",
         },
+
         "mt5_ai_decision_bridge": {
             "enabled": True,
             "endpoint": "/api/mt5/decision",
             "mode": "READ_ONLY",
             "execution_authorized": False,
         },
+
         "safety": {
             "trading_allowed": (
                 safety_status.trading_allowed
@@ -2891,9 +2955,11 @@ async def admin_status():
             ),
             "reason": safety_status.reason,
         },
+
         "dashboard_websocket_connections": (
             dashboard_ws_manager.connection_count
         ),
+
         "timestamp": utc_timestamp(),
     }
 
