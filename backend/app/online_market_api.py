@@ -378,6 +378,16 @@ def _decision_payload(decision) -> dict[str, Any]:
         "risk_engine_required": (
             decision.risk_engine_required
         ),
+
+        # ---------------------------------------------------------------
+        # RAYMOND TERMINAL DATA
+        # These fields are already produced by AIDecision but were not
+        # being exposed by this online API serializer.
+        # ---------------------------------------------------------------
+        "market_regime": decision.market_regime,
+        "setup": decision.setup,
+        "confluence_score": decision.confluence_score,
+
         "proposal": proposal,
     }
 
