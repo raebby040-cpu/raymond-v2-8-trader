@@ -125,6 +125,54 @@ class ApiService {
     return _asMap(response.data);
   }
 
+  /// RAYMOND Step 13 + independent 8-brain advisory analysis.
+  ///
+  /// READ-ONLY.
+  ///
+  /// This does not place, modify, or close any trade.
+  Future<Map<String, dynamic>> advisoryAnalysis({
+    String symbol = 'XAUUSD',
+    String timeframe = 'H1',
+    int limit = 100,
+  }) async {
+    final response = await _dio.get(
+      '/api/online/advisory-analysis',
+      queryParameters: {
+        'symbol': symbol,
+        'timeframe': timeframe,
+        'limit': limit,
+      },
+    );
+
+    return _asMap(response.data);
+  }
+
+  /// Persistent PAPER positions maintained by RAYMOND.
+  ///
+  /// READ-ONLY.
+  ///
+  /// This is intentionally separate from the MT5 positions endpoint.
+  /// The Android terminal should use this endpoint for RAYMOND paper
+  /// trades because the Render deployment does not require MT5.
+  Future<Map<String, dynamic>> paperPositions({
+    String? symbol,
+    String status = 'open',
+    int limit = 100,
+    int offset = 0,
+  }) async {
+    final response = await _dio.get(
+      '/api/online/paper-positions',
+      queryParameters: {
+        if (symbol != null && symbol.isNotEmpty) 'symbol': symbol,
+        'status': status,
+        'limit': limit,
+        'offset': offset,
+      },
+    );
+
+    return _asMap(response.data);
+  }
+
   Future<Map<String, dynamic>> marketPositions({
     String? symbol,
   }) async {
