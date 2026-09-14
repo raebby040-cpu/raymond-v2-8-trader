@@ -168,7 +168,8 @@ def test_position_survives_database_session_restart(
         assert recovered.current_price == 4310.0
 
         # After the 50% partial close, only 0.50 quantity remains.
-        # Therefore:
+        #
+        # BUY PnL:
         # (4310 - 4300) * 0.50 = 5.0
         assert recovered.pnl == 5.0
         assert recovered.max_profit == 5.0
@@ -224,11 +225,14 @@ def test_open_position_recovery_returns_only_open_positions(
     )
 
     # Close one position through the repository.
+    #
+    # IMPORTANT:
+    # PositionRepository.close() accepts exit_price.
+    # It does not accept close_price or reason.
     closed = PositionRepository.close(
         db,
         closed_position.position_id,
         exit_price=4290.0,
-        reason="TEST_RESTART_RECOVERY",
     )
 
     assert closed is not None
