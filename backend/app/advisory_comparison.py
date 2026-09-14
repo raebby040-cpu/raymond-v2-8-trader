@@ -41,8 +41,8 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 from app.advisory_brains import (
+    AdvisoryBrainEngine,
     AdvisorySnapshot,
-    analyze_advisory_brains,
 )
 
 
@@ -93,6 +93,10 @@ class AdvisoryComparison:
     advisory: AdvisorySnapshot
 
     def to_dict(self) -> dict[str, Any]:
+        """
+        Serialize the comparison into an API-safe dictionary.
+        """
+
         return {
             "raymond": {
                 "direction": self.raymond_direction,
@@ -166,8 +170,29 @@ def _float_value(
     value: Any,
     default: float = 0.0,
 ) -> float:
+    """
+    Safely convert a value to float.
+    """
+
     try:
         return float(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
+def _int_value(
+    value: Any,
+    default: int = 0,
+) -> int:
+    """
+    Safely convert a value to int.
+    """
+
+    try:
+        return int(value)
     except (
         TypeError,
         ValueError,
@@ -256,8 +281,7 @@ def _determine_comparison(
             BUY,
             SELL,
         }
-        and advisory_direction
-        != raymond_direction
+        and advisory_direction != raymond_direction
     ):
         return (
             DISAGREE,
@@ -348,13 +372,15 @@ def compare_decision_with_advisory(
         advisory.agreement_percent
     )
 
-    comparison, entry_quality, summary = (
-        _determine_comparison(
-            raymond_direction,
-            advisory_direction,
-            agreement_percent,
-            advisory_confidence,
-        )
+    (
+        comparison,
+        entry_quality,
+        summary,
+    ) = _determine_comparison(
+        raymond_direction,
+        advisory_direction,
+        agreement_percent,
+        advisory_confidence,
     )
 
     warning = str(
@@ -366,9 +392,15 @@ def compare_decision_with_advisory(
         advisory_direction=advisory_direction,
         advisory_confidence=advisory_confidence,
         advisory_score=advisory_score,
-        buy_votes=int(advisory.buy_votes),
-        sell_votes=int(advisory.sell_votes),
-        wait_votes=int(advisory.wait_votes),
+        buy_votes=_int_value(
+            advisory.buy_votes
+        ),
+        sell_votes=_int_value(
+            advisory.sell_votes
+        ),
+        wait_votes=_int_value(
+            advisory.wait_votes
+        ),
         agreement_percent=agreement_percent,
         comparison=comparison,
         entry_quality=entry_quality,
@@ -390,6 +422,20 @@ def analyze_and_compare(
 ) -> dict[str, Any]:
     """
     Run the complete advisory comparison.
+
+    IMPORTANT:
+    The advisory engine is kept as an AdvisorySnapshot object
+    until the comparison has finished.
+
+    The old implementation incorrectly used the serialized
+    dictionary returned by analyze_advisory_brains(), which
+    caused:
+
+        AttributeError:
+        'dict' object has no attribute 'master_direction'
+
+    This implementation deliberately uses the object-level
+    AdvisoryBrainEngine().analyze() method.
 
     Flow:
 
@@ -414,7 +460,7 @@ def analyze_and_compare(
     This remains advisory-only.
     """
 
-    advisory = analyze_advisory_brains(
+    advisory = AdvisoryBrainEngine().analyze(
         context,
         candles,
     )
@@ -444,15 +490,20 @@ def build_advisory_comparison(
     rather than a serialized dictionary.
     """
 
-    advisory_data = analyze_advisory_brains(
+    advisory = AdvisoryBrainEngine().analyze(
         context,
         candles,
     )
 
     return compare_decision_with_advisory(
         decision,
-        advisory_data,
+        advisory,
     )
+
+
+# ---------------------------------------------------------------------------
+# PUBLIC EXPORTS
+# ---------------------------------------------------------------------------
 
 
 __all__ = [
@@ -465,5 +516,3 @@ __all__ = [
     "build_advisory_comparison",
     "compare_decision_with_advisory",
 ]
-
-
