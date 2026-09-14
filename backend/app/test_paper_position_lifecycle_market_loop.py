@@ -5,22 +5,29 @@ Stage 17.4.3
 
 Verifies:
 1. SL/TP lifecycle processing runs before advanced management.
-2. Lifecycle and management results are serialized correctly.
-3. Real SL/TP closure persists correctly.
-4. Open positions remain open when no level is hit.
+2. Lifecycle and management results serialize correctly.
+3. Real SL/TP lifecycle processing persists closures.
+4. Non-triggered positions remain open.
 5. Closed positions are not processed again.
 6. The loop remains paper-only.
 7. Invalid prices are rejected before processing.
+
+These tests use an isolated in-memory SQLite database.
+They never contact MT5, a broker, Exness, or live execution.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
 from app.models import Position, PositionStatus, TradeDirection
+from app.paper_position_lifecycle import PaperPositionLifecycle
 from app.paper_position_lifecycle_market_loop import (
     LifecycleAwarePaperPositionMarketLoop,
 )
@@ -29,24 +36,138 @@ from app.paper_position_market_loop import (
 )
 
 
+# ============================================================
+# DATABASE FIXTURE
+# ============================================================
+
+
+@pytest.fixture()
+def db():
+    """
+    Create one isolated SQLite database/session for each test.
+    """
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+    )
+
+    Base.metadata.create_all(bind=engine)
+
+    SessionLocal = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+    )
+
+    session = SessionLocal()
+
+    try:
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+# ============================================================
+# TEST POSITION FACTORY
+# ============================================================
+
+
+def make_position(
+    db,
+    *,
+    direction=TradeDirection.BUY,
+    entry_price=100.0,
+    stop_loss=95.0,
+    take_profit_1=110.0,
+    take_profit_2=120.0,
+    quantity=1.0,
+    status=PositionStatus.OPEN,
+    position_id="POS-001",
+    trade_id="PAPER-001",
+):
+    """
+    Create a Position using fields present on the current model.
+    """
+
+    position = Position(
+        position_id=position_id,
+        trade_id=trade_id,
+        symbol="XAUUSD",
+        direction=direction,
+        quantity=quantity,
+        original_quantity=quantity,
+        remaining_quantity=quantity,
+        entry_price=entry_price,
+        initial_stop_loss=stop_loss,
+        current_stop_loss=stop_loss,
+        stop_loss=stop_loss,
+        take_profit_1=take_profit_1,
+        take_profit_2=take_profit_2,
+        take_profit=take_profit_1,
+        risk_1r=abs(entry_price - stop_loss),
+        current_price=entry_price,
+        pnl=0.0,
+        pnl_percent=0.0,
+        regime="trending_down",
+        setup="bearish_continuation",
+        technical_score=14.0,
+        confluence=65.0,
+        confidence=77.8,
+        trade_thesis="Stage 17.4.3 lifecycle test thesis",
+        break_even_applied=0,
+        partial_close_applied=0,
+        trailing_active=0,
+        management_status="open",
+        max_drawdown=0.0,
+        max_profit=0.0,
+        status=status,
+        opened_at=datetime.utcnow(),
+    )
+
+    db.add(position)
+    db.commit()
+    db.refresh(position)
+
+    return position
+
+
+# ============================================================
+# FAKE RESULT
+# ============================================================
+
+
 @dataclass(frozen=True)
 class FakeResult:
+    """
+    Small fake result matching the serialization contract used
+    by LifecycleAwarePaperPositionMarketLoop.
+    """
+
     position_id: str
     trade_id: str
     symbol: str
     action: str
+
     reason: str | None = None
     close_reason: str | None = None
+
     entry_price: float | None = None
     current_price: float | None = None
     quantity: float | None = None
+
     stop_loss: float | None = None
     take_profit_1: float | None = None
     take_profit_2: float | None = None
+
     pnl: float | None = None
     pnl_percent: float | None = None
+
     closed: bool = False
     persisted: bool = False
+
     execution_type: str = "paper"
     read_only: bool = True
     broker_order_required: bool = False
@@ -79,53 +200,27 @@ class FakeResult:
         }
 
 
-def make_position(
-    db,
-    *,
-    position_id: str,
-    trade_id: str,
-    direction: TradeDirection,
-    entry_price: float,
-    stop_loss: float,
-    take_profit_1: float,
-    take_profit_2: float | None = None,
-    quantity: float = 1.0,
-):
-    position = Position(
-        position_id=position_id,
-        trade_id=trade_id,
-        symbol="XAUUSD",
-        direction=direction,
-        quantity=quantity,
-        original_quantity=quantity,
-        entry_price=entry_price,
-        initial_stop_loss=stop_loss,
-        current_stop_loss=stop_loss,
-        stop_loss=stop_loss,
-        take_profit_1=take_profit_1,
-        take_profit_2=take_profit_2,
-        take_profit=take_profit_1,
-        current_price=entry_price,
-        pnl=0.0,
-        pnl_percent=0.0,
-        status=PositionStatus.OPEN,
-        management_status="open",
-        opened_at=datetime.now(timezone.utc),
-    )
-
-    db.add(position)
-    db.commit()
-    db.refresh(position)
-
-    return position
+# ============================================================
+# FAKE LIFECYCLE
+# ============================================================
 
 
 class FakeLifecycle:
+    """
+    Controlled lifecycle used to verify loop ordering.
+    """
+
     def __init__(self):
         self.calls = []
 
-    def evaluate_symbol(self, symbol: str, price: float):
-        self.calls.append((symbol, price))
+    def evaluate_symbol(
+        self,
+        symbol: str,
+        price: float,
+    ):
+        self.calls.append(
+            (symbol, price)
+        )
 
         return (
             FakeResult(
@@ -147,12 +242,55 @@ class FakeLifecycle:
         )
 
 
-class FakeManager:
+# ============================================================
+# EMPTY LIFECYCLE
+# ============================================================
+
+
+class FakeLifecycleEmpty:
+    """
+    Controlled lifecycle that closes nothing.
+    """
+
     def __init__(self):
         self.calls = []
 
-    def evaluate_symbol(self, symbol: str, price: float):
-        self.calls.append((symbol, price))
+    def evaluate_symbol(
+        self,
+        symbol: str,
+        price: float,
+    ):
+        self.calls.append(
+            (symbol, price)
+        )
+
+        return ()
+
+
+# ============================================================
+# FAKE MANAGEMENT ENGINE
+# ============================================================
+
+
+class FakeManager:
+    """
+    Controlled management engine.
+
+    This deliberately avoids the real management engine so these
+    tests isolate Stage 17.4.3 lifecycle integration.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def evaluate_symbol(
+        self,
+        symbol: str,
+        price: float,
+    ):
+        self.calls.append(
+            (symbol, price)
+        )
 
         return (
             FakeResult(
@@ -166,13 +304,9 @@ class FakeManager:
         )
 
 
-class FakeLifecycleEmpty:
-    def __init__(self):
-        self.calls = []
-
-    def evaluate_symbol(self, symbol: str, price: float):
-        self.calls.append((symbol, price))
-        return ()
+# ============================================================
+# LOOP FACTORY
+# ============================================================
 
 
 def make_loop(
@@ -196,7 +330,16 @@ def make_loop(
     )
 
 
+# ============================================================
+# ORDERING TEST
+# ============================================================
+
+
 def test_lifecycle_runs_before_management(db):
+    """
+    Lifecycle processing must run before management processing.
+    """
+
     lifecycle = FakeLifecycle()
     manager = FakeManager()
 
@@ -206,7 +349,9 @@ def test_lifecycle_runs_before_management(db):
         manager=manager,
     )
 
-    result = loop.evaluate_price(110.0)
+    result = loop.evaluate_price(
+        110.0
+    )
 
     assert result.symbol == "XAUUSD"
     assert result.current_price == 110.0
@@ -224,6 +369,11 @@ def test_lifecycle_runs_before_management(db):
     assert result.results[1]["phase"] == "management"
 
 
+# ============================================================
+# LIFECYCLE SERIALIZATION TEST
+# ============================================================
+
+
 def test_lifecycle_closure_is_reported_as_lifecycle_phase(db):
     lifecycle = FakeLifecycle()
     manager = FakeManager()
@@ -234,7 +384,9 @@ def test_lifecycle_closure_is_reported_as_lifecycle_phase(db):
         manager=manager,
     )
 
-    result = loop.evaluate_price(110.0)
+    result = loop.evaluate_price(
+        110.0
+    )
 
     lifecycle_result = result.results[0]
 
@@ -243,6 +395,11 @@ def test_lifecycle_closure_is_reported_as_lifecycle_phase(db):
     assert lifecycle_result["close_reason"] == "TAKE_PROFIT_1"
     assert lifecycle_result["closed"] is True
     assert lifecycle_result["persisted"] is True
+
+
+# ============================================================
+# MANAGEMENT SERIALIZATION TEST
+# ============================================================
 
 
 def test_open_position_management_is_reported_separately(db):
@@ -255,14 +412,31 @@ def test_open_position_management_is_reported_separately(db):
         manager=manager,
     )
 
-    result = loop.evaluate_price(105.0)
+    result = loop.evaluate_price(
+        105.0
+    )
 
     assert result.count == 1
     assert result.results[0]["phase"] == "management"
     assert result.results[0]["action"] == "HOLD"
 
 
+# ============================================================
+# REAL TP LIFECYCLE TEST
+# ============================================================
+
+
 def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
+    """
+    Real lifecycle engine:
+
+    BUY
+    entry = 100
+    TP1   = 110
+
+    Price reaches TP1.
+    """
+
     position = make_position(
         db,
         position_id="LIFECYCLE-TP-1",
@@ -275,16 +449,28 @@ def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
         quantity=1.0,
     )
 
-    loop = make_loop(db)
+    fake_manager = FakeManager()
 
-    result = loop.evaluate_price(110.0)
+    loop = make_loop(
+        db,
+        manager=fake_manager,
+    )
+
+    result = loop.evaluate_price(
+        110.0
+    )
 
     db.refresh(position)
 
     assert position.status == PositionStatus.CLOSED
     assert position.quantity == 0
-    assert position.current_price == 110.0
-    assert position.pnl == pytest.approx(10.0)
+    assert position.remaining_quantity == 0
+    assert position.current_price == pytest.approx(
+        110.0
+    )
+    assert position.pnl == pytest.approx(
+        10.0
+    )
     assert position.management_status == "closed"
 
     lifecycle_results = [
@@ -302,8 +488,29 @@ def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
     assert close_result["closed"] is True
     assert close_result["persisted"] is True
 
+    # The manager is still called by the wrapper, but the lifecycle
+    # engine has already closed the position in the database.
+    assert fake_manager.calls == [
+        ("XAUUSD", 110.0),
+    ]
+
+
+# ============================================================
+# REAL SL LIFECYCLE TEST
+# ============================================================
+
 
 def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
+    """
+    Real lifecycle engine:
+
+    BUY
+    entry = 100
+    SL    = 90
+
+    Price reaches SL.
+    """
+
     position = make_position(
         db,
         position_id="LIFECYCLE-SL-1",
@@ -316,16 +523,28 @@ def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
         quantity=1.0,
     )
 
-    loop = make_loop(db)
+    fake_manager = FakeManager()
 
-    result = loop.evaluate_price(90.0)
+    loop = make_loop(
+        db,
+        manager=fake_manager,
+    )
+
+    result = loop.evaluate_price(
+        90.0
+    )
 
     db.refresh(position)
 
     assert position.status == PositionStatus.CLOSED
     assert position.quantity == 0
-    assert position.current_price == 90.0
-    assert position.pnl == pytest.approx(-10.0)
+    assert position.remaining_quantity == 0
+    assert position.current_price == pytest.approx(
+        90.0
+    )
+    assert position.pnl == pytest.approx(
+        -10.0
+    )
     assert position.management_status == "closed"
 
     lifecycle_results = [
@@ -344,7 +563,25 @@ def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
     assert close_result["persisted"] is True
 
 
+# ============================================================
+# REAL HOLD TEST
+# ============================================================
+
+
 def test_loop_keeps_non_triggered_position_open(db):
+    """
+    Real lifecycle engine:
+
+    BUY
+    entry = 100
+    SL    = 90
+    TP1   = 120
+
+    Price = 105.
+
+    Nothing should close.
+    """
+
     position = make_position(
         db,
         position_id="LIFECYCLE-HOLD-1",
@@ -357,21 +594,49 @@ def test_loop_keeps_non_triggered_position_open(db):
         quantity=1.0,
     )
 
-    loop = make_loop(db)
+    fake_manager = FakeManager()
 
-    result = loop.evaluate_price(105.0)
+    loop = make_loop(
+        db,
+        manager=fake_manager,
+    )
+
+    result = loop.evaluate_price(
+        105.0
+    )
 
     db.refresh(position)
 
     assert position.status == PositionStatus.OPEN
-    assert position.quantity == pytest.approx(1.0)
-    assert position.current_price == pytest.approx(105.0)
-    assert position.pnl == pytest.approx(5.0)
+    assert position.quantity == pytest.approx(
+        1.0
+    )
+    assert position.remaining_quantity == pytest.approx(
+        1.0
+    )
+    assert position.current_price == pytest.approx(
+        105.0
+    )
+    assert position.pnl == pytest.approx(
+        5.0
+    )
 
-    assert result.current_price == pytest.approx(105.0)
+    assert result.current_price == pytest.approx(
+        105.0
+    )
+
+
+# ============================================================
+# DUPLICATE-CLOSE PROTECTION
+# ============================================================
 
 
 def test_closed_position_is_not_processed_again(db):
+    """
+    Once the position is closed, a later evaluation must not
+    generate another lifecycle close for that position.
+    """
+
     position = make_position(
         db,
         position_id="LIFECYCLE-ONCE-1",
@@ -384,39 +649,58 @@ def test_closed_position_is_not_processed_again(db):
         quantity=1.0,
     )
 
-    loop = make_loop(db)
+    fake_manager = FakeManager()
 
-    first_result = loop.evaluate_price(110.0)
+    loop = make_loop(
+        db,
+        manager=fake_manager,
+    )
+
+    first_result = loop.evaluate_price(
+        110.0
+    )
 
     db.refresh(position)
 
     assert position.status == PositionStatus.CLOSED
 
-    second_result = loop.evaluate_price(115.0)
+    second_result = loop.evaluate_price(
+        115.0
+    )
 
     db.refresh(position)
 
     assert position.status == PositionStatus.CLOSED
     assert position.quantity == 0
+    assert position.remaining_quantity == 0
 
     first_closes = [
         item
         for item in first_result.results
         if item.get("phase") == "lifecycle"
-        and item.get("position_id") == "LIFECYCLE-ONCE-1"
-        and item.get("action") == "CLOSE_POSITION"
+        and item.get("position_id")
+        == "LIFECYCLE-ONCE-1"
+        and item.get("action")
+        == "CLOSE_POSITION"
     ]
 
     second_closes = [
         item
         for item in second_result.results
         if item.get("phase") == "lifecycle"
-        and item.get("position_id") == "LIFECYCLE-ONCE-1"
-        and item.get("action") == "CLOSE_POSITION"
+        and item.get("position_id")
+        == "LIFECYCLE-ONCE-1"
+        and item.get("action")
+        == "CLOSE_POSITION"
     ]
 
     assert len(first_closes) == 1
     assert len(second_closes) == 0
+
+
+# ============================================================
+# PAPER-ONLY SAFETY
+# ============================================================
 
 
 def test_loop_safety_flags_remain_paper_only(db):
@@ -429,7 +713,10 @@ def test_loop_safety_flags_remain_paper_only(db):
         manager=manager,
     )
 
-    result = loop.evaluate_price(110.0)
+    result = loop.evaluate_price(
+        110.0
+    )
+
     safety = result.to_dict()
 
     assert safety["execution_type"] == "paper"
@@ -437,6 +724,11 @@ def test_loop_safety_flags_remain_paper_only(db):
     assert safety["broker_order_required"] is False
     assert safety["live_trading_enabled"] is False
     assert safety["broker_orders_allowed"] is False
+
+
+# ============================================================
+# INVALID PRICE
+# ============================================================
 
 
 def test_loop_rejects_invalid_market_price(db):
@@ -450,7 +742,9 @@ def test_loop_rejects_invalid_market_price(db):
     )
 
     with pytest.raises(ValueError):
-        loop.evaluate_price(0.0)
+        loop.evaluate_price(
+            0.0
+        )
 
     assert lifecycle.calls == []
     assert manager.calls == []
