@@ -1385,7 +1385,7 @@ def persist_step15_paper_execution(
     regime = _safe_string(
         _get_decision_attribute(
             decision,
-            "regime",
+            "market_regime",
         )
     )
 
@@ -1406,7 +1406,7 @@ def persist_step15_paper_execution(
     confluence = _safe_float(
         _get_decision_attribute(
             decision,
-            "confluence",
+            "confluence_score",
         )
     )
 
@@ -3504,5 +3504,3 @@ if __name__ == "__main__":
         port=8000,
         reload=True,
     )
-
-
