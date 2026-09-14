@@ -3,17 +3,20 @@ RAYMOND v2.8 - Lifecycle-Aware Paper Position Market Loop Tests
 
 Stage 17.4.3
 
-Verifies that:
+Verifies:
 1. SL/TP lifecycle processing runs before advanced management.
-2. A position closed by SL/TP is not managed afterward.
-3. Positions that remain open are still passed to management.
-4. The loop remains paper-only and cannot authorize broker/MT5 execution.
+2. Lifecycle and management results are serialized correctly.
+3. Real SL/TP closure persists correctly.
+4. Open positions remain open when no level is hit.
+5. Closed positions are not processed again.
+6. The loop remains paper-only.
+7. Invalid prices are rejected before processing.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +27,56 @@ from app.paper_position_lifecycle_market_loop import (
 from app.paper_position_market_loop import (
     PaperPositionMarketLoopConfig,
 )
+
+
+@dataclass(frozen=True)
+class FakeResult:
+    position_id: str
+    trade_id: str
+    symbol: str
+    action: str
+    reason: str | None = None
+    close_reason: str | None = None
+    entry_price: float | None = None
+    current_price: float | None = None
+    quantity: float | None = None
+    stop_loss: float | None = None
+    take_profit_1: float | None = None
+    take_profit_2: float | None = None
+    pnl: float | None = None
+    pnl_percent: float | None = None
+    closed: bool = False
+    persisted: bool = False
+    execution_type: str = "paper"
+    read_only: bool = True
+    broker_order_required: bool = False
+    live_trading_enabled: bool = False
+    broker_orders_allowed: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "position_id": self.position_id,
+            "trade_id": self.trade_id,
+            "symbol": self.symbol,
+            "action": self.action,
+            "reason": self.reason,
+            "close_reason": self.close_reason,
+            "entry_price": self.entry_price,
+            "current_price": self.current_price,
+            "quantity": self.quantity,
+            "stop_loss": self.stop_loss,
+            "take_profit_1": self.take_profit_1,
+            "take_profit_2": self.take_profit_2,
+            "pnl": self.pnl,
+            "pnl_percent": self.pnl_percent,
+            "closed": self.closed,
+            "persisted": self.persisted,
+            "execution_type": self.execution_type,
+            "read_only": self.read_only,
+            "broker_order_required": self.broker_order_required,
+            "live_trading_enabled": self.live_trading_enabled,
+            "broker_orders_allowed": self.broker_orders_allowed,
+        }
 
 
 def make_position(
@@ -38,10 +91,6 @@ def make_position(
     take_profit_2: float | None = None,
     quantity: float = 1.0,
 ):
-    """
-    Create and persist a paper position using the real Position model.
-    """
-
     position = Position(
         position_id=position_id,
         trade_id=trade_id,
@@ -72,10 +121,6 @@ def make_position(
 
 
 class FakeLifecycle:
-    """
-    Controlled lifecycle engine for testing loop ordering.
-    """
-
     def __init__(self):
         self.calls = []
 
@@ -83,7 +128,7 @@ class FakeLifecycle:
         self.calls.append((symbol, price))
 
         return (
-            SimpleNamespace(
+            FakeResult(
                 position_id="PAPER-CLOSED",
                 trade_id="TRADE-CLOSED",
                 symbol=symbol,
@@ -94,25 +139,15 @@ class FakeLifecycle:
                 quantity=1.0,
                 stop_loss=90.0,
                 take_profit_1=110.0,
-                take_profit_2=None,
                 pnl=10.0,
                 pnl_percent=10.0,
                 closed=True,
                 persisted=True,
-                execution_type="paper",
-                read_only=True,
-                broker_order_required=False,
-                live_trading_enabled=False,
-                broker_orders_allowed=False,
             ),
         )
 
 
 class FakeManager:
-    """
-    Controlled management engine for testing ordering.
-    """
-
     def __init__(self):
         self.calls = []
 
@@ -120,27 +155,18 @@ class FakeManager:
         self.calls.append((symbol, price))
 
         return (
-            SimpleNamespace(
+            FakeResult(
                 position_id="PAPER-OPEN",
                 trade_id="TRADE-OPEN",
                 symbol=symbol,
                 action="HOLD",
                 reason="Position remains open",
                 current_price=price,
-                execution_type="paper",
-                read_only=True,
-                broker_order_required=False,
-                live_trading_enabled=False,
-                broker_orders_allowed=False,
             ),
         )
 
 
 class FakeLifecycleEmpty:
-    """
-    Lifecycle engine that closes nothing.
-    """
-
     def __init__(self):
         self.calls = []
 
@@ -149,26 +175,35 @@ class FakeLifecycleEmpty:
         return ()
 
 
-def test_lifecycle_runs_before_management(db):
-    """
-    Lifecycle processing must happen before advanced management.
-    """
-
-    lifecycle = FakeLifecycle()
-    manager = FakeManager()
-
+def make_loop(
+    db,
+    *,
+    lifecycle=None,
+    manager=None,
+):
     config = PaperPositionMarketLoopConfig.from_values(
         symbol="XAUUSD",
         interval_seconds=30.0,
         enabled=True,
     )
 
-    loop = LifecycleAwarePaperPositionMarketLoop(
+    return LifecycleAwarePaperPositionMarketLoop(
         db=db,
         price_provider=None,
         config=config,
         manager=manager,
         lifecycle=lifecycle,
+    )
+
+
+def test_lifecycle_runs_before_management(db):
+    lifecycle = FakeLifecycle()
+    manager = FakeManager()
+
+    loop = make_loop(
+        db,
+        lifecycle=lifecycle,
+        manager=manager,
     )
 
     result = loop.evaluate_price(110.0)
@@ -190,25 +225,13 @@ def test_lifecycle_runs_before_management(db):
 
 
 def test_lifecycle_closure_is_reported_as_lifecycle_phase(db):
-    """
-    A lifecycle close result must be clearly marked as lifecycle processing.
-    """
-
     lifecycle = FakeLifecycle()
     manager = FakeManager()
 
-    config = PaperPositionMarketLoopConfig.from_values(
-        symbol="XAUUSD",
-        interval_seconds=30.0,
-        enabled=True,
-    )
-
-    loop = LifecycleAwarePaperPositionMarketLoop(
-        db=db,
-        price_provider=None,
-        config=config,
-        manager=manager,
+    loop = make_loop(
+        db,
         lifecycle=lifecycle,
+        manager=manager,
     )
 
     result = loop.evaluate_price(110.0)
@@ -223,25 +246,13 @@ def test_lifecycle_closure_is_reported_as_lifecycle_phase(db):
 
 
 def test_open_position_management_is_reported_separately(db):
-    """
-    Management results must remain separate from lifecycle results.
-    """
-
     lifecycle = FakeLifecycleEmpty()
     manager = FakeManager()
 
-    config = PaperPositionMarketLoopConfig.from_values(
-        symbol="XAUUSD",
-        interval_seconds=30.0,
-        enabled=True,
-    )
-
-    loop = LifecycleAwarePaperPositionMarketLoop(
-        db=db,
-        price_provider=None,
-        config=config,
-        manager=manager,
+    loop = make_loop(
+        db,
         lifecycle=lifecycle,
+        manager=manager,
     )
 
     result = loop.evaluate_price(105.0)
@@ -252,16 +263,6 @@ def test_open_position_management_is_reported_separately(db):
 
 
 def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
-    """
-    Integration test using the actual PaperPositionLifecycle engine.
-
-    BUY position:
-        entry = 100
-        TP1   = 110
-
-    Price reaches 110, therefore the position must close.
-    """
-
     position = make_position(
         db,
         position_id="LIFECYCLE-TP-1",
@@ -274,17 +275,7 @@ def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
         quantity=1.0,
     )
 
-    config = PaperPositionMarketLoopConfig.from_values(
-        symbol="XAUUSD",
-        interval_seconds=30.0,
-        enabled=True,
-    )
-
-    loop = LifecycleAwarePaperPositionMarketLoop(
-        db=db,
-        price_provider=None,
-        config=config,
-    )
+    loop = make_loop(db)
 
     result = loop.evaluate_price(110.0)
 
@@ -313,16 +304,6 @@ def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
 
 
 def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
-    """
-    Integration test using the actual lifecycle engine.
-
-    BUY position:
-        entry = 100
-        SL    = 90
-
-    Price reaches 90, therefore the position must close.
-    """
-
     position = make_position(
         db,
         position_id="LIFECYCLE-SL-1",
@@ -335,17 +316,7 @@ def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
         quantity=1.0,
     )
 
-    config = PaperPositionMarketLoopConfig.from_values(
-        symbol="XAUUSD",
-        interval_seconds=30.0,
-        enabled=True,
-    )
-
-    loop = LifecycleAwarePaperPositionMarketLoop(
-        db=db,
-        price_provider=None,
-        config=config,
-    )
+    loop = make_loop(db)
 
     result = loop.evaluate_price(90.0)
 
@@ -374,10 +345,6 @@ def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
 
 
 def test_loop_keeps_non_triggered_position_open(db):
-    """
-    A price that hits neither SL nor TP must leave the position open.
-    """
-
     position = make_position(
         db,
         position_id="LIFECYCLE-HOLD-1",
@@ -390,17 +357,7 @@ def test_loop_keeps_non_triggered_position_open(db):
         quantity=1.0,
     )
 
-    config = PaperPositionMarketLoopConfig.from_values(
-        symbol="XAUUSD",
-        interval_seconds=30.0,
-        enabled=True,
-    )
-
-    loop = LifecycleAwarePaperPositionMarketLoop(
-        db=db,
-        price_provider=None,
-        config=config,
-    )
+    loop = make_loop(db)
 
     result = loop.evaluate_price(105.0)
 
@@ -415,11 +372,6 @@ def test_loop_keeps_non_triggered_position_open(db):
 
 
 def test_closed_position_is_not_processed_again(db):
-    """
-    Once a position is closed, a later market-loop evaluation must not
-    generate another lifecycle close for that position.
-    """
-
     position = make_position(
         db,
         position_id="LIFECYCLE-ONCE-1",
@@ -432,17 +384,7 @@ def test_closed_position_is_not_processed_again(db):
         quantity=1.0,
     )
 
-    config = PaperPositionMarketLoopConfig.from_values(
-        symbol="XAUUSD",
-        interval_seconds=30.0,
-        enabled=True,
-    )
-
-    loop = LifecycleAwarePaperPositionMarketLoop(
-        db=db,
-        price_provider=None,
-        config=config,
-    )
+    loop = make_loop(db)
 
     first_result = loop.evaluate_price(110.0)
 
@@ -478,56 +420,33 @@ def test_closed_position_is_not_processed_again(db):
 
 
 def test_loop_safety_flags_remain_paper_only(db):
-    """
-    Every lifecycle-aware loop result must remain paper-only.
-    """
-
     lifecycle = FakeLifecycle()
     manager = FakeManager()
 
-    config = PaperPositionMarketLoopConfig.from_values(
-        symbol="XAUUSD",
-        interval_seconds=30.0,
-        enabled=True,
-    )
-
-    loop = LifecycleAwarePaperPositionMarketLoop(
-        db=db,
-        price_provider=None,
-        config=config,
-        manager=manager,
+    loop = make_loop(
+        db,
         lifecycle=lifecycle,
+        manager=manager,
     )
 
     result = loop.evaluate_price(110.0)
+    safety = result.to_dict()
 
-    assert result.to_dict()["execution_type"] == "paper"
-    assert result.to_dict()["read_only"] is True
-    assert result.to_dict()["broker_order_required"] is False
-    assert result.to_dict()["live_trading_enabled"] is False
-    assert result.to_dict()["broker_orders_allowed"] is False
+    assert safety["execution_type"] == "paper"
+    assert safety["read_only"] is True
+    assert safety["broker_order_required"] is False
+    assert safety["live_trading_enabled"] is False
+    assert safety["broker_orders_allowed"] is False
 
 
 def test_loop_rejects_invalid_market_price(db):
-    """
-    Invalid prices must be rejected before lifecycle or management processing.
-    """
-
     lifecycle = FakeLifecycle()
     manager = FakeManager()
 
-    config = PaperPositionMarketLoopConfig.from_values(
-        symbol="XAUUSD",
-        interval_seconds=30.0,
-        enabled=True,
-    )
-
-    loop = LifecycleAwarePaperPositionMarketLoop(
-        db=db,
-        price_provider=None,
-        config=config,
-        manager=manager,
+    loop = make_loop(
+        db,
         lifecycle=lifecycle,
+        manager=manager,
     )
 
     with pytest.raises(ValueError):
