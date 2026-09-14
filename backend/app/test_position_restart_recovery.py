@@ -166,8 +166,12 @@ def test_position_survives_database_session_restart(
 
         # Current market state must survive restart.
         assert recovered.current_price == 4310.0
-        assert recovered.pnl == 10.0
-        assert recovered.max_profit == 10.0
+
+        # After the 50% partial close, only 0.50 quantity remains.
+        # Therefore:
+        # (4310 - 4300) * 0.50 = 5.0
+        assert recovered.pnl == 5.0
+        assert recovered.max_profit == 5.0
 
         # Strategy context must survive restart.
         assert recovered.regime == "trending_up"
@@ -223,7 +227,7 @@ def test_open_position_recovery_returns_only_open_positions(
     closed = PositionRepository.close(
         db,
         closed_position.position_id,
-        close_price=4290.0,
+        exit_price=4290.0,
         reason="TEST_RESTART_RECOVERY",
     )
 
