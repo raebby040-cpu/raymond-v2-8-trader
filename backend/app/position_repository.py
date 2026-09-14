@@ -4,11 +4,15 @@ RAYMOND v2.8 - Persistent Position Repository
 Stage 16.2
 Persistent Position State
 
+Stage 16.3
+Persistent Trade Thesis
+
 This repository provides the single persistence layer for the
 authoritative Position model.
 
 Responsibilities:
 - Create persistent paper positions.
+- Persist Step 13 AI trade thesis.
 - Load positions by position_id or trade_id.
 - Update live position state.
 - Update management state.
@@ -254,11 +258,15 @@ class PositionRepository:
         technical_score: Optional[float] = None,
         confluence: Optional[float] = None,
         confidence: Optional[float] = None,
+        trade_thesis: Optional[str] = None,
         current_price: Optional[float] = None,
         management_status: str = "open",
     ) -> Position:
         """
         Create one persistent Position.
+
+        Stage 16.3:
+        - Persist the Step 13 AI reasoning in trade_thesis.
 
         Idempotency:
         - position_id must be unique.
@@ -369,6 +377,11 @@ class PositionRepository:
             technical_score=technical_score,
             confluence=confluence,
             confidence=confidence,
+
+            # Stage 16.3:
+            # Persist the Step 13 AI reasoning that produced
+            # the trade decision.
+            trade_thesis=trade_thesis,
 
             break_even_applied=0,
             partial_close_applied=0,
@@ -1154,6 +1167,14 @@ class PositionRepository:
             "confluence": position.confluence,
             "confidence": position.confidence,
 
+            # Stage 16.3:
+            # Persistent Step 13 AI trade thesis.
+            "trade_thesis": getattr(
+                position,
+                "trade_thesis",
+                None,
+            ),
+
             "break_even_applied": bool(
                 position.break_even_applied
             ),
@@ -1196,4 +1217,4 @@ class PositionRepository:
                 if position.closed_at
                 else None
             ),
-          }
+        }
