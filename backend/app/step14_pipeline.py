@@ -1,3 +1,22 @@
+"""
+RAYMOND v2.8 - Step 14 Trading Pipeline
+
+Step 14:
+- Connect Step 13 AI decisions to the Risk Engine.
+- Calculate broker-aware position size.
+- Calculate monetary risk exposure from the stop-loss.
+- Run final pre-trade risk validation.
+- Execute only through PaperExecutionGateway.
+- Never execute live trades.
+
+Exposure model:
+- Position sizing is based on monetary loss at stop-loss.
+- Proposed exposure is therefore the monetary risk of the
+  proposed position, not the full XAUUSD notional value.
+- This keeps the exposure guard compatible with the configured
+  account-risk limits.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -47,6 +66,12 @@ class Step14Pipeline:
     - Live execution is always rejected.
     - Position size comes from the Risk Engine.
     - Only PaperExecutionGateway is accepted.
+
+    Exposure rules:
+    - Position size is calculated from monetary stop-loss risk.
+    - Proposed exposure uses that same monetary risk model.
+    - Full instrument notional is NOT used as the account
+      exposure guard.
     """
 
     def __init__(
@@ -59,6 +84,64 @@ class Step14Pipeline:
         self.risk_engine = risk_engine
         self.execution_gateway = execution_gateway
 
+    def _calculate_risk_exposure(
+        self,
+        *,
+        entry_price: float,
+        stop_loss_price: float,
+        volume: float,
+        specification: SymbolSpecification,
+    ) -> float:
+        """
+        Calculate the monetary amount exposed to the stop-loss.
+
+        This intentionally uses the same tick-size/tick-value model
+        used by RiskEngine.calculate_position_size_from_symbol().
+
+        Formula:
+
+            price distance
+            ---------------- × losing-side tick value × volume
+               tick size
+
+        The result is a monetary risk value, not a notional
+        market-value exposure.
+        """
+
+        stop_distance = abs(
+            entry_price - stop_loss_price
+        )
+
+        if stop_distance <= 0:
+            raise Step14PipelineError(
+                "Stop-loss distance must be greater than zero."
+            )
+
+        if specification.tick_size <= 0:
+            raise Step14PipelineError(
+                "Symbol tick size must be greater than zero."
+            )
+
+        if specification.tick_value_loss <= 0:
+            raise Step14PipelineError(
+                "Symbol losing-side tick value must be greater than zero."
+            )
+
+        exposure = (
+            stop_distance
+            / specification.tick_size
+        ) * specification.tick_value_loss * volume
+
+        if exposure <= 0:
+            raise Step14PipelineError(
+                "Calculated risk exposure must be greater than zero."
+            )
+
+        return round(
+            exposure,
+            8,
+        )
+
     def evaluate(
         self,
         context: TechnicalContext,
@@ -70,7 +153,15 @@ class Step14Pipeline:
         total_exposure: float = 0.0,
     ) -> Step14Result:
         """
-        Run AI decision -> position sizing -> risk check.
+        Run:
+
+            Step 13 AI
+                ->
+            position sizing
+                ->
+            monetary-risk exposure
+                ->
+            final risk check
 
         This method does not execute an order.
         """
@@ -105,7 +196,13 @@ class Step14Pipeline:
             )
 
         # --------------------------------------------------
-        # Risk Engine calculates the actual position size.
+        # Validate symbol specification before sizing.
+        # --------------------------------------------------
+
+        specification.validate()
+
+        # --------------------------------------------------
+        # Risk Engine calculates actual position size.
         # --------------------------------------------------
 
         position_size = (
@@ -123,17 +220,26 @@ class Step14Pipeline:
             )
 
         # --------------------------------------------------
-        # Calculate proposed exposure.
+        # Calculate proposed monetary risk exposure.
+        #
+        # IMPORTANT:
+        # Do NOT calculate:
+        #
+        #     volume × price × contract_size
+        #
+        # because that is full notional value and is not
+        # comparable to the configured account-risk limit.
         # --------------------------------------------------
 
-        proposed_exposure = abs(
-            position_size
-            * proposal.entry_price
-            * specification.contract_size
+        proposed_exposure = self._calculate_risk_exposure(
+            entry_price=proposal.entry_price,
+            stop_loss_price=proposal.stop_loss,
+            volume=position_size,
+            specification=specification,
         )
 
         # --------------------------------------------------
-        # Risk Engine is the final authority before execution.
+        # Risk Engine remains the final authority.
         # --------------------------------------------------
 
         risk_decision = self.risk_engine.pre_trade_check(
@@ -170,7 +276,11 @@ class Step14Pipeline:
         """
         Run the complete Step 14 paper-only pipeline.
 
-        AI -> Risk Engine -> Paper Gateway.
+        AI
+        ->
+        Risk Engine
+        ->
+        PaperExecutionGateway
 
         Live execution is never permitted.
         """
@@ -182,8 +292,7 @@ class Step14Pipeline:
 
         # --------------------------------------------------
         # HARD SAFETY GATE:
-        # Step 14 may only execute through the real
-        # PaperExecutionGateway implementation.
+        # Only the actual paper gateway is accepted.
         # --------------------------------------------------
 
         if not isinstance(
@@ -228,7 +337,7 @@ class Step14Pipeline:
             return result
 
         # --------------------------------------------------
-        # A successful risk decision must have:
+        # Successful risk decision must have:
         # - proposal
         # - position size
         # --------------------------------------------------
@@ -246,7 +355,7 @@ class Step14Pipeline:
             )
 
         # --------------------------------------------------
-        # Map AI direction to the actual execution gateway.
+        # Map AI direction to execution gateway.
         # --------------------------------------------------
 
         if proposal.direction is AIDirection.BUY:
@@ -261,7 +370,7 @@ class Step14Pipeline:
             )
 
         # --------------------------------------------------
-        # Construct the actual OrderRequest API.
+        # Construct actual paper OrderRequest.
         # --------------------------------------------------
 
         order = OrderRequest(
@@ -284,7 +393,9 @@ class Step14Pipeline:
             )
 
         except ExecutionGatewayError as exc:
-            raise Step14PipelineError(str(exc)) from exc
+            raise Step14PipelineError(
+                str(exc)
+            ) from exc
 
         return Step14Result(
             decision=result.decision,
