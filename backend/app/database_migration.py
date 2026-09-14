@@ -102,8 +102,9 @@ def add_missing_column(
     """
     Add a column only when it does not already exist.
 
-    Returns True when the column was added.
-    Returns False when it already existed.
+    Returns:
+        True  - column was added
+        False - column already existed
     """
 
     existing_columns = get_table_columns(
@@ -128,7 +129,7 @@ def create_trade_id_index(connection):
     """
     Create the trade_id index when trade_id exists.
 
-    CREATE INDEX IF NOT EXISTS keeps this operation idempotent.
+    The operation is idempotent.
     """
 
     existing_columns = get_table_columns(
@@ -151,15 +152,18 @@ def create_trade_id_index(connection):
 
 
 # -------------------------------------------------------------------
-# STAGE 16.2
+# STAGE 16.2 INTERNAL IMPLEMENTATION
 # -------------------------------------------------------------------
 
 def _migrate_stage_16_2(connection):
     """
     Internal Stage 16.2 migration implementation.
 
-    This function receives an existing database connection so the
-    complete migration can run inside the same transaction.
+    Adds all persistent Position State columns required by
+    Stage 16.2.
+
+    The return format intentionally preserves the original
+    migration API expected by the existing test suite.
     """
 
     if not inspect(connection).has_table("positions"):
@@ -189,27 +193,35 @@ def _migrate_stage_16_2(connection):
     return {
         "stage": "16.2",
         "table": "positions",
-        "added_columns": added_columns,
+        "status": "completed",
         "success": True,
+        "added_columns": added_columns,
     }
 
+
+# -------------------------------------------------------------------
+# STAGE 16.2 PUBLIC API
+# -------------------------------------------------------------------
 
 def migrate_stage_16_2(connection=None):
     """
     Public Stage 16.2 migration.
 
-    Compatibility:
-    - Existing callers may call migrate_stage_16_2()
-      without arguments.
-    - The main migration runner may provide an existing
-      transaction connection.
+    Supports both:
 
-    This preserves the original Stage 16.2 API used by the
-    existing test suite.
+        migrate_stage_16_2()
+
+    and:
+
+        migrate_stage_16_2(connection)
+
+    This preserves compatibility with the existing test suite.
     """
 
     if connection is not None:
-        return _migrate_stage_16_2(connection)
+        return _migrate_stage_16_2(
+            connection
+        )
 
     create_tables()
 
@@ -220,14 +232,14 @@ def migrate_stage_16_2(connection=None):
 
 
 # -------------------------------------------------------------------
-# STAGE 16.3
+# STAGE 16.3 INTERNAL IMPLEMENTATION
 # -------------------------------------------------------------------
 
 def _migrate_stage_16_3(connection):
     """
     Internal Stage 16.3 migration implementation.
 
-    Adds persistent trade_thesis storage to positions.
+    Adds persistent trade_thesis storage to the positions table.
     """
 
     if not inspect(connection).has_table("positions"):
@@ -249,24 +261,33 @@ def _migrate_stage_16_3(connection):
     return {
         "stage": "16.3",
         "table": "positions",
-        "added_columns": added_columns,
+        "status": "completed",
         "success": True,
+        "added_columns": added_columns,
     }
 
+
+# -------------------------------------------------------------------
+# STAGE 16.3 PUBLIC API
+# -------------------------------------------------------------------
 
 def migrate_stage_16_3(connection=None):
     """
     Public Stage 16.3 migration.
 
     Supports both:
+
         migrate_stage_16_3()
 
     and:
+
         migrate_stage_16_3(connection)
     """
 
     if connection is not None:
-        return _migrate_stage_16_3(connection)
+        return _migrate_stage_16_3(
+            connection
+        )
 
     create_tables()
 
@@ -284,11 +305,12 @@ def run_database_migrations():
     """
     Run all required database migrations in stage order.
 
-    Both Stage 16.2 and Stage 16.3 execute inside the same
-    database transaction.
+    Stage 16.2 is preserved exactly as the compatibility
+    foundation.
 
-    Any failure raises an exception and prevents the application
-    from silently starting against an incomplete schema.
+    Stage 16.3 then adds the persistent trade thesis column.
+
+    Any migration failure raises an exception.
     """
 
     create_tables()
@@ -322,6 +344,7 @@ def run_database_migrations():
         )
 
     return {
+        "status": "completed",
         "success": True,
         "migrations": results,
     }
