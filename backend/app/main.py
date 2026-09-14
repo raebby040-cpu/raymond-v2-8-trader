@@ -10,9 +10,16 @@ Step 15:
 - Existing market, dashboard, demo, safety and read-only endpoints
   remain available.
 
+Step 16.2:
+- Persist paper positions using PositionRepository.
+- Preserve original entry/quantity/SL separately from live management state.
+- Link persistent positions to the paper execution order_id.
+- Store the Step 13 trade thesis alongside the position.
+- Position management remains paper-only and calculation/persistence only.
+
 IMPORTANT:
 Real broker order execution is NOT implemented.
-Step 15 never sends an order to MT5 or Exness.
+Step 15/16.2 never sends an order to MT5 or Exness.
 """
 
 from datetime import datetime, timezone
@@ -134,17 +141,19 @@ except ImportError:
 
 
 # ============================================================
-# STEP 3C - DATABASE / TRADE JOURNAL
+# STEP 3C / STEP 16.2 - DATABASE / TRADE JOURNAL / POSITIONS
 # ============================================================
 
 try:
     from .database import SessionLocal
     from .demo_trading import DemoTrade
     from .journal import TradeJournal
+    from .position_repository import PositionRepository
 except ImportError:
     from database import SessionLocal
     from demo_trading import DemoTrade
     from journal import TradeJournal
+    from position_repository import PositionRepository
 
 
 # ============================================================
@@ -318,7 +327,7 @@ def utc_timestamp() -> str:
 
 def live_trading_enabled() -> bool:
     """
-    Live trading is deliberately disabled during Step 15.
+    Live trading is deliberately disabled during Step 15/16.2.
     """
 
     return (
@@ -470,6 +479,333 @@ def mt5_error_response(
 
 
 # ============================================================
+# STEP 16.2 - SAFE VALUE HELPERS
+# ============================================================
+
+def _safe_float(
+    value,
+    default=None,
+):
+    """
+    Convert a value to float without allowing malformed
+    optional values to crash persistence.
+    """
+
+    if value is None:
+        return default
+
+    try:
+        return float(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
+def _safe_string(
+    value,
+    default=None,
+):
+    """
+    Convert optional values to strings while preserving None.
+    """
+
+    if value is None:
+        return default
+
+    text_value = str(value).strip()
+
+    if not text_value:
+        return default
+
+    return text_value
+
+
+def _enum_value(
+    value,
+):
+    """
+    Return Enum.value when an Enum is supplied.
+    """
+
+    if value is None:
+        return None
+
+    return getattr(
+        value,
+        "value",
+        value,
+    )
+
+
+def _get_decision_attribute(
+    decision,
+    name: str,
+):
+    """
+    Safely read a Step 13 decision field.
+
+    Stage 16.2 must not break if an optional thesis field
+    is unavailable in an older decision object.
+    """
+
+    if decision is None:
+        return None
+
+    return getattr(
+        decision,
+        name,
+        None,
+    )
+
+
+def serialize_persistent_position(
+    position,
+) -> dict:
+    """
+    Serialize the persistent Stage 16.2 Position model.
+
+    This serializer intentionally lives in main.py rather than
+    depending on an optional repository to_dict() method.
+    """
+
+    if position is None:
+        return None
+
+    opened_at = getattr(
+        position,
+        "opened_at",
+        None,
+    )
+
+    closed_at = getattr(
+        position,
+        "closed_at",
+        None,
+    )
+
+    last_management_time = getattr(
+        position,
+        "last_management_time",
+        None,
+    )
+
+    return {
+        "id": getattr(
+            position,
+            "id",
+            None,
+        ),
+        "position_id": getattr(
+            position,
+            "position_id",
+            None,
+        ),
+        "trade_id": getattr(
+            position,
+            "trade_id",
+            None,
+        ),
+        "symbol": getattr(
+            position,
+            "symbol",
+            None,
+        ),
+        "direction": _enum_value(
+            getattr(
+                position,
+                "direction",
+                None,
+            )
+        ),
+
+        # ORIGINAL
+        "entry_price": getattr(
+            position,
+            "entry_price",
+            None,
+        ),
+        "original_quantity": getattr(
+            position,
+            "original_quantity",
+            None,
+        ),
+        "initial_stop_loss": getattr(
+            position,
+            "initial_stop_loss",
+            None,
+        ),
+        "take_profit_1": getattr(
+            position,
+            "take_profit_1",
+            None,
+        ),
+        "take_profit_2": getattr(
+            position,
+            "take_profit_2",
+            None,
+        ),
+        "risk_1r": getattr(
+            position,
+            "risk_1r",
+            None,
+        ),
+
+        # LIVE
+        "current_price": getattr(
+            position,
+            "current_price",
+            None,
+        ),
+        "current_stop_loss": getattr(
+            position,
+            "current_stop_loss",
+            None,
+        ),
+        "remaining_quantity": getattr(
+            position,
+            "remaining_quantity",
+            None,
+        ),
+
+        # Compatibility fields
+        "quantity": getattr(
+            position,
+            "quantity",
+            None,
+        ),
+        "stop_loss": getattr(
+            position,
+            "stop_loss",
+            None,
+        ),
+        "take_profit": getattr(
+            position,
+            "take_profit",
+            None,
+        ),
+
+        # PNL
+        "pnl": getattr(
+            position,
+            "pnl",
+            None,
+        ),
+        "pnl_percent": getattr(
+            position,
+            "pnl_percent",
+            None,
+        ),
+
+        # THESIS
+        "regime": getattr(
+            position,
+            "regime",
+            None,
+        ),
+        "setup": getattr(
+            position,
+            "setup",
+            None,
+        ),
+        "technical_score": getattr(
+            position,
+            "technical_score",
+            None,
+        ),
+        "confluence": getattr(
+            position,
+            "confluence",
+            None,
+        ),
+        "confidence": getattr(
+            position,
+            "confidence",
+            None,
+        ),
+
+        # MANAGEMENT STATE
+        "break_even_applied": bool(
+            getattr(
+                position,
+                "break_even_applied",
+                0,
+            )
+        ),
+        "partial_close_applied": bool(
+            getattr(
+                position,
+                "partial_close_applied",
+                0,
+            )
+        ),
+        "trailing_active": bool(
+            getattr(
+                position,
+                "trailing_active",
+                0,
+            )
+        ),
+        "management_status": getattr(
+            position,
+            "management_status",
+            None,
+        ),
+        "last_management_action": getattr(
+            position,
+            "last_management_action",
+            None,
+        ),
+        "last_management_time": (
+            last_management_time.isoformat()
+            if isinstance(
+                last_management_time,
+                datetime,
+            )
+            else last_management_time
+        ),
+
+        # EXTREMES
+        "max_drawdown": getattr(
+            position,
+            "max_drawdown",
+            None,
+        ),
+        "max_profit": getattr(
+            position,
+            "max_profit",
+            None,
+        ),
+
+        # STATUS
+        "status": _enum_value(
+            getattr(
+                position,
+                "status",
+                None,
+            )
+        ),
+        "opened_at": (
+            opened_at.isoformat()
+            if isinstance(
+                opened_at,
+                datetime,
+            )
+            else opened_at
+        ),
+        "closed_at": (
+            closed_at.isoformat()
+            if isinstance(
+                closed_at,
+                datetime,
+            )
+            else closed_at
+        ),
+    }
+
+
+# ============================================================
 # STEP 15 - PAPER RISK STATE
 # ============================================================
 
@@ -506,7 +842,10 @@ def build_paper_risk_state() -> PaperRiskState:
                 quantity = float(
                     trade.quantity
                 )
-            except (TypeError, ValueError) as exc:
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
                 raise TradingPipelineServiceError(
                     "Invalid open paper trade values while "
                     f"calculating exposure: {exc}"
@@ -705,7 +1044,7 @@ def build_symbol_specification(
 
 
 # ============================================================
-# STEP 3C - PAPER TRADE PERSISTENCE
+# STEP 16.2 - PAPER TRADE + PERSISTENT POSITION
 # ============================================================
 
 def persist_step15_paper_execution(
@@ -714,7 +1053,15 @@ def persist_step15_paper_execution(
     """
     Persist a successful Step 15 paper execution.
 
-    Only paper executions are accepted.
+    Stage 16.2 adds a persistent Position record while
+    preserving the existing TradeJournal record.
+
+    Safety rules:
+    - Only paper executions are accepted.
+    - Only accepted/filled executions are persisted.
+    - No live broker operation occurs.
+    - execution.order_id becomes the persistent linkage key.
+    - Position creation is idempotent through PositionRepository.
     """
 
     execution = getattr(
@@ -736,7 +1083,7 @@ def persist_step15_paper_execution(
 
     if execution_type != "paper":
         raise TradingPipelineServiceError(
-            "Step 15 persistence rejected a non-paper execution."
+            "Step 16.2 persistence rejected a non-paper execution."
         )
 
     status = str(
@@ -753,25 +1100,31 @@ def persist_step15_paper_execution(
     }:
         return None
 
+    decision = getattr(
+        result,
+        "decision",
+        None,
+    )
+
     proposal = getattr(
-        result.decision,
+        decision,
         "proposal",
         None,
     )
 
     if proposal is None:
         raise TradingPipelineServiceError(
-            "Paper execution cannot be journaled without "
+            "Paper execution cannot be persisted without "
             "a trade proposal."
         )
 
-    order_id = str(
+    order_id = _safe_string(
         getattr(
             execution,
             "order_id",
-            "",
+            None,
         )
-    ).strip()
+    )
 
     if not order_id:
         raise TradingPipelineServiceError(
@@ -784,14 +1137,13 @@ def persist_step15_paper_execution(
         None,
     )
 
-    if hasattr(side, "value"):
-        direction = str(
-            side.value
-        ).lower()
-    else:
-        direction = str(
-            side
-        ).lower().strip()
+    side_value = _enum_value(side)
+
+    direction = str(
+        side_value
+        if side_value is not None
+        else side
+    ).lower().strip()
 
     if direction not in {
         "buy",
@@ -801,21 +1153,95 @@ def persist_step15_paper_execution(
             "Paper execution returned an invalid trade direction."
         )
 
-    try:
-        entry_price = float(
-            getattr(execution, "price")
+    entry_price = _safe_float(
+        getattr(
+            execution,
+            "price",
+            None,
         )
-        quantity = float(
-            getattr(execution, "volume")
+    )
+
+    quantity = _safe_float(
+        getattr(
+            execution,
+            "volume",
+            None,
         )
-    except (
-        TypeError,
-        ValueError,
-        AttributeError,
-    ) as exc:
+    )
+
+    if entry_price is None or entry_price <= 0:
         raise TradingPipelineServiceError(
-            "Paper execution returned invalid price or volume."
-        ) from exc
+            "Paper execution returned an invalid entry price."
+        )
+
+    if quantity is None or quantity <= 0:
+        raise TradingPipelineServiceError(
+            "Paper execution returned an invalid volume."
+        )
+
+    symbol = _safe_string(
+        getattr(
+            execution,
+            "symbol",
+            None,
+        )
+    )
+
+    if symbol is None:
+        symbol = _safe_string(
+            getattr(
+                proposal,
+                "symbol",
+                None,
+            )
+        )
+
+    if not symbol:
+        raise TradingPipelineServiceError(
+            "Paper execution did not provide a symbol."
+        )
+
+    execution_stop_loss = getattr(
+        execution,
+        "stop_loss",
+        None,
+    )
+
+    proposal_stop_loss = getattr(
+        proposal,
+        "stop_loss",
+        None,
+    )
+
+    stop_loss = _safe_float(
+        execution_stop_loss
+        if execution_stop_loss is not None
+        else proposal_stop_loss
+    )
+
+    execution_take_profit = getattr(
+        execution,
+        "take_profit",
+        None,
+    )
+
+    proposal_take_profit = getattr(
+        proposal,
+        "take_profit",
+        None,
+    )
+
+    take_profit = _safe_float(
+        execution_take_profit
+        if execution_take_profit is not None
+        else proposal_take_profit
+    )
+
+    if stop_loss is None:
+        raise TradingPipelineServiceError(
+            "Paper execution cannot create a persistent "
+            "position without an initial stop loss."
+        )
 
     timestamp_value = getattr(
         execution,
@@ -848,28 +1274,18 @@ def persist_step15_paper_execution(
                 "using current UTC time."
             )
 
+    # --------------------------------------------------------
+    # ORIGINAL PAPER TRADE JOURNAL RECORD
+    # --------------------------------------------------------
+
     trade = DemoTrade(
         trade_id=order_id,
-        symbol=str(
-            getattr(
-                execution,
-                "symbol",
-                proposal.symbol,
-            )
-        ),
+        symbol=symbol,
         direction=direction,
         entry_price=entry_price,
         quantity=quantity,
-        stop_loss=getattr(
-            execution,
-            "stop_loss",
-            proposal.stop_loss,
-        ),
-        take_profit=getattr(
-            execution,
-            "take_profit",
-            proposal.take_profit,
-        ),
+        stop_loss=stop_loss,
+        take_profit=take_profit,
         execution_type="paper",
         opened_at=opened_at,
     )
@@ -883,15 +1299,113 @@ def persist_step15_paper_execution(
             trade
         )
 
-        return TradeJournal.serialize_trade(
-            row
+        # ----------------------------------------------------
+        # STEP 16.2 - PERSISTENT POSITION
+        # ----------------------------------------------------
+
+        position_id = (
+            f"POSITION-{order_id}"
         )
+
+        risk_1r = abs(
+            entry_price - stop_loss
+        )
+
+        if risk_1r <= 0:
+            raise TradingPipelineServiceError(
+                "Persistent position requires a positive 1R "
+                "distance between entry and initial stop loss."
+            )
+
+        regime = _safe_string(
+            _get_decision_attribute(
+                decision,
+                "regime",
+            )
+        )
+
+        setup = _safe_string(
+            _get_decision_attribute(
+                decision,
+                "setup",
+            )
+        )
+
+        technical_score = _safe_float(
+            _get_decision_attribute(
+                decision,
+                "technical_score",
+            )
+        )
+
+        confluence = _safe_float(
+            _get_decision_attribute(
+                decision,
+                "confluence",
+            )
+        )
+
+        confidence = _safe_float(
+            _get_decision_attribute(
+                decision,
+                "confidence",
+            )
+        )
+
+        position = PositionRepository.create(
+            db,
+            position_id=position_id,
+            trade_id=order_id,
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            original_quantity=quantity,
+            initial_stop_loss=stop_loss,
+            take_profit_1=take_profit,
+            take_profit_2=None,
+            risk_1r=risk_1r,
+            regime=regime,
+            setup=setup,
+            technical_score=technical_score,
+            confluence=confluence,
+            confidence=confidence,
+            current_price=entry_price,
+            management_status="open",
+        )
+
+        logger.info(
+            "Stage 16.2 persistent position created: "
+            "position_id=%s trade_id=%s symbol=%s direction=%s",
+            position_id,
+            order_id,
+            symbol,
+            direction,
+        )
+
+        return {
+            "trade": TradeJournal.serialize_trade(
+                row
+            ),
+            "position": serialize_persistent_position(
+                position
+            ),
+        }
+
+    except TradingPipelineServiceError:
+        db.rollback()
+        raise
 
     except Exception as exc:
         db.rollback()
 
+        logger.error(
+            "Step 16.2 paper trade persistence failed: %s",
+            exc,
+        )
+
         raise TradingPipelineServiceError(
-            f"Unable to persist Step 15 paper trade: {exc}"
+            "Unable to persist Step 15 paper trade and "
+            f"Stage 16.2 position: {exc}"
         ) from exc
 
     finally:
@@ -968,6 +1482,7 @@ async def health_check():
         "version": "2.8.0",
         "live_trading_enabled": live_trading_enabled(),
         "step15_pipeline": True,
+        "step16_2_persistent_positions": True,
         "execution_mode": "paper_only",
         "mt5_telemetry": True,
         "mt5_ai_decision_bridge": True,
@@ -997,6 +1512,12 @@ async def root():
                 "Step 13 AI -> Step 14 Risk -> "
                 "PaperExecutionGateway"
             ),
+        },
+        "step16_2": {
+            "enabled": True,
+            "persistent_positions": True,
+            "management_execution": "not implemented",
+            "live_trading": False,
         },
         "mt5_telemetry": {
             "enabled": True,
@@ -1641,7 +2162,7 @@ async def get_strategy_decision(
 
 
 # ============================================================
-# STEP 15 - COMPLETE PAPER TRADE PIPELINE
+# STEP 15 + STEP 16.2 - COMPLETE PAPER TRADE PIPELINE
 # ============================================================
 
 @app.post("/api/strategy/paper-trade")
@@ -1653,7 +2174,7 @@ async def run_strategy_paper_trade(
             status_code=503,
             detail={
                 "error": (
-                    "Step 15 refuses to run while "
+                    "Step 15/16.2 refuses to run while "
                     "LIVE_TRADING_ENABLED=true."
                 ),
                 "timestamp": utc_timestamp(),
@@ -1709,19 +2230,26 @@ async def run_strategy_paper_trade(
         if persisted_trade is not None:
             response["journal"] = {
                 "persisted": True,
-                "trade": persisted_trade,
+                "trade": persisted_trade["trade"],
             }
+
+            response["position"] = (
+                persisted_trade["position"]
+            )
+
         else:
             response["journal"] = {
                 "persisted": False,
                 "trade": None,
             }
 
+            response["position"] = None
+
         response.update(
             {
                 "status": "ok",
                 "timestamp": utc_timestamp(),
-                "source": "step15",
+                "source": "step15_step16_2",
                 "execution_mode": "paper_only",
                 "paper_equity": paper_equity,
                 "risk_state": {
@@ -1733,6 +2261,7 @@ async def run_strategy_paper_trade(
                         risk_state.total_exposure
                     ),
                 },
+                "persistent_position_state": True,
                 "live_trading_enabled": False,
             }
         )
@@ -2333,6 +2862,12 @@ async def admin_status():
             "enabled": True,
             "execution_mode": "paper_only",
         },
+        "step16_2": {
+            "enabled": True,
+            "persistent_positions": True,
+            "management_execution": False,
+            "live_trading": False,
+        },
         "mt5_telemetry": {
             "enabled": True,
             "endpoint": "/api/mt5/telemetry",
@@ -2432,6 +2967,3 @@ if __name__ == "__main__":
         port=8000,
         reload=True,
     )
-
-
-
