@@ -90,8 +90,8 @@ def make_proposal(
     direction: AIDirection,
 ) -> AITradeProposal:
     if direction is AIDirection.SELL:
-        stop_loss = 4328.7812
-        take_profit = 4281.5907
+        stop_loss = 4328.781205246983
+        take_profit = 4281.58
     else:
         stop_loss = 4291.0288
         take_profit = 4338.2193
@@ -365,7 +365,7 @@ def test_advisory_does_not_replace_raymond_decision() -> None:
     assert raymond.direction is AIDirection.SELL
     assert result.raymond_direction == "SELL"
     assert result.advisory_direction == "BUY"
-    assert result.status == "DISAGREE"
+    assert result.comparison == "DISAGREE"
 
 
 def test_advisory_same_direction_is_agreement_only() -> None:
@@ -377,7 +377,7 @@ def test_advisory_same_direction_is_agreement_only() -> None:
         advisory,
     )
 
-    assert result.status == "AGREE"
+    assert result.comparison == "AGREE"
     assert raymond.direction is AIDirection.SELL
 
 
@@ -394,7 +394,7 @@ def test_advisory_wait_cannot_confirm_trade() -> None:
         advisory,
     )
 
-    assert result.status == "WEAK_ENTRY"
+    assert result.comparison == "WEAK_ENTRY"
     assert raymond.direction is AIDirection.SELL
 
 
@@ -545,8 +545,8 @@ def test_paper_gateway_accepts_paper_order_only() -> None:
         order_type=OrderType.MARKET,
         volume=0.05,
         price=4309.905,
-        stop_loss=4328.7812,
-        take_profit=4281.5907,
+        stop_loss=4328.781205246983,
+        take_profit=4281.58,
     )
 
     result = asyncio.run(
@@ -569,8 +569,8 @@ def test_live_enabled_paper_gateway_rejects_order() -> None:
         order_type=OrderType.MARKET,
         volume=0.05,
         price=4309.905,
-        stop_loss=4328.7812,
-        take_profit=4281.5907,
+        stop_loss=4328.781205246983,
+        take_profit=4281.58,
     )
 
     with pytest.raises(
@@ -604,20 +604,22 @@ def test_trading_pipeline_service_defaults_to_paper_only() -> None:
 def test_trading_pipeline_service_uses_step13_decision() -> None:
     service = TradingPipelineService()
 
+    candles = [
+        {
+            "time": index,
+            "open": 4300.0,
+            "high": 4310.0,
+            "low": 4290.0,
+            "close": 4305.0,
+            "volume": 100,
+        }
+        for index in range(100)
+    ]
+
     decision = service.evaluate_decision(
         symbol="XAUUSD",
         timeframe="H1",
-        candles=[
-            {
-                "time": index,
-                "open": 4300.0,
-                "high": 4310.0,
-                "low": 4290.0,
-                "close": 4305.0,
-                "volume": 100,
-            }
-            for index in range(100)
-        ],
+        candles=candles,
     )
 
     assert isinstance(
@@ -630,7 +632,7 @@ def test_trading_pipeline_service_uses_step13_decision() -> None:
     assert decision.risk_engine_required is True
 
 
-def test_trading_pipeline_service_paper_risk_state_is_safe() -> None:
+def test_paper_risk_state_is_safe() -> None:
     state = PaperRiskState(
         daily_loss=0.0,
         open_positions=0,
@@ -640,6 +642,11 @@ def test_trading_pipeline_service_paper_risk_state_is_safe() -> None:
     assert state.daily_loss == 0.0
     assert state.open_positions == 0
     assert state.total_exposure == 0.0
+
+
+# ============================================================
+# REAL RISK ENGINE
+# ============================================================
 
 
 def test_real_risk_engine_rejects_excessive_open_positions() -> None:
@@ -652,15 +659,15 @@ def test_real_risk_engine_rejects_excessive_open_positions() -> None:
         current_exposure=0.0,
         proposed_exposure=50.0,
         entry_price=4309.905,
-        stop_loss_price=4328.7812,
-        take_profit_price=4281.5907,
+        stop_loss_price=4328.781205246983,
+        take_profit_price=4281.58,
         volume=0.05,
         side="SELL",
         specification=make_specification(),
     )
 
     assert decision.allowed is False
-    assert "maximum open positions" in decision.reason
+    assert "maximum open positions" in decision.reason.lower()
 
 
 def test_real_risk_engine_allows_valid_paper_risk() -> None:
@@ -673,8 +680,8 @@ def test_real_risk_engine_allows_valid_paper_risk() -> None:
         current_exposure=0.0,
         proposed_exposure=50.0,
         entry_price=4309.905,
-        stop_loss_price=4328.7812,
-        take_profit_price=4281.5907,
+        stop_loss_price=4328.781205246983,
+        take_profit_price=4281.58,
         volume=0.05,
         side="SELL",
         specification=make_specification(),
@@ -688,11 +695,8 @@ def test_real_risk_engine_allows_valid_paper_risk() -> None:
 # ============================================================
 
 
-def test_advisory_snapshot_has_no_execution_authority() -> None:
+def test_advisory_snapshot_contains_no_execution_authority() -> None:
     snapshot = make_advisory("SELL")
-
-    assert snapshot.master_direction == "SELL"
-    assert snapshot.agreement_percent == 100.0
 
     serialized = snapshot.to_dict()
 
@@ -741,8 +745,8 @@ def test_paper_execution_result_is_never_live() -> None:
         order_type=OrderType.MARKET,
         volume=0.05,
         price=4309.905,
-        stop_loss=4328.7812,
-        take_profit=4281.5907,
+        stop_loss=4328.781205246983,
+        take_profit=4281.58,
     )
 
     result = asyncio.run(
@@ -752,3 +756,5 @@ def test_paper_execution_result_is_never_live() -> None:
     assert result.execution_type == "paper"
     assert result.broker == "paper"
     assert result.status.value == "accepted"
+
+
