@@ -435,7 +435,7 @@ def test_evaluate_symbol_processes_all_open_positions(db):
         position_id="MULTI-2",
         trade_id="PAPER-MULTI-2",
         entry_price=200.0,
-        stop_loss=190.0,
+        stop_loss=90.0,
         take_profit_1=220.0,
         take_profit_2=240.0,
     )
