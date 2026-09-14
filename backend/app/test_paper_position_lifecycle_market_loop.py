@@ -488,8 +488,6 @@ def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
     assert close_result["closed"] is True
     assert close_result["persisted"] is True
 
-    # The manager is still called by the wrapper, but the lifecycle
-    # engine has already closed the position in the database.
     assert fake_manager.calls == [
         ("XAUUSD", 110.0),
     ]
@@ -570,8 +568,6 @@ def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
 
 def test_loop_keeps_non_triggered_position_open(db):
     """
-    Real lifecycle engine:
-
     BUY
     entry = 100
     SL    = 90
@@ -717,13 +713,19 @@ def test_loop_safety_flags_remain_paper_only(db):
         110.0
     )
 
-    safety = result.to_dict()
+    payload = result.to_dict()
 
-    assert safety["execution_type"] == "paper"
+    # The production PaperPositionMarketLoopResult serializes
+    # safety flags inside the "safety" object.
+    safety = payload["safety"]
+
+    assert safety["paper_only"] is True
     assert safety["read_only"] is True
-    assert safety["broker_order_required"] is False
     assert safety["live_trading_enabled"] is False
+    assert safety["execution_authorized"] is False
     assert safety["broker_orders_allowed"] is False
+    assert safety["mt5_execution_allowed"] is False
+    assert safety["risk_engine_bypass"] is False
 
 
 # ============================================================
