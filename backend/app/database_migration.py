@@ -1,39 +1,34 @@
 """
 RAYMOND v2.8 - Database Migration Layer
 
-Provides explicit, idempotent database schema upgrades.
-
 Stage 16.2
------------
-Persistent Position State and restart recovery.
+Persistent Position State
 
 Stage 16.3
------------
-Persistent Trade Thesis.
+Persistent Trade Thesis
 
-Safety
-------
-- Existing data is preserved.
-- Existing columns are never overwritten.
-- Missing columns are added individually.
-- Migrations are idempotent.
-- Migration failures are not silently ignored.
-- Application startup fails closed when schema migration fails.
+This module performs small, idempotent schema upgrades for the
+existing SQLAlchemy database.
+
+IMPORTANT:
+- Never drops existing tables.
+- Never deletes existing rows.
+- Safe to run more than once.
+- Adds only missing columns/indexes.
+- Preserves the original Stage 16.2 migration contract.
 """
 
 from sqlalchemy import inspect, text
 
 try:
     from .database import engine
-    from .models import create_tables
 except ImportError:
     from database import engine
-    from models import create_tables
 
 
-# -------------------------------------------------------------------
+# ============================================================
 # POSITION COLUMNS
-# -------------------------------------------------------------------
+# ============================================================
 
 POSITION_COLUMNS = {
     # Stage 16.2
@@ -73,18 +68,18 @@ POSITION_COLUMNS = {
 }
 
 
-# -------------------------------------------------------------------
+# ============================================================
 # HELPERS
-# -------------------------------------------------------------------
+# ============================================================
 
-def get_table_columns(connection, table_name):
+def get_table_columns(connection, table_name: str) -> set[str]:
     """
-    Return the existing column names for a database table.
+    Return the existing column names for a table.
     """
 
     inspector = inspect(connection)
 
-    if not inspector.has_table(table_name):
+    if table_name not in inspector.get_table_names():
         return set()
 
     return {
@@ -95,16 +90,16 @@ def get_table_columns(connection, table_name):
 
 def add_missing_column(
     connection,
-    table_name,
-    column_name,
-    column_definition,
-):
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> bool:
     """
-    Add a column only when it does not already exist.
+    Add one column if it does not already exist.
 
     Returns:
-        True  - column was added
-        False - column already existed
+        True  -> column was added
+        False -> column already existed
     """
 
     existing_columns = get_table_columns(
@@ -115,245 +110,290 @@ def add_missing_column(
     if column_name in existing_columns:
         return False
 
+    sql = (
+        f"ALTER TABLE {table_name} "
+        f"ADD COLUMN {column_name} {column_definition}"
+    )
+
+    connection.execute(text(sql))
+
+    return True
+
+
+def create_trade_id_index(connection) -> bool:
+    """
+    Create the original Stage 16.2 unique trade_id index.
+
+    The exact index name is part of the existing Stage 16.2
+    contract and must not be changed.
+
+    Multiple NULL trade_id values remain allowed by SQLite and
+    PostgreSQL unique-index semantics.
+
+    Returns:
+        True  -> index was created
+        False -> index already existed
+    """
+
+    inspector = inspect(connection)
+
+    existing_indexes = inspector.get_indexes(
+        "positions"
+    )
+
+    for index in existing_indexes:
+        if index.get(
+            "name"
+        ) == "ix_positions_trade_id_unique":
+            return False
+
     connection.execute(
         text(
-            f"ALTER TABLE {table_name} "
-            f"ADD COLUMN {column_name} {column_definition}"
+            """
+            CREATE UNIQUE INDEX ix_positions_trade_id_unique
+            ON positions (trade_id)
+            """
         )
     )
 
     return True
 
 
-def create_trade_id_index(connection):
+# ============================================================
+# STAGE 16.2 MIGRATION
+# ============================================================
+
+def migrate_stage_16_2() -> dict:
     """
-    Create the trade_id index when trade_id exists.
+    Apply the Stage 16.2 persistent-position schema upgrade.
 
-    The operation is idempotent.
+    IMPORTANT:
+    This public function intentionally keeps the original
+    zero-argument signature.
+
+    The migration is idempotent.
+
+    Running it once:
+        adds missing columns and the unique trade_id index.
+
+    Running it again:
+        detects that they already exist and does nothing.
     """
-
-    existing_columns = get_table_columns(
-        connection,
-        "positions",
-    )
-
-    if "trade_id" not in existing_columns:
-        return False
-
-    connection.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS "
-            "ix_positions_trade_id "
-            "ON positions (trade_id)"
-        )
-    )
-
-    return True
-
-
-# -------------------------------------------------------------------
-# STAGE 16.2 INTERNAL IMPLEMENTATION
-# -------------------------------------------------------------------
-
-def _migrate_stage_16_2(connection):
-    """
-    Internal Stage 16.2 migration implementation.
-
-    Adds all persistent Position State columns required by
-    Stage 16.2.
-
-    The return format intentionally preserves the original
-    migration API expected by the existing test suite.
-    """
-
-    if not inspect(connection).has_table("positions"):
-        raise RuntimeError(
-            "Stage 16.2 migration failed: "
-            "'positions' table does not exist."
-        )
 
     added_columns = []
+    skipped_columns = []
+    created_indexes = []
+    skipped_indexes = []
 
-    for column_name, column_definition in POSITION_COLUMNS.items():
+    with engine.begin() as connection:
+        inspector = inspect(connection)
 
-        # Stage 16.3 is handled separately.
-        if column_name == "trade_thesis":
-            continue
+        table_names = inspector.get_table_names()
 
-        if add_missing_column(
-            connection,
-            "positions",
-            column_name,
-            column_definition,
-        ):
-            added_columns.append(column_name)
+        # ----------------------------------------------------
+        # POSITION TABLE MUST EXIST
+        # ----------------------------------------------------
 
-    create_trade_id_index(connection)
+        if "positions" not in table_names:
+            raise RuntimeError(
+                "Stage 16.2 migration cannot run because the "
+                "'positions' table does not exist. "
+                "Create the SQLAlchemy tables before running "
+                "the migration."
+            )
+
+        # ----------------------------------------------------
+        # ADD MISSING POSITION COLUMNS
+        # ----------------------------------------------------
+
+        for column_name, column_definition in POSITION_COLUMNS.items():
+
+            # Stage 16.3 is deliberately handled separately.
+            if column_name == "trade_thesis":
+                continue
+
+            added = add_missing_column(
+                connection=connection,
+                table_name="positions",
+                column_name=column_name,
+                column_definition=column_definition,
+            )
+
+            if added:
+                added_columns.append(column_name)
+            else:
+                skipped_columns.append(column_name)
+
+        # ----------------------------------------------------
+        # TRADE ID UNIQUE INDEX
+        # ----------------------------------------------------
+
+        try:
+            created = create_trade_id_index(
+                connection
+            )
+
+            if created:
+                created_indexes.append(
+                    "ix_positions_trade_id_unique"
+                )
+            else:
+                skipped_indexes.append(
+                    "ix_positions_trade_id_unique"
+                )
+
+        except Exception as exc:
+            raise RuntimeError(
+                "Stage 16.2 could not create the unique "
+                "trade_id index. Existing duplicate non-NULL "
+                "trade_id values may be present in the "
+                "positions table."
+            ) from exc
 
     return {
-        "stage": "16.2",
-        "table": "positions",
+        "migration": "stage_16_2",
         "status": "completed",
-        "success": True,
         "added_columns": added_columns,
+        "skipped_existing_columns": skipped_columns,
+        "created_indexes": created_indexes,
+        "skipped_existing_indexes": skipped_indexes,
     }
 
 
-# -------------------------------------------------------------------
-# STAGE 16.2 PUBLIC API
-# -------------------------------------------------------------------
+# ============================================================
+# STAGE 16.3 MIGRATION
+# ============================================================
 
-def migrate_stage_16_2(connection=None):
+def migrate_stage_16_3() -> dict:
     """
-    Public Stage 16.2 migration.
+    Apply the Stage 16.3 persistent trade-thesis schema upgrade.
 
-    Supports both:
+    This migration adds exactly one new column:
 
-        migrate_stage_16_2()
+        positions.trade_thesis
 
-    and:
-
-        migrate_stage_16_2(connection)
-
-    This preserves compatibility with the existing test suite.
+    The migration is idempotent.
     """
-
-    if connection is not None:
-        return _migrate_stage_16_2(
-            connection
-        )
-
-    create_tables()
-
-    with engine.begin() as migration_connection:
-        return _migrate_stage_16_2(
-            migration_connection
-        )
-
-
-# -------------------------------------------------------------------
-# STAGE 16.3 INTERNAL IMPLEMENTATION
-# -------------------------------------------------------------------
-
-def _migrate_stage_16_3(connection):
-    """
-    Internal Stage 16.3 migration implementation.
-
-    Adds persistent trade_thesis storage to the positions table.
-    """
-
-    if not inspect(connection).has_table("positions"):
-        raise RuntimeError(
-            "Stage 16.3 migration failed: "
-            "'positions' table does not exist."
-        )
 
     added_columns = []
+    skipped_columns = []
 
-    if add_missing_column(
-        connection,
-        "positions",
-        "trade_thesis",
-        POSITION_COLUMNS["trade_thesis"],
-    ):
-        added_columns.append("trade_thesis")
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+
+        table_names = inspector.get_table_names()
+
+        # ----------------------------------------------------
+        # POSITION TABLE MUST EXIST
+        # ----------------------------------------------------
+
+        if "positions" not in table_names:
+            raise RuntimeError(
+                "Stage 16.3 migration cannot run because the "
+                "'positions' table does not exist."
+            )
+
+        # ----------------------------------------------------
+        # ADD TRADE THESIS
+        # ----------------------------------------------------
+
+        added = add_missing_column(
+            connection=connection,
+            table_name="positions",
+            column_name="trade_thesis",
+            column_definition=POSITION_COLUMNS[
+                "trade_thesis"
+            ],
+        )
+
+        if added:
+            added_columns.append(
+                "trade_thesis"
+            )
+        else:
+            skipped_columns.append(
+                "trade_thesis"
+            )
 
     return {
-        "stage": "16.3",
-        "table": "positions",
+        "migration": "stage_16_3",
         "status": "completed",
-        "success": True,
         "added_columns": added_columns,
+        "skipped_existing_columns": skipped_columns,
     }
 
 
-# -------------------------------------------------------------------
-# STAGE 16.3 PUBLIC API
-# -------------------------------------------------------------------
+# ============================================================
+# STARTUP HELPER
+# ============================================================
 
-def migrate_stage_16_3(connection=None):
+def run_database_migrations() -> dict:
     """
-    Public Stage 16.3 migration.
+    Run all currently required database migrations.
 
-    Supports both:
-
-        migrate_stage_16_3()
-
-    and:
-
-        migrate_stage_16_3(connection)
-    """
-
-    if connection is not None:
-        return _migrate_stage_16_3(
-            connection
-        )
-
-    create_tables()
-
-    with engine.begin() as migration_connection:
-        return _migrate_stage_16_3(
-            migration_connection
-        )
-
-
-# -------------------------------------------------------------------
-# MAIN MIGRATION ENTRY POINT
-# -------------------------------------------------------------------
-
-def run_database_migrations():
-    """
-    Run all required database migrations in stage order.
-
-    Stage 16.2 is preserved exactly as the compatibility
-    foundation.
+    Stage 16.2 runs first and retains its original behavior.
 
     Stage 16.3 then adds the persistent trade thesis column.
 
-    Any migration failure raises an exception.
+    Each migration remains independently idempotent.
     """
 
-    create_tables()
+    stage_16_2_result = migrate_stage_16_2()
 
-    results = []
-
-    with engine.begin() as connection:
-
-        # -----------------------------------------------------------
-        # Stage 16.2
-        # -----------------------------------------------------------
-
-        stage_16_2_result = migrate_stage_16_2(
-            connection
-        )
-
-        results.append(
-            stage_16_2_result
-        )
-
-        # -----------------------------------------------------------
-        # Stage 16.3
-        # -----------------------------------------------------------
-
-        stage_16_3_result = migrate_stage_16_3(
-            connection
-        )
-
-        results.append(
-            stage_16_3_result
-        )
+    stage_16_3_result = migrate_stage_16_3()
 
     return {
         "status": "completed",
-        "success": True,
-        "migrations": results,
+        "migrations": [
+            stage_16_2_result,
+            stage_16_3_result,
+        ],
     }
 
 
-# -------------------------------------------------------------------
-# DIRECT EXECUTION
-# -------------------------------------------------------------------
+# ============================================================
+# COMMAND-LINE EXECUTION
+# ============================================================
 
 if __name__ == "__main__":
     result = run_database_migrations()
-    print(result)
+
+    print(
+        "RAYMOND v2.8 database migration completed."
+    )
+
+    print(
+        f"Status: {result['status']}"
+    )
+
+    for migration in result["migrations"]:
+        print(
+            f"Migration: {migration['migration']}"
+        )
+        print(
+            f"Status: {migration['status']}"
+        )
+
+        if migration.get(
+            "added_columns"
+        ):
+            print("Added columns:")
+
+            for column in migration[
+                "added_columns"
+            ]:
+                print(
+                    f"  + {column}"
+                )
+
+        if migration.get(
+            "created_indexes"
+        ):
+            print("Created indexes:")
+
+            for index_name in migration[
+                "created_indexes"
+            ]:
+                print(
+                    f"  + {index_name}"
+                )
