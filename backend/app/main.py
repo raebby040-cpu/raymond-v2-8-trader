@@ -1,33 +1,23 @@
 """
 RAYMOND v2.8 Backend - FastAPI Application
 
-Step 15:
-- Connect existing market data to the validated trading pipeline.
-- Technical indicators -> Step 13 AI -> Step 14 Risk
-  -> Paper Execution Gateway.
-- Paper trading only.
-- Live trading remains disabled.
-
-Paper-trade market-data fallback:
-- Render does not require the MetaTrader5 Python package
-  for the paper-trading endpoint.
-- XAUUSD paper trades use the existing broker-independent
-  BiQuote public reference feed.
-- Existing MT5 endpoints remain available when MT5 exists.
-
-Step 16.2:
-- Persist paper positions using PositionRepository.
-- Preserve original entry/quantity/SL separately from live
-  management state.
-- Link persistent positions to the paper execution order_id.
-- Position management remains paper-only.
-
-Step 16.3:
-- Persist Step 13 AI reasoning as Position.trade_thesis.
+Step 9A:
+- Broker-neutral MT5 connection
+- Real MT5 market tick data
+- Broker-specific symbol discovery
+- Real MT5 OHLC candles
+- MT5 account information
+- MT5 read-only position synchronization
+- Broker-aware symbol specifications
+- Risk-engine-ready market data
+- Paper trading only
+- Emergency-stop safety manager
+- Dashboard WebSocket streaming
 
 IMPORTANT:
-Real broker order execution is NOT implemented.
-Live trading remains disabled.
+Real order execution is NOT implemented.
+No endpoint places, modifies, or closes a real trade.
+Live trading remains disabled by default.
 """
 
 from datetime import datetime, timezone
@@ -39,7 +29,6 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import text as sqlalchemy_text
 
 
 # ============================================================
@@ -59,22 +48,6 @@ except ImportError:
         MT5Service,
         MT5ServiceError,
         mt5_service,
-    )
-
-
-# ============================================================
-# ONLINE PUBLIC MARKET DATA
-# ============================================================
-
-try:
-    from .online_market_api import (
-        _fetch_chart as fetch_online_chart,
-        router as online_market_router,
-    )
-except ImportError:
-    from online_market_api import (
-        _fetch_chart as fetch_online_chart,
-        router as online_market_router,
     )
 
 
@@ -106,148 +79,19 @@ except ImportError:
 
 try:
     from .dashboard_provider import build_dashboard_state
-    from .emergency_stop import (
-        EmergencyStopError,
-        EmergencyStopManager,
-    )
+    from .emergency_stop import EmergencyStopManager
     from .websocket_handler import DashboardWebSocketManager
 except ImportError:
     from dashboard_provider import build_dashboard_state
-    from emergency_stop import (
-        EmergencyStopError,
-        EmergencyStopManager,
-    )
+    from emergency_stop import EmergencyStopManager
     from websocket_handler import DashboardWebSocketManager
-
-
-# ============================================================
-# STEP 10A - DEMO TRADING API
-# ============================================================
-
-try:
-    from .demo_api import (
-        demo_engine,
-        router as demo_trading_router,
-    )
-except ImportError:
-    from demo_api import (
-        demo_engine,
-        router as demo_trading_router,
-    )
-
-
-# ============================================================
-# STEP 11B-3 - MT5 TELEMETRY
-# ============================================================
-
-try:
-    from .mt5_telemetry import (
-        router as mt5_telemetry_router,
-    )
-except ImportError:
-    from mt5_telemetry import (
-        router as mt5_telemetry_router,
-    )
-
-
-# ============================================================
-# STEP 11B-4 - MT5 AI DECISION BRIDGE
-# ============================================================
-
-try:
-    from .mt5_decision_bridge import (
-        router as mt5_decision_router,
-    )
-except ImportError:
-    from mt5_decision_bridge import (
-        router as mt5_decision_router,
-    )
-
-
-# ============================================================
-# DATABASE / TRADE JOURNAL / POSITIONS
-# ============================================================
-
-try:
-    from .database import SessionLocal
-    from .database_migration import run_database_migrations
-    from .demo_trading import DemoTrade
-    from .journal import TradeJournal
-    from .position_repository import PositionRepository
-except ImportError:
-    from database import SessionLocal
-    from database_migration import run_database_migrations
-    from demo_trading import DemoTrade
-    from journal import TradeJournal
-    from position_repository import PositionRepository
-
-
-# ============================================================
-# DATABASE TABLE INITIALIZATION
-# ============================================================
-
-try:
-    from .models import create_tables
-except ImportError:
-    from models import create_tables
-
-
-# ============================================================
-# TECHNICAL INDICATORS
-# ============================================================
-
-try:
-    from .technical_indicators import (
-        TechnicalIndicatorError,
-        calculate_indicators,
-        indicator_result_to_dict,
-    )
-except ImportError:
-    from technical_indicators import (
-        TechnicalIndicatorError,
-        calculate_indicators,
-        indicator_result_to_dict,
-    )
-
-
-# ============================================================
-# TRADING PIPELINE
-# ============================================================
-
-try:
-    from .backtest_engine import (
-        BacktestConfig,
-        BacktestEngine,
-        BacktestEngineError,
-    )
-    from .risk_engine import SymbolSpecification
-    from .trading_pipeline_service import (
-        PaperRiskState,
-        TradingPipelineService,
-        TradingPipelineServiceError,
-    )
-except ImportError:
-    from backtest_engine import (
-        BacktestConfig,
-        BacktestEngine,
-        BacktestEngineError,
-    )
-    from risk_engine import SymbolSpecification
-    from trading_pipeline_service import (
-        PaperRiskState,
-        TradingPipelineService,
-        TradingPipelineServiceError,
-    )
 
 
 # ============================================================
 # LOGGING
 # ============================================================
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper()
-)
-
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -262,8 +106,6 @@ safety_manager = EmergencyStopManager()
 dashboard_ws_manager = DashboardWebSocketManager(
     heartbeat_interval_seconds=5.0
 )
-
-trading_pipeline_service = TradingPipelineService()
 
 
 # ============================================================
@@ -281,89 +123,15 @@ app = FastAPI(
 
 
 # ============================================================
-# DATABASE STARTUP
-# ============================================================
-
-@app.on_event("startup")
-async def initialize_database():
-    """
-    Initialize the SQLAlchemy schema and run the idempotent
-    Stage 16.2 / 16.3 migrations.
-    """
-
-    try:
-        logger.info(
-            "Initializing RAYMOND database tables..."
-        )
-
-        create_tables()
-
-        logger.info(
-            "Running RAYMOND database migrations..."
-        )
-
-        migration_result = run_database_migrations()
-
-        logger.info(
-            "RAYMOND database migrations completed: %s",
-            migration_result,
-        )
-
-    except Exception:
-        logger.exception(
-            "RAYMOND database initialization/migration failed."
-        )
-        raise
-
-
-# ============================================================
-# ROUTERS
-# ============================================================
-
-app.include_router(
-    demo_trading_router,
-    prefix="/api/demo",
-    tags=["Demo Trading"],
-)
-
-app.include_router(
-    mt5_telemetry_router,
-)
-
-app.include_router(
-    mt5_decision_router,
-)
-
-app.include_router(
-    online_market_router,
-)
-
-
-# ============================================================
 # CORS
 # ============================================================
 
-def configured_cors_origins() -> list[str]:
-    configured = os.getenv(
-        "CORS_ORIGINS",
-        "",
-    ).strip()
-
-    if not configured:
-        return [
-            "http://localhost:3000",
-            "http://localhost:8080",
-            "http://localhost:5000",
-        ]
-
-    return [
-        origin.strip()
-        for origin in configured.split(",")
-        if origin.strip()
-    ]
-
-
-origins = configured_cors_origins()
+origins = [
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://localhost:5000",
+    "*",
+]
 
 app.add_middleware(
     CORSMiddleware,
@@ -383,18 +151,11 @@ def utc_timestamp() -> str:
 
 
 def live_trading_enabled() -> bool:
-    """
-    Hard safety gate.
-
-    Live trading must remain disabled for RAYMOND v2.8
-    during the current development stages.
-    """
-
     return (
         os.getenv(
             "LIVE_TRADING_ENABLED",
             "false",
-        ).strip().lower()
+        ).lower()
         == "true"
     )
 
@@ -455,6 +216,13 @@ def safe_terminal_response(
 def safe_position_response(
     position: dict,
 ) -> dict:
+    """
+    Convert a raw MT5 position into the stable
+    RAYMOND position format.
+
+    This endpoint is READ ONLY.
+    """
+
     position_type = position.get("type")
 
     if position_type == 0:
@@ -487,6 +255,13 @@ def safe_position_response(
 def safe_symbol_specification_response(
     specification: dict,
 ) -> dict:
+    """
+    Return broker-specific symbol information
+    required by the RAYMOND risk engine.
+
+    This is READ ONLY.
+    """
+
     allowed_fields = [
         "symbol",
         "digits",
@@ -532,1106 +307,6 @@ def mt5_error_response(
 
 
 # ============================================================
-# SAFE VALUE HELPERS
-# ============================================================
-
-def _safe_float(
-    value,
-    default=None,
-):
-    if value is None:
-        return default
-
-    try:
-        return float(value)
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return default
-
-
-def _safe_string(
-    value,
-    default=None,
-):
-    if value is None:
-        return default
-
-    text_value = str(value).strip()
-
-    if not text_value:
-        return default
-
-    return text_value
-
-
-def _enum_value(
-    value,
-):
-    if value is None:
-        return None
-
-    return getattr(
-        value,
-        "value",
-        value,
-    )
-
-
-def _get_decision_attribute(
-    decision,
-    name: str,
-):
-    if decision is None:
-        return None
-
-    return getattr(
-        decision,
-        name,
-        None,
-    )
-
-
-# ============================================================
-# PERSISTENT POSITION SERIALIZATION
-# ============================================================
-
-def serialize_persistent_position(
-    position,
-) -> dict:
-    if position is None:
-        return None
-
-    opened_at = getattr(
-        position,
-        "opened_at",
-        None,
-    )
-
-    closed_at = getattr(
-        position,
-        "closed_at",
-        None,
-    )
-
-    last_management_time = getattr(
-        position,
-        "last_management_time",
-        None,
-    )
-
-    return {
-        "id": getattr(
-            position,
-            "id",
-            None,
-        ),
-        "position_id": getattr(
-            position,
-            "position_id",
-            None,
-        ),
-        "trade_id": getattr(
-            position,
-            "trade_id",
-            None,
-        ),
-        "symbol": getattr(
-            position,
-            "symbol",
-            None,
-        ),
-        "direction": _enum_value(
-            getattr(
-                position,
-                "direction",
-                None,
-            )
-        ),
-
-        # ORIGINAL TRADE STATE
-        "entry_price": getattr(
-            position,
-            "entry_price",
-            None,
-        ),
-        "original_quantity": getattr(
-            position,
-            "original_quantity",
-            None,
-        ),
-        "initial_stop_loss": getattr(
-            position,
-            "initial_stop_loss",
-            None,
-        ),
-        "take_profit_1": getattr(
-            position,
-            "take_profit_1",
-            None,
-        ),
-        "take_profit_2": getattr(
-            position,
-            "take_profit_2",
-            None,
-        ),
-        "risk_1r": getattr(
-            position,
-            "risk_1r",
-            None,
-        ),
-
-        # CURRENT STATE
-        "current_price": getattr(
-            position,
-            "current_price",
-            None,
-        ),
-        "current_stop_loss": getattr(
-            position,
-            "current_stop_loss",
-            None,
-        ),
-        "remaining_quantity": getattr(
-            position,
-            "remaining_quantity",
-            None,
-        ),
-
-        # COMPATIBILITY
-        "quantity": getattr(
-            position,
-            "quantity",
-            None,
-        ),
-        "stop_loss": getattr(
-            position,
-            "stop_loss",
-            None,
-        ),
-        "take_profit": getattr(
-            position,
-            "take_profit",
-            None,
-        ),
-
-        # PNL
-        "pnl": getattr(
-            position,
-            "pnl",
-            None,
-        ),
-        "pnl_percent": getattr(
-            position,
-            "pnl_percent",
-            None,
-        ),
-
-        # STEP 13 THESIS
-        "regime": getattr(
-            position,
-            "regime",
-            None,
-        ),
-        "setup": getattr(
-            position,
-            "setup",
-            None,
-        ),
-        "technical_score": getattr(
-            position,
-            "technical_score",
-            None,
-        ),
-        "confluence": getattr(
-            position,
-            "confluence",
-            None,
-        ),
-        "confidence": getattr(
-            position,
-            "confidence",
-            None,
-        ),
-        "trade_thesis": getattr(
-            position,
-            "trade_thesis",
-            None,
-        ),
-
-        # MANAGEMENT
-        "break_even_applied": bool(
-            getattr(
-                position,
-                "break_even_applied",
-                0,
-            )
-        ),
-        "partial_close_applied": bool(
-            getattr(
-                position,
-                "partial_close_applied",
-                0,
-            )
-        ),
-        "trailing_active": bool(
-            getattr(
-                position,
-                "trailing_active",
-                0,
-            )
-        ),
-        "management_status": getattr(
-            position,
-            "management_status",
-            None,
-        ),
-        "last_management_action": getattr(
-            position,
-            "last_management_action",
-            None,
-        ),
-        "last_management_time": (
-            last_management_time.isoformat()
-            if isinstance(
-                last_management_time,
-                datetime,
-            )
-            else last_management_time
-        ),
-
-        # EXTREMES
-        "max_drawdown": getattr(
-            position,
-            "max_drawdown",
-            None,
-        ),
-        "max_profit": getattr(
-            position,
-            "max_profit",
-            None,
-        ),
-
-        # STATUS
-        "status": _enum_value(
-            getattr(
-                position,
-                "status",
-                None,
-            )
-        ),
-        "opened_at": (
-            opened_at.isoformat()
-            if isinstance(
-                opened_at,
-                datetime,
-            )
-            else opened_at
-        ),
-        "closed_at": (
-            closed_at.isoformat()
-            if isinstance(
-                closed_at,
-                datetime,
-            )
-            else closed_at
-        ),
-    }
-
-
-# ============================================================
-# PAPER RISK STATE
-# ============================================================
-
-def build_paper_risk_state() -> PaperRiskState:
-    """
-    Build current simulated paper risk state.
-
-    Real MT5 positions are deliberately excluded.
-    """
-
-    try:
-        daily_closed_pnl = float(
-            demo_engine.daily_closed_pnl()
-        )
-
-        open_trades = list(
-            demo_engine.open_trades
-        )
-
-        open_positions = len(
-            open_trades
-        )
-
-        daily_loss = max(
-            0.0,
-            -daily_closed_pnl,
-        )
-
-        total_exposure = 0.0
-
-        for trade in open_trades:
-            try:
-                entry_price = float(
-                    trade.entry_price
-                )
-                quantity = float(
-                    trade.quantity
-                )
-            except (
-                TypeError,
-                ValueError,
-            ) as exc:
-                raise TradingPipelineServiceError(
-                    "Invalid open paper trade values while "
-                    f"calculating exposure: {exc}"
-                ) from exc
-
-            if entry_price <= 0:
-                raise TradingPipelineServiceError(
-                    "Open paper trade has an invalid entry price."
-                )
-
-            if quantity <= 0:
-                raise TradingPipelineServiceError(
-                    "Open paper trade has an invalid quantity."
-                )
-
-            total_exposure += (
-                entry_price * quantity
-            )
-
-        return PaperRiskState(
-            daily_loss=daily_loss,
-            open_positions=open_positions,
-            total_exposure=total_exposure,
-        )
-
-    except TradingPipelineServiceError:
-        raise
-
-    except Exception as exc:
-        raise TradingPipelineServiceError(
-            f"Unable to build paper risk state: {exc}"
-        ) from exc
-
-
-def get_paper_equity() -> float:
-    """
-    Return current simulated paper equity.
-    """
-
-    try:
-        performance = demo_engine.performance()
-
-        equity = (
-            float(
-                demo_engine.initial_balance
-            )
-            + float(
-                performance.total_pnl
-            )
-        )
-
-    except Exception as exc:
-        raise TradingPipelineServiceError(
-            f"Unable to determine paper equity: {exc}"
-        ) from exc
-
-    if equity <= 0:
-        raise TradingPipelineServiceError(
-            "Paper equity is not greater than zero."
-        )
-
-    return equity
-
-
-# ============================================================
-# MT5 SYMBOL SPECIFICATION
-# ============================================================
-
-def build_symbol_specification(
-    specification: dict,
-) -> SymbolSpecification:
-
-    required_fields = [
-        "symbol",
-        "digits",
-        "point",
-        "tick_size",
-        "tick_value",
-        "tick_value_profit",
-        "tick_value_loss",
-        "contract_size",
-        "volume_min",
-        "volume_max",
-        "volume_step",
-        "volume_limit",
-        "trade_mode",
-        "trade_execution_mode",
-        "trade_stops_level",
-        "trade_freeze_level",
-        "currency_base",
-        "currency_profit",
-        "currency_margin",
-        "spread",
-        "spread_float",
-    ]
-
-    missing = [
-        field
-        for field in required_fields
-        if field not in specification
-    ]
-
-    if missing:
-        raise TradingPipelineServiceError(
-            "MT5 symbol specification is missing required "
-            f"fields: {', '.join(missing)}"
-        )
-
-    try:
-        result = SymbolSpecification(
-            symbol=str(
-                specification["symbol"]
-            ),
-            digits=int(
-                specification["digits"]
-            ),
-            point=float(
-                specification["point"]
-            ),
-            tick_size=float(
-                specification["tick_size"]
-            ),
-            tick_value=float(
-                specification["tick_value"]
-            ),
-            tick_value_profit=float(
-                specification[
-                    "tick_value_profit"
-                ]
-            ),
-            tick_value_loss=float(
-                specification[
-                    "tick_value_loss"
-                ]
-            ),
-            contract_size=float(
-                specification["contract_size"]
-            ),
-            volume_min=float(
-                specification["volume_min"]
-            ),
-            volume_max=float(
-                specification["volume_max"]
-            ),
-            volume_step=float(
-                specification["volume_step"]
-            ),
-            volume_limit=float(
-                specification["volume_limit"]
-            ),
-            trade_mode=int(
-                specification["trade_mode"]
-            ),
-            trade_execution_mode=int(
-                specification[
-                    "trade_execution_mode"
-                ]
-            ),
-            trade_stops_level=int(
-                specification[
-                    "trade_stops_level"
-                ]
-            ),
-            trade_freeze_level=int(
-                specification[
-                    "trade_freeze_level"
-                ]
-            ),
-            currency_base=str(
-                specification["currency_base"]
-            ),
-            currency_profit=str(
-                specification["currency_profit"]
-            ),
-            currency_margin=str(
-                specification["currency_margin"]
-            ),
-            spread=int(
-                specification["spread"]
-            ),
-            spread_float=bool(
-                specification["spread_float"]
-            ),
-        )
-
-    except (
-        TypeError,
-        ValueError,
-        KeyError,
-    ) as exc:
-        raise TradingPipelineServiceError(
-            "Invalid MT5 symbol specification: "
-            f"{exc}"
-        ) from exc
-
-    try:
-        result.validate()
-
-    except Exception as exc:
-        raise TradingPipelineServiceError(
-            "MT5 symbol specification failed validation: "
-            f"{exc}"
-        ) from exc
-
-    return result
-
-
-# ============================================================
-# PERSIST STEP 15 / 16.2 / 16.3
-# ============================================================
-
-def persist_step15_paper_execution(
-    result,
-) -> Optional[dict]:
-    """
-    Persist one successfully accepted paper execution.
-
-    Stage 16.2:
-    - Persist TradeJournal row.
-    - Persist Position row.
-    - Link both using the paper execution order_id.
-
-    Stage 16.3:
-    - Persist Step 13 AI reasoning as trade_thesis.
-
-    IMPORTANT:
-    ExecutionResult uses enums for status/side in some fields.
-    Always normalize enum values through _enum_value() before
-    comparing them with plain strings.
-    """
-
-    execution = getattr(
-        result,
-        "execution_result",
-        None,
-    )
-
-    if execution is None:
-        logger.info(
-            "Paper execution persistence skipped: "
-            "execution_result is None."
-        )
-        return None
-
-    execution_type = _safe_string(
-        getattr(
-            execution,
-            "execution_type",
-            None,
-        )
-    )
-
-    if execution_type is None:
-        raise TradingPipelineServiceError(
-            "Paper execution did not provide an execution type."
-        )
-
-    execution_type = execution_type.lower()
-
-    if execution_type != "paper":
-        raise TradingPipelineServiceError(
-            "Step 16.2 persistence rejected a non-paper execution."
-        )
-
-    # --------------------------------------------------------
-    # CRITICAL FIX:
-    #
-    # ExecutionResult.status is ExecutionStatus.ACCEPTED,
-    # an Enum whose .value is "accepted".
-    #
-    # str(ExecutionStatus.ACCEPTED) becomes something similar
-    # to "ExecutionStatus.ACCEPTED", which caused the previous
-    # persistence function to return None.
-    #
-    # _enum_value() correctly extracts "accepted".
-    # --------------------------------------------------------
-
-    status_value = _enum_value(
-        getattr(
-            execution,
-            "status",
-            None,
-        )
-    )
-
-    status = _safe_string(
-        status_value
-    )
-
-    if status is None:
-        raise TradingPipelineServiceError(
-            "Paper execution did not provide an execution status."
-        )
-
-    status = status.lower()
-
-    if status not in {
-        "accepted",
-        "filled",
-    }:
-        logger.info(
-            "Paper execution persistence skipped: "
-            "execution status=%s",
-            status,
-        )
-        return None
-
-    decision = getattr(
-        result,
-        "decision",
-        None,
-    )
-
-    proposal = getattr(
-        decision,
-        "proposal",
-        None,
-    )
-
-    if proposal is None:
-        raise TradingPipelineServiceError(
-            "Paper execution cannot be persisted without "
-            "a trade proposal."
-        )
-
-    order_id = _safe_string(
-        getattr(
-            execution,
-            "order_id",
-            None,
-        )
-    )
-
-    if not order_id:
-        raise TradingPipelineServiceError(
-            "Paper execution did not provide an order ID."
-        )
-
-    # --------------------------------------------------------
-    # SIDE IS ALSO NORMALIZED THROUGH _enum_value().
-    # --------------------------------------------------------
-
-    side_value = _enum_value(
-        getattr(
-            execution,
-            "side",
-            None,
-        )
-    )
-
-    direction = _safe_string(
-        side_value
-    )
-
-    if direction is None:
-        raise TradingPipelineServiceError(
-            "Paper execution did not provide a trade direction."
-        )
-
-    direction = direction.lower()
-
-    if direction not in {
-        "buy",
-        "sell",
-    }:
-        raise TradingPipelineServiceError(
-            "Paper execution returned an invalid trade direction."
-        )
-
-    entry_price = _safe_float(
-        getattr(
-            execution,
-            "price",
-            None,
-        )
-    )
-
-    quantity = _safe_float(
-        getattr(
-            execution,
-            "volume",
-            None,
-        )
-    )
-
-    if entry_price is None or entry_price <= 0:
-        raise TradingPipelineServiceError(
-            "Paper execution returned an invalid entry price."
-        )
-
-    if quantity is None or quantity <= 0:
-        raise TradingPipelineServiceError(
-            "Paper execution returned an invalid volume."
-        )
-
-    symbol = _safe_string(
-        getattr(
-            execution,
-            "symbol",
-            None,
-        )
-    )
-
-    if symbol is None:
-        symbol = _safe_string(
-            getattr(
-                proposal,
-                "symbol",
-                None,
-            )
-        )
-
-    if not symbol:
-        symbol = "XAUUSD"
-
-    symbol = symbol.upper()
-
-    execution_stop_loss = getattr(
-        execution,
-        "stop_loss",
-        None,
-    )
-
-    proposal_stop_loss = getattr(
-        proposal,
-        "stop_loss",
-        None,
-    )
-
-    stop_loss = _safe_float(
-        execution_stop_loss
-        if execution_stop_loss is not None
-        else proposal_stop_loss
-    )
-
-    execution_take_profit = getattr(
-        execution,
-        "take_profit",
-        None,
-    )
-
-    proposal_take_profit = getattr(
-        proposal,
-        "take_profit",
-        None,
-    )
-
-    take_profit = _safe_float(
-        execution_take_profit
-        if execution_take_profit is not None
-        else proposal_take_profit
-    )
-
-    if stop_loss is None:
-        raise TradingPipelineServiceError(
-            "Paper execution cannot create a persistent "
-            "position without an initial stop loss."
-        )
-
-    timestamp_value = getattr(
-        execution,
-        "timestamp",
-        None,
-    )
-
-    opened_at = datetime.now(
-        timezone.utc
-    )
-
-    if timestamp_value:
-        try:
-            if isinstance(
-                timestamp_value,
-                datetime,
-            ):
-                opened_at = timestamp_value
-            else:
-                opened_at = datetime.fromisoformat(
-                    str(
-                        timestamp_value
-                    ).replace(
-                        "Z",
-                        "+00:00",
-                    )
-                )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-            logger.warning(
-                "Unable to parse paper execution timestamp; "
-                "using current UTC time."
-            )
-
-    # --------------------------------------------------------
-    # STEP 13 THESIS DATA
-    # --------------------------------------------------------
-
-    regime = _safe_string(
-        _get_decision_attribute(
-            decision,
-            "market_regime",
-        )
-    )
-
-    setup = _safe_string(
-        _get_decision_attribute(
-            decision,
-            "setup",
-        )
-    )
-
-    technical_score = _safe_float(
-        _get_decision_attribute(
-            decision,
-            "technical_score",
-        )
-    )
-
-    confluence = _safe_float(
-        _get_decision_attribute(
-            decision,
-            "confluence_score",
-        )
-    )
-
-    confidence = _safe_float(
-        _get_decision_attribute(
-            decision,
-            "confidence",
-        )
-    )
-
-    trade_thesis = _safe_string(
-        _get_decision_attribute(
-            decision,
-            "reasoning",
-        )
-    )
-
-    # --------------------------------------------------------
-    # BUILD DEMO TRADE
-    # --------------------------------------------------------
-
-    trade = DemoTrade(
-        trade_id=order_id,
-        symbol=symbol,
-        direction=direction,
-        entry_price=entry_price,
-        quantity=quantity,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        execution_type="paper",
-        opened_at=opened_at,
-    )
-
-    position_id = (
-        f"POSITION-{order_id}"
-    )
-
-    risk_1r = abs(
-        entry_price - stop_loss
-    )
-
-    if risk_1r <= 0:
-        raise TradingPipelineServiceError(
-            "Persistent position requires a positive 1R "
-            "distance."
-        )
-
-    db = SessionLocal()
-
-    try:
-        # ----------------------------------------------------
-        # IDEMPOTENCY CHECK
-        # ----------------------------------------------------
-
-        existing_position = (
-            PositionRepository.get_by_trade_id(
-                db,
-                order_id,
-            )
-        )
-
-        if existing_position is not None:
-            logger.info(
-                "Persistent position already exists: "
-                "position_id=%s trade_id=%s",
-                existing_position.position_id,
-                order_id,
-            )
-
-            existing_trade = (
-                db.query(
-                    TradeJournal.__annotations__.get(
-                        "Trade",
-                    )
-                )
-                if False
-                else None
-            )
-
-            # The journal serializer remains authoritative for
-            # the Trade row. We deliberately do not manufacture
-            # a second trade.
-            journal = TradeJournal(db)
-
-            rows, _ = journal.list_trades(
-                limit=1,
-                offset=0,
-                execution_type="paper",
-            )
-
-            persisted_trade = None
-
-            for row in rows:
-                if getattr(
-                    row,
-                    "trade_id",
-                    None,
-                ) == order_id:
-                    persisted_trade = (
-                        TradeJournal.serialize_trade(
-                            row
-                        )
-                    )
-                    break
-
-            if persisted_trade is None:
-                # The position exists but the journal lookup did
-                # not find its matching row. Return the position
-                # safely without creating a duplicate trade.
-                persisted_trade = {
-                    "trade_id": order_id,
-                    "status": "open",
-                    "execution_type": "paper",
-                }
-
-            return {
-                "trade": persisted_trade,
-                "position": (
-                    serialize_persistent_position(
-                        existing_position
-                    )
-                ),
-            }
-
-        # ----------------------------------------------------
-        # JOURNAL
-        # ----------------------------------------------------
-
-        logger.info(
-            "Persisting paper trade journal row: "
-            "trade_id=%s symbol=%s direction=%s",
-            order_id,
-            symbol,
-            direction,
-        )
-
-        journal = TradeJournal(db)
-
-        row = journal.save_demo_trade(
-            trade
-        )
-
-        logger.info(
-            "Paper trade journal persisted: "
-            "trade_id=%s",
-            order_id,
-        )
-
-        # ----------------------------------------------------
-        # POSITION
-        # ----------------------------------------------------
-
-        logger.info(
-            "Persisting paper position: "
-            "position_id=%s trade_id=%s",
-            position_id,
-            order_id,
-        )
-
-        position = PositionRepository.create(
-            db,
-            position_id=position_id,
-            trade_id=order_id,
-            symbol=symbol,
-            direction=direction,
-            entry_price=entry_price,
-            original_quantity=quantity,
-            initial_stop_loss=stop_loss,
-            take_profit_1=take_profit,
-            take_profit_2=None,
-            risk_1r=risk_1r,
-            regime=regime,
-            setup=setup,
-            technical_score=technical_score,
-            confluence=confluence,
-            confidence=confidence,
-            trade_thesis=trade_thesis,
-            current_price=entry_price,
-            management_status="open",
-        )
-
-        logger.info(
-            "Persistent paper position created: "
-            "position_id=%s trade_id=%s symbol=%s direction=%s "
-            "trade_thesis_present=%s",
-            position_id,
-            order_id,
-            symbol,
-            direction,
-            bool(trade_thesis),
-        )
-
-        return {
-            "trade": TradeJournal.serialize_trade(
-                row
-            ),
-            "position": serialize_persistent_position(
-                position
-            ),
-        }
-
-    except TradingPipelineServiceError:
-        db.rollback()
-        raise
-
-    except Exception as exc:
-        db.rollback()
-
-        logger.exception(
-            "Paper trade persistence failed: "
-            "trade_id=%s position_id=%s",
-            order_id,
-            position_id,
-        )
-
-        raise TradingPipelineServiceError(
-            "Unable to persist paper trade and "
-            f"position: {exc}"
-        ) from exc
-
-    finally:
-        db.close()
-
-
-# ============================================================
 # REQUEST MODELS
 # ============================================================
 
@@ -1662,33 +337,6 @@ class MT5ConnectRequest(BaseModel):
     portable: bool = False
 
 
-class StrategyPaperTradeRequest(BaseModel):
-    """
-    Complete paper-trading request.
-
-    Position size is calculated by the Risk Engine.
-    Client cannot directly choose volume.
-    """
-
-    symbol: str = Field(
-        default="XAUUSD",
-        min_length=1,
-        max_length=64,
-    )
-
-    timeframe: str = Field(
-        default="H1",
-        min_length=2,
-        max_length=4,
-    )
-
-    limit: int = Field(
-        default=200,
-        ge=50,
-        le=5000,
-    )
-
-
 # ============================================================
 # HEALTH
 # ============================================================
@@ -1700,13 +348,6 @@ async def health_check():
         "timestamp": utc_timestamp(),
         "version": "2.8.0",
         "live_trading_enabled": live_trading_enabled(),
-        "step15_pipeline": True,
-        "step16_2_persistent_positions": True,
-        "step16_3_persistent_trade_thesis": True,
-        "execution_mode": "paper_only",
-        "online_paper_feed": True,
-        "mt5_telemetry": True,
-        "mt5_ai_decision_bridge": True,
     }
 
 
@@ -1724,61 +365,7 @@ async def root():
         ),
         "version": "2.8.0",
         "broker_support": "MT5-compatible brokers",
-
-        "live_trading_enabled": (
-            live_trading_enabled()
-        ),
-
-        "execution_mode": "paper_only",
-
-        "step15_pipeline": {
-            "enabled": True,
-            "path": (
-                "market candles -> indicators -> "
-                "Step 13 AI -> Step 14 Risk -> "
-                "PaperExecutionGateway"
-            ),
-        },
-
-        "paper_market_data": {
-            "enabled": True,
-            "source": (
-                "BiQuote public MT5 reference feed"
-            ),
-            "mt5_required": False,
-            "live_trading": False,
-        },
-
-        "step16_2": {
-            "enabled": True,
-            "persistent_positions": True,
-            "management_execution": (
-                "not implemented"
-            ),
-            "live_trading": False,
-        },
-
-        "step16_3": {
-            "enabled": True,
-            "persistent_trade_thesis": True,
-            "source": "Step 13 AI reasoning",
-            "position_field": "trade_thesis",
-            "live_trading": False,
-        },
-
-        "mt5_telemetry": {
-            "enabled": True,
-            "endpoint": "/api/mt5/telemetry",
-            "mode": "READ_ONLY",
-        },
-
-        "mt5_ai_decision_bridge": {
-            "enabled": True,
-            "endpoint": "/api/mt5/decision",
-            "mode": "READ_ONLY",
-            "execution_authorized": False,
-        },
-
+        "live_trading_enabled": live_trading_enabled(),
         "endpoints": {
             "health": "/health",
             "mt5_connect": "/api/mt5/connect",
@@ -1786,8 +373,6 @@ async def root():
             "mt5_status": "/api/mt5/status",
             "mt5_account": "/api/mt5/account",
             "mt5_terminal": "/api/mt5/terminal",
-            "mt5_telemetry": "/api/mt5/telemetry",
-            "mt5_decision": "/api/mt5/decision",
             "market_price": "/api/market/price",
             "market_candles": "/api/market/candlesticks",
             "market_symbols": "/api/market/symbols",
@@ -1795,19 +380,8 @@ async def root():
             "market_symbol_specification": (
                 "/api/market/symbol-specification"
             ),
-            "market_indicators": (
-                "/api/market/indicators"
-            ),
             "trading": "/api/trading",
-            "demo_trading": "/api/demo",
-            "online": "/api/online",
             "strategy": "/api/strategy",
-            "strategy_decision": (
-                "/api/strategy/decision"
-            ),
-            "strategy_paper_trade": (
-                "/api/strategy/paper-trade"
-            ),
             "admin": "/api/admin",
             "websocket": "/ws/dashboard",
             "docs": "/docs",
@@ -1844,13 +418,8 @@ async def connect_mt5(
                 "MT5 initialization returned false."
             )
 
-        account = (
-            await new_service.get_account_info()
-        )
-
-        terminal = (
-            await new_service.get_terminal_info()
-        )
+        account = await new_service.get_account_info()
+        terminal = await new_service.get_terminal_info()
 
         mt5_service = new_service
 
@@ -1863,21 +432,11 @@ async def connect_mt5(
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "broker": account.get(
-                "company"
-            ),
-            "server": account.get(
-                "server"
-            ),
-            "account": safe_account_response(
-                account
-            ),
-            "terminal": safe_terminal_response(
-                terminal
-            ),
-            "live_trading_enabled": (
-                live_trading_enabled()
-            ),
+            "broker": account.get("company"),
+            "server": account.get("server"),
+            "account": safe_account_response(account),
+            "terminal": safe_terminal_response(terminal),
+            "live_trading_enabled": live_trading_enabled(),
         }
 
     except MT5ServiceError as exc:
@@ -1885,10 +444,7 @@ async def connect_mt5(
             "MT5 connection failed: %s",
             exc,
         )
-
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 @app.post("/api/mt5/disconnect")
@@ -1908,27 +464,20 @@ async def disconnect_mt5():
             "MT5 disconnect failed: %s",
             exc,
         )
-
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/mt5/status")
 async def get_mt5_status():
     try:
-        status = (
-            await mt5_service.heartbeat()
-        )
+        status = await mt5_service.heartbeat()
 
         if status.get("connected"):
             safety_manager.record_heartbeat()
         else:
             safety_manager.mark_connection_lost()
 
-        safety_status = (
-            safety_manager.status()
-        )
+        safety_status = safety_manager.status()
 
         return {
             "status": (
@@ -1959,9 +508,7 @@ async def get_mt5_status():
             "last_error": status.get(
                 "last_error"
             ),
-            "live_trading_enabled": (
-                live_trading_enabled()
-            ),
+            "live_trading_enabled": live_trading_enabled(),
             "safety": {
                 "trading_allowed": (
                     safety_status.trading_allowed
@@ -1978,56 +525,41 @@ async def get_mt5_status():
 
     except MT5ServiceError as exc:
         safety_manager.mark_connection_lost()
-
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/mt5/account")
 async def get_mt5_account():
     try:
-        account = (
-            await mt5_service.get_account_info()
-        )
+        account = await mt5_service.get_account_info()
 
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "account": safe_account_response(
-                account
-            ),
+            "account": safe_account_response(account),
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/mt5/terminal")
 async def get_mt5_terminal():
     try:
-        terminal = (
-            await mt5_service.get_terminal_info()
-        )
+        terminal = await mt5_service.get_terminal_info()
 
         return {
             "status": "connected",
             "timestamp": utc_timestamp(),
-            "terminal": safe_terminal_response(
-                terminal
-            ),
+            "terminal": safe_terminal_response(terminal),
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 # ============================================================
-# MARKET DATA - MT5 READ ONLY
+# REAL MARKET DATA
 # ============================================================
 
 @app.get("/api/market/price")
@@ -2038,12 +570,14 @@ async def get_current_price(
         max_length=64,
     ),
 ):
+    """
+    Return the real current MT5 tick.
+
+    No trade is placed.
+    """
+
     try:
-        tick = (
-            await mt5_service.get_symbol_tick(
-                symbol
-            )
-        )
+        tick = await mt5_service.get_symbol_tick(symbol)
 
         return {
             "status": "ok",
@@ -2053,13 +587,9 @@ async def get_current_price(
             "last": tick["last"],
             "spread": tick["spread"],
             "volume": tick["volume"],
-            "volume_real": tick[
-                "volume_real"
-            ],
+            "volume_real": tick["volume_real"],
             "time": tick["time"],
-            "time_msc": tick[
-                "time_msc"
-            ],
+            "time_msc": tick["time_msc"],
             "timestamp": utc_timestamp(),
             "source": "mt5",
         }
@@ -2068,9 +598,7 @@ async def get_current_price(
         MT5ServiceError,
         ValueError,
     ) as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/market/candlesticks")
@@ -2091,13 +619,17 @@ async def get_candlesticks(
         le=5000,
     ),
 ):
+    """
+    Return real OHLC candles from MT5.
+
+    MT5 supplies bar data in UTC.
+    """
+
     try:
-        candles = (
-            await mt5_service.get_candles(
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=limit,
-            )
+        candles = await mt5_service.get_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
         )
 
         return {
@@ -2114,9 +646,7 @@ async def get_candlesticks(
         MT5ServiceError,
         ValueError,
     ) as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/market/symbols")
@@ -2126,11 +656,14 @@ async def get_market_symbols(
         max_length=32,
     ),
 ):
+    """
+    Discover instruments available from the
+    connected MT5 broker.
+    """
+
     try:
-        symbols = (
-            await mt5_service.get_symbols(
-                query=query
-            )
+        symbols = await mt5_service.get_symbols(
+            query=query
         )
 
         return {
@@ -2143,17 +676,18 @@ async def get_market_symbols(
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 @app.get("/api/market/gold-symbols")
 async def get_gold_symbols():
+    """
+    Find XAUUSD/gold symbols regardless of
+    broker suffix.
+    """
+
     try:
-        symbols = (
-            await mt5_service.find_gold_symbols()
-        )
+        symbols = await mt5_service.find_gold_symbols()
 
         return {
             "status": "ok",
@@ -2164,13 +698,11 @@ async def get_gold_symbols():
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 # ============================================================
-# SYMBOL SPECIFICATION - MT5 READ ONLY
+# STEP 4B - SYMBOL SPECIFICATION
 # ============================================================
 
 @app.get("/api/market/symbol-specification")
@@ -2181,6 +713,12 @@ async def get_symbol_specification(
         max_length=64,
     ),
 ):
+    """
+    Return broker-specific MT5 symbol properties.
+
+    READ ONLY.
+    """
+
     try:
         specification = (
             await mt5_service.get_symbol_specification(
@@ -2208,117 +746,156 @@ async def get_symbol_specification(
         MT5ServiceError,
         ValueError,
     ) as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 # ============================================================
-# INDICATORS - MT5
+# INDICATORS
 # ============================================================
 
 @app.get("/api/market/indicators")
 async def get_indicators(
-    symbol: str = Query(
-        default="XAUUSD",
-        min_length=1,
-        max_length=64,
-    ),
-    timeframe: str = Query(
-        default="H1",
-        min_length=2,
-        max_length=4,
-    ),
-    limit: int = Query(
-        default=200,
-        ge=50,
-        le=5000,
-    ),
+    symbol: str = "XAUUSD",
 ):
-    try:
-        candles = (
-            await mt5_service.get_candles(
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=limit,
-            )
-        )
-
-        result = calculate_indicators(
-            symbol=symbol,
-            timeframe=timeframe,
-            candles=candles,
-        )
-
-        response = (
-            indicator_result_to_dict(
-                result
-            )
-        )
-
-        response["timestamp"] = (
-            utc_timestamp()
-        )
-
-        response["source"] = "mt5"
-
-        return response
-
-    except MT5ServiceError as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
-
-    except (
-        TechnicalIndicatorError,
-        ValueError,
-    ) as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": (
-                    "Technical indicator calculation failed"
-                ),
-                "message": str(exc),
-                "timestamp": utc_timestamp(),
-            },
-        ) from exc
+    return {
+        "status": "not_implemented",
+        "symbol": symbol,
+        "message": (
+            "Real indicators will be calculated "
+            "from MT5 candles in the next market-data "
+            "stage."
+        ),
+        "timestamp": utc_timestamp(),
+        "source": "none",
+    }
 
 
 # ============================================================
-# LEGACY DIRECT ORDER ENDPOINT
+# STEP 5 - PAPER TRADE EXECUTION GATEWAY
 # ============================================================
 
 @app.post("/api/trading/place-order")
 async def place_order(
     order_data: dict,
 ):
-    logger.warning(
-        "Rejected legacy direct order request."
+    """
+    STEP 5 - PAPER EXECUTION GATEWAY.
+
+    No real broker order is placed.
+    """
+
+    logger.info(
+        "Trade execution request received "
+        "through Step 5 execution gateway."
     )
 
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "error": "Direct order endpoint disabled",
-            "message": (
-                "Direct client-supplied orders are disabled. "
-                "Use /api/strategy/paper-trade so the AI "
-                "decision and Risk Engine can validate and "
-                "calculate the paper position size."
+    try:
+        symbol = str(
+            order_data.get(
+                "symbol",
+                "",
+            )
+        ).strip()
+
+        side_value = str(
+            order_data.get(
+                "side",
+                order_data.get(
+                    "direction",
+                    "",
+                ),
+            )
+        ).strip().lower()
+
+        if side_value == "long":
+            side_value = "buy"
+
+        elif side_value == "short":
+            side_value = "sell"
+
+        order_type_value = str(
+            order_data.get(
+                "order_type",
+                "market",
+            )
+        ).strip().lower()
+
+        volume_value = order_data.get(
+            "volume",
+            order_data.get(
+                "quantity",
+                0.1,
             ),
-            "canonical_endpoint": (
-                "/api/strategy/paper-trade"
+        )
+
+        price_value = order_data.get("price")
+        stop_loss_value = order_data.get("stop_loss")
+        take_profit_value = order_data.get("take_profit")
+        client_order_id = order_data.get("client_order_id")
+
+        order = OrderRequest(
+            symbol=symbol,
+            side=OrderSide(side_value),
+            order_type=OrderType(order_type_value),
+            volume=float(volume_value),
+            price=(
+                float(price_value)
+                if price_value is not None
+                else None
             ),
-            "execution_mode": "paper_only",
-            "live_trading_enabled": False,
-            "risk_engine_required": True,
-        },
-    )
+            stop_loss=(
+                float(stop_loss_value)
+                if stop_loss_value is not None
+                else None
+            ),
+            take_profit=(
+                float(take_profit_value)
+                if take_profit_value is not None
+                else None
+            ),
+            client_order_id=client_order_id,
+        )
+
+        # SAFETY GATE:
+        # Emergency stop, connection loss, stale heartbeat,
+        # or any other unsafe state blocks execution.
+        safety_manager.require_trade_permission()
+
+        result = await execution_gateway.execute(order)
+
+        return {
+            "order_id": result.order_id,
+            "client_order_id": result.client_order_id,
+            "status": result.status.value,
+            "execution_type": result.execution_type,
+            "broker": result.broker,
+            "symbol": result.symbol,
+            "side": result.side,
+            "order_type": result.order_type,
+            "volume": result.volume,
+            "quantity": result.volume,
+            "price": result.price,
+            "stop_loss": result.stop_loss,
+            "take_profit": result.take_profit,
+            "timestamp": result.timestamp,
+            "message": result.message,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid order request: {exc}",
+        ) from exc
+
+    except ExecutionGatewayError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
 
 
 # ============================================================
-# MT5 POSITIONS - READ ONLY
+# STEP 3 - READ-ONLY MT5 POSITIONS
 # ============================================================
 
 @app.get("/api/trading/positions")
@@ -2329,17 +906,19 @@ async def get_positions(
         max_length=64,
     ),
 ):
+    """
+    Read real open MT5 positions.
+
+    READ ONLY.
+    """
+
     try:
-        positions = (
-            await mt5_service.get_positions(
-                symbol=symbol
-            )
+        positions = await mt5_service.get_positions(
+            symbol=symbol
         )
 
         normalized_positions = [
-            safe_position_response(
-                position
-            )
+            safe_position_response(position)
             for position in positions
         ]
 
@@ -2347,9 +926,7 @@ async def get_positions(
             "status": "ok",
             "symbol": symbol,
             "positions": normalized_positions,
-            "total_positions": len(
-                normalized_positions
-            ),
+            "total_positions": len(normalized_positions),
             "source": "mt5_read_only",
             "timestamp": utc_timestamp(),
             "live_trading_enabled": (
@@ -2358,15 +935,17 @@ async def get_positions(
         }
 
     except MT5ServiceError as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
+        raise mt5_error_response(exc) from exc
 
 
 @app.post("/api/trading/close-position")
 async def close_position(
     position_id: str,
 ):
+    """
+    Real position closing is intentionally disabled.
+    """
+
     return {
         "position_id": position_id,
         "status": "disabled",
@@ -2379,769 +958,43 @@ async def close_position(
 
 
 # ============================================================
-# STRATEGY DECISION
+# STRATEGY / AI
 # ============================================================
 
 @app.get("/api/strategy/decision")
 async def get_strategy_decision(
-    symbol: str = Query(
-        default="XAUUSD",
-        min_length=1,
-        max_length=64,
-    ),
-    timeframe: str = Query(
-        default="H1",
-        min_length=2,
-        max_length=4,
-    ),
-    limit: int = Query(
-        default=200,
-        ge=50,
-        le=5000,
-    ),
+    symbol: str = "XAUUSD",
 ):
-    try:
-        candles = (
-            await mt5_service.get_candles(
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=limit,
-            )
-        )
+    return {
+        "symbol": symbol,
+        "timestamp": utc_timestamp(),
+        "decision": "hold",
+        "confidence": 0.0,
+        "reason": (
+            "AI execution layer is waiting for "
+            "validated real market-data pipeline."
+        ),
+        "source": "placeholder",
+    }
 
-        decision = (
-            trading_pipeline_service.evaluate_decision(
-                symbol=symbol,
-                timeframe=timeframe,
-                candles=candles,
-            )
-        )
-
-        response = (
-            trading_pipeline_service.serialize_decision(
-                decision
-            )
-        )
-
-        response.update(
-            {
-                "timestamp": utc_timestamp(),
-                "source": "step15_step13_ai",
-                "execution": "none",
-                "read_only": True,
-                "live_trading_enabled": (
-                    live_trading_enabled()
-                ),
-            }
-        )
-
-        return response
-
-    except MT5ServiceError as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
-
-    except TradingPipelineServiceError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": (
-                    "Strategy decision pipeline failed"
-                ),
-                "message": str(exc),
-                "timestamp": utc_timestamp(),
-            },
-        ) from exc
-
-
-# ============================================================
-# COMPLETE PAPER TRADE PIPELINE
-# ============================================================
-
-@app.post("/api/strategy/paper-trade")
-async def run_strategy_paper_trade(
-    request: StrategyPaperTradeRequest,
-):
-    """
-    Run the complete paper-trading pipeline without requiring
-    MetaTrader5 on the Render server.
-
-    Data path:
-
-        BiQuote
-          ->
-        technical indicators
-          ->
-        Step 13 AI
-          ->
-        Step 14 Risk
-          ->
-        PaperExecutionGateway
-          ->
-        TradeJournal
-          ->
-        Stage 16.2 Position
-          ->
-        Stage 16.3 trade_thesis
-
-    Live broker execution is impossible through this endpoint.
-    """
-
-    # --------------------------------------------------------
-    # HARD LIVE SAFETY LOCK
-    # --------------------------------------------------------
-
-    if live_trading_enabled():
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": (
-                    "Paper endpoint refuses to run while "
-                    "LIVE_TRADING_ENABLED=true."
-                ),
-                "timestamp": utc_timestamp(),
-            },
-        )
-
-    # --------------------------------------------------------
-    # NORMALIZE SYMBOL
-    # --------------------------------------------------------
-
-    symbol = (
-        request.symbol
-        .strip()
-        .upper()
-    )
-
-    if symbol in {
-        "XAU/USD",
-        "GOLD",
-    }:
-        symbol = "XAUUSD"
-
-    if symbol != "XAUUSD":
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (
-                    "Paper trading currently "
-                    "supports XAUUSD only."
-                ),
-                "symbol": symbol,
-                "timestamp": utc_timestamp(),
-            },
-        )
-
-    # --------------------------------------------------------
-    # FETCH PUBLIC MARKET DATA
-    # --------------------------------------------------------
-
-    try:
-        online_data = (
-            await fetch_online_chart(
-                symbol="XAUUSD",
-                timeframe=request.timeframe,
-                limit=request.limit,
-            )
-        )
-
-        candles = (
-            online_data.get(
-                "candles"
-            )
-            or []
-        )
-
-        if len(candles) < 60:
-            raise TradingPipelineServiceError(
-                "Online paper feed returned insufficient "
-                f"candles: {len(candles)}."
-            )
-
-        # ----------------------------------------------------
-        # PAPER-ONLY XAUUSD SPECIFICATION
-        #
-        # This specification is used only for simulation.
-        # It is not presented as the user's broker contract.
-        # ----------------------------------------------------
-
-        specification = SymbolSpecification(
-            symbol="XAUUSD",
-            digits=2,
-            point=0.01,
-
-            tick_size=0.01,
-            tick_value=1.0,
-            tick_value_profit=1.0,
-            tick_value_loss=1.0,
-
-            contract_size=100.0,
-
-            volume_min=0.01,
-            volume_max=100.0,
-            volume_step=0.01,
-            volume_limit=100.0,
-
-            trade_mode=4,
-            trade_execution_mode=0,
-            trade_stops_level=0,
-            trade_freeze_level=0,
-
-            currency_base="XAU",
-            currency_profit="USD",
-            currency_margin="USD",
-
-            spread=0,
-            spread_float=True,
-        )
-
-        specification.validate()
-
-        # ----------------------------------------------------
-        # CURRENT PAPER RISK STATE
-        # ----------------------------------------------------
-
-        risk_state = (
-            build_paper_risk_state()
-        )
-
-        paper_equity = (
-            get_paper_equity()
-        )
-
-        # ----------------------------------------------------
-        # STEP 13 -> STEP 14 -> PAPER EXECUTION
-        # ----------------------------------------------------
-
-        result = (
-            await trading_pipeline_service.execute_paper(
-                symbol="XAUUSD",
-                timeframe=request.timeframe,
-                candles=candles,
-                specification=specification,
-                account_equity=paper_equity,
-                risk_state=risk_state,
-            )
-        )
-
-        # ----------------------------------------------------
-        # SERIALIZE PIPELINE RESULT
-        # ----------------------------------------------------
-
-        response = (
-            trading_pipeline_service.serialize_step14_result(
-                result
-            )
-        )
-
-        # ----------------------------------------------------
-        # STAGE 16.2 + 16.3 PERSISTENCE
-        # ----------------------------------------------------
-
-        persisted_trade = (
-            persist_step15_paper_execution(
-                result
-            )
-        )
-
-        if persisted_trade is not None:
-            response["journal"] = {
-                "persisted": True,
-                "trade": persisted_trade[
-                    "trade"
-                ],
-            }
-
-            response["position"] = (
-                persisted_trade[
-                    "position"
-                ]
-            )
-
-        else:
-            response["journal"] = {
-                "persisted": False,
-                "trade": None,
-            }
-
-            response["position"] = None
-
-        # ----------------------------------------------------
-        # FINAL RESPONSE
-        # ----------------------------------------------------
-
-        response.update(
-            {
-                "status": "ok",
-
-                "timestamp": utc_timestamp(),
-
-                "source": (
-                    "step15_step16_3_online_public_feed"
-                ),
-
-                "execution_mode": "paper_only",
-
-                "paper_equity": paper_equity,
-
-                "market_data": {
-                    "source": online_data.get(
-                        "source",
-                        "BiQuote public MT5 reference feed",
-                    ),
-                    "source_type": online_data.get(
-                        "source_type",
-                        "public_reference_feed",
-                    ),
-                    "candles_used": len(
-                        candles
-                    ),
-                    "price": online_data.get(
-                        "price"
-                    ),
-                },
-
-                "risk_state": {
-                    "daily_loss": (
-                        risk_state.daily_loss
-                    ),
-                    "open_positions": (
-                        risk_state.open_positions
-                    ),
-                    "total_exposure": (
-                        risk_state.total_exposure
-                    ),
-                },
-
-                "persistent_position_state": True,
-
-                "persistent_trade_thesis": True,
-
-                "trade_thesis_source": (
-                    "Step 13 AI reasoning"
-                ),
-
-                # HARD SAFETY
-                "live_trading_enabled": False,
-                "execution_authorized": False,
-                "broker_order_allowed": False,
-            }
-        )
-
-        return response
-
-    except HTTPException:
-        raise
-
-    except TradingPipelineServiceError as exc:
-        logger.error(
-            "Paper trading pipeline failed safely: %s",
-            exc,
-        )
-
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": (
-                    "Paper trading pipeline failed safely"
-                ),
-                "message": str(exc),
-                "timestamp": utc_timestamp(),
-            },
-        ) from exc
-
-    except Exception as exc:
-        logger.exception(
-            "Unexpected paper trading failure."
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": (
-                    "Unexpected paper trading failure"
-                ),
-                "message": str(exc),
-                "timestamp": utc_timestamp(),
-            },
-        ) from exc
-
-
-# ============================================================
-# BACKTEST
-# ============================================================
 
 @app.post("/api/strategy/backtest")
 async def run_backtest(
     backtest_config: dict,
 ):
-    if not isinstance(
-        backtest_config,
-        dict,
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "Invalid backtest configuration",
-                "message": (
-                    "backtest_config must be a JSON object."
-                ),
-                "timestamp": utc_timestamp(),
-            },
-        )
-
-    symbol = str(
-        backtest_config.get(
-            "symbol",
-            "XAUUSD",
-        )
-    ).strip()
-
-    timeframe = str(
-        backtest_config.get(
-            "timeframe",
-            "H1",
-        )
-    ).strip().upper()
-
-    if not symbol:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "Invalid backtest configuration",
-                "message": "symbol is required.",
-                "timestamp": utc_timestamp(),
-            },
-        )
-
-    try:
-        starting_balance = float(
-            backtest_config.get(
-                "starting_balance",
-                10_000.0,
-            )
-        )
-
-        warmup_candles = int(
-            backtest_config.get(
-                "warmup_candles",
-                50,
-            )
-        )
-
-        max_open_positions = int(
-            backtest_config.get(
-                "max_open_positions",
-                1,
-            )
-        )
-
-        execute_on_next_open = bool(
-            backtest_config.get(
-                "execute_on_next_open",
-                True,
-            )
-        )
-
-        close_open_position_at_end = bool(
-            backtest_config.get(
-                "close_open_position_at_end",
-                True,
-            )
-        )
-
-        spread = float(
-            backtest_config.get(
-                "spread",
-                0.0,
-            )
-        )
-
-        slippage = float(
-            backtest_config.get(
-                "slippage",
-                0.0,
-            )
-        )
-
-        commission_per_unit = float(
-            backtest_config.get(
-                "commission_per_unit",
-                0.0,
-            )
-        )
-
-        candle_limit = int(
-            backtest_config.get(
-                "candle_limit",
-                max(
-                    500,
-                    warmup_candles + 1,
-                ),
-            )
-        )
-
-        if candle_limit < (
-            warmup_candles + 1
-        ):
-            candle_limit = (
-                warmup_candles + 1
-            )
-
-        candles = (
-            await mt5_service.get_candles(
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=candle_limit,
-            )
-        )
-
-        if len(candles) < (
-            warmup_candles + 1
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": (
-                        "Insufficient historical data"
-                    ),
-                    "message": (
-                        f"Backtest requires at least "
-                        f"{warmup_candles + 1} candles, "
-                        f"but MT5 returned "
-                        f"{len(candles)}."
-                    ),
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "candles_received": len(
-                        candles
-                    ),
-                    "timestamp": utc_timestamp(),
-                },
-            )
-
-        raw_specification = (
-            await mt5_service.get_symbol_specification(
-                symbol
-            )
-        )
-
-        specification = (
-            build_symbol_specification(
-                raw_specification
-            )
-        )
-
-        config = BacktestConfig(
-            symbol=symbol,
-            timeframe=timeframe,
-            starting_balance=(
-                starting_balance
-            ),
-            warmup_candles=(
-                warmup_candles
-            ),
-            max_open_positions=(
-                max_open_positions
-            ),
-            execute_on_next_open=(
-                execute_on_next_open
-            ),
-            close_open_position_at_end=(
-                close_open_position_at_end
-            ),
-            spread=spread,
-            slippage=slippage,
-            commission_per_unit=(
-                commission_per_unit
-            ),
-        )
-
-        engine = BacktestEngine(
-            config=config,
-            pipeline_service=(
-                trading_pipeline_service
-            ),
-        )
-
-        result = engine.run(
-            candles=candles,
-            specification=specification,
-        )
-
-        return {
-            "status": "ok",
-
-            "backtest_id": str(
-                getattr(
-                    result,
-                    "backtest_id",
-                    (
-                        "BT-"
-                        + datetime.now(
-                            timezone.utc
-                        ).strftime(
-                            "%Y%m%d%H%M%S%f"
-                        )
-                    ),
-                )
-            ),
-
-            "execution_mode": (
-                "simulation_only"
-            ),
-
-            "live_trading_enabled": False,
-
-            "source": "mt5_historical_data",
-
-            "config": {
-                "symbol": config.symbol,
-                "timeframe": config.timeframe,
-                "starting_balance": (
-                    config.starting_balance
-                ),
-                "warmup_candles": (
-                    config.warmup_candles
-                ),
-                "max_open_positions": (
-                    config.max_open_positions
-                ),
-                "execute_on_next_open": (
-                    config.execute_on_next_open
-                ),
-                "close_open_position_at_end": (
-                    config.close_open_position_at_end
-                ),
-                "spread": config.spread,
-                "slippage": config.slippage,
-                "commission_per_unit": (
-                    config.commission_per_unit
-                ),
-                "candle_limit": candle_limit,
-                "candles_used": len(
-                    candles
-                ),
-            },
-
-            "symbol_specification": (
-                safe_symbol_specification_response(
-                    raw_specification
-                )
-            ),
-
-            "result": {
-                "status": result.status,
-                "symbol": result.symbol,
-                "timeframe": result.timeframe,
-                "start_time": result.start_time,
-                "end_time": result.end_time,
-                "starting_balance": (
-                    result.starting_balance
-                ),
-                "ending_balance": (
-                    result.ending_balance
-                ),
-                "net_profit": (
-                    result.net_profit
-                ),
-                "net_profit_percent": (
-                    result.net_profit_percent
-                ),
-                "total_trades": (
-                    result.total_trades
-                ),
-                "winning_trades": (
-                    result.winning_trades
-                ),
-                "losing_trades": (
-                    result.losing_trades
-                ),
-                "breakeven_trades": (
-                    result.breakeven_trades
-                ),
-                "win_rate_percent": (
-                    result.win_rate_percent
-                ),
-                "gross_profit": (
-                    result.gross_profit
-                ),
-                "gross_loss": (
-                    result.gross_loss
-                ),
-                "profit_factor": (
-                    result.profit_factor
-                ),
-                "total_execution_cost": (
-                    result.total_execution_cost
-                ),
-                "max_drawdown": (
-                    result.max_drawdown
-                ),
-                "max_drawdown_percent": (
-                    result.max_drawdown_percent
-                ),
-                "average_trade": (
-                    result.average_trade
-                ),
-                "average_win": (
-                    result.average_win
-                ),
-                "average_loss": (
-                    result.average_loss
-                ),
-                "bars_processed": (
-                    result.bars_processed
-                ),
-                "warmup_candles": (
-                    result.warmup_candles
-                ),
-                "trades": result.trades,
-                "equity_curve": (
-                    result.equity_curve
-                ),
-            },
-
-            "timestamp": utc_timestamp(),
-        }
-
-    except MT5ServiceError as exc:
-        raise mt5_error_response(
-            exc
-        ) from exc
-
-    except BacktestEngineError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "Backtest failed safely",
-                "message": str(exc),
-                "timestamp": utc_timestamp(),
-            },
-        ) from exc
-
-    except (
-        TradingPipelineServiceError,
-        ValueError,
-        TypeError,
-        KeyError,
-    ) as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": (
-                    "Backtest configuration or "
-                    "pipeline failed"
-                ),
-                "message": str(exc),
-                "timestamp": utc_timestamp(),
-            },
-        ) from exc
+    return {
+        "backtest_id": "BT-PENDING",
+        "status": "not_implemented",
+        "message": (
+            "Backtesting will use validated "
+            "historical market data."
+        ),
+        "timestamp": utc_timestamp(),
+    }
 
 
 # ============================================================
-# TRADE JOURNAL
+# JOURNAL
 # ============================================================
 
 @app.get("/api/journal/trades")
@@ -3156,73 +1009,45 @@ async def get_trade_journal(
         ge=0,
     ),
 ):
-    db = SessionLocal()
-
-    try:
-        journal = TradeJournal(db)
-
-        rows, total = journal.list_trades(
-            limit=limit,
-            offset=offset,
-            execution_type="paper",
-        )
-
-        return {
-            "trades": [
-                TradeJournal.serialize_trade(
-                    row
-                )
-                for row in rows
-            ],
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "timestamp": utc_timestamp(),
-        }
-
-    except Exception as exc:
-        db.rollback()
-
-        logger.error(
-            "Trade journal read failed: %s",
-            exc,
-        )
-
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "Trade journal unavailable",
-                "message": str(exc),
-                "timestamp": utc_timestamp(),
-            },
-        ) from exc
-
-    finally:
-        db.close()
+    return {
+        "trades": [],
+        "total": 0,
+        "limit": limit,
+        "offset": offset,
+        "timestamp": utc_timestamp(),
+    }
 
 
 # ============================================================
-# DASHBOARD WEBSOCKET
+# STEP 9A - DASHBOARD WEBSOCKET
 # ============================================================
 
 @app.websocket("/ws/dashboard")
 async def dashboard_websocket(
     websocket: WebSocket,
 ):
-    await dashboard_ws_manager.connect(
-        websocket
-    )
+    """
+    Read-only dashboard WebSocket.
+
+    The dashboard receives:
+    - market data
+    - account data
+    - positions
+    - safety status
+    - heartbeat messages
+
+    This endpoint NEVER places or modifies trades.
+    """
+
+    await dashboard_ws_manager.connect(websocket)
 
     try:
-
         async def provider():
             return await build_dashboard_state(
                 mt5_service=mt5_service,
                 safety_manager=safety_manager,
                 symbol="XAUUSD",
-                live_trading_enabled=(
-                    live_trading_enabled()
-                ),
+                live_trading_enabled=live_trading_enabled(),
             )
 
         await dashboard_ws_manager.stream(
@@ -3237,9 +1062,7 @@ async def dashboard_websocket(
         )
 
     finally:
-        dashboard_ws_manager.disconnect(
-            websocket
-        )
+        dashboard_ws_manager.disconnect(websocket)
 
 
 # ============================================================
@@ -3248,9 +1071,16 @@ async def dashboard_websocket(
 
 @app.post("/api/admin/emergency-stop")
 async def emergency_stop():
-    status = (
-        safety_manager.activate_emergency_stop()
-    )
+    """
+    Activate the RAYMOND emergency stop.
+
+    This blocks trading permission through the
+    safety manager.
+
+    It does NOT close existing broker positions.
+    """
+
+    status = safety_manager.activate_emergency_stop()
 
     logger.critical(
         "EMERGENCY STOP ACTIVATED"
@@ -3259,9 +1089,7 @@ async def emergency_stop():
     return {
         "status": "emergency_stop_active",
         "timestamp": utc_timestamp(),
-        "trading_allowed": (
-            status.trading_allowed
-        ),
+        "trading_allowed": status.trading_allowed,
         "emergency_stop_active": (
             status.emergency_stop_active
         ),
@@ -3271,24 +1099,26 @@ async def emergency_stop():
         "reason": status.reason,
         "all_positions_closed": False,
         "new_orders_blocked": True,
-        "live_trading_enabled": (
-            live_trading_enabled()
-        ),
+        "live_trading_enabled": live_trading_enabled(),
     }
 
 
 @app.post("/api/admin/emergency-stop/reset")
 async def reset_emergency_stop():
-    status = (
-        safety_manager.reset_emergency_stop()
-    )
+    """
+    Reset the emergency stop.
+
+    The safety manager still requires a healthy,
+    non-stale MT5 connection before trading can
+    become permitted.
+    """
+
+    status = safety_manager.reset_emergency_stop()
 
     return {
         "status": "emergency_stop_reset",
         "timestamp": utc_timestamp(),
-        "trading_allowed": (
-            status.trading_allowed
-        ),
+        "trading_allowed": status.trading_allowed,
         "emergency_stop_active": (
             status.emergency_stop_active
         ),
@@ -3302,9 +1132,7 @@ async def reset_emergency_stop():
 @app.get("/api/admin/status")
 async def admin_status():
     try:
-        mt5_status = (
-            await mt5_service.heartbeat()
-        )
+        mt5_status = await mt5_service.heartbeat()
 
         if mt5_status.get("connected"):
             safety_manager.record_heartbeat()
@@ -3319,101 +1147,28 @@ async def admin_status():
 
         safety_manager.mark_connection_lost()
 
-    db_connected = False
-
-    db = SessionLocal()
-
-    try:
-        db.execute(
-            sqlalchemy_text("SELECT 1")
-        )
-
-        db_connected = True
-
-    except Exception as exc:
-        logger.error(
-            "Database connectivity check failed: %s",
-            exc,
-        )
-
-    finally:
-        db.close()
-
-    safety_status = (
-        safety_manager.status()
-    )
+    safety_status = safety_manager.status()
 
     return {
         "status": "operational",
-
-        "live_trading_enabled": (
-            live_trading_enabled()
-        ),
-
+        "live_trading_enabled": live_trading_enabled(),
         "environment": os.getenv(
             "RAYMOND_ENV",
             "development",
         ),
-
-        "db_connected": db_connected,
-
+        "db_connected": True,
         "market_feed_healthy": (
             mt5_status.get(
                 "connected",
                 False,
             )
         ),
-
         "mt5_connected": (
             mt5_status.get(
                 "connected",
                 False,
             )
         ),
-
-        "online_paper_feed": {
-            "enabled": True,
-            "source": (
-                "BiQuote public MT5 reference feed"
-            ),
-            "mt5_required": False,
-            "live_trading": False,
-        },
-
-        "step15_pipeline": {
-            "enabled": True,
-            "execution_mode": "paper_only",
-        },
-
-        "step16_2": {
-            "enabled": True,
-            "persistent_positions": True,
-            "management_execution": False,
-            "live_trading": False,
-        },
-
-        "step16_3": {
-            "enabled": True,
-            "persistent_trade_thesis": True,
-            "source": (
-                "Step 13 AI reasoning"
-            ),
-            "live_trading": False,
-        },
-
-        "mt5_telemetry": {
-            "enabled": True,
-            "endpoint": "/api/mt5/telemetry",
-            "mode": "READ_ONLY",
-        },
-
-        "mt5_ai_decision_bridge": {
-            "enabled": True,
-            "endpoint": "/api/mt5/decision",
-            "mode": "READ_ONLY",
-            "execution_authorized": False,
-        },
-
         "safety": {
             "trading_allowed": (
                 safety_status.trading_allowed
@@ -3426,11 +1181,9 @@ async def admin_status():
             ),
             "reason": safety_status.reason,
         },
-
         "dashboard_websocket_connections": (
             dashboard_ws_manager.connection_count
         ),
-
         "timestamp": utc_timestamp(),
     }
 
@@ -3448,25 +1201,6 @@ async def http_exception_handler(
         status_code=exc.status_code,
         content={
             "detail": exc.detail,
-            "timestamp": utc_timestamp(),
-        },
-    )
-
-
-@app.exception_handler(EmergencyStopError)
-async def emergency_stop_exception_handler(
-    request,
-    exc,
-):
-    logger.warning(
-        "Trading blocked by safety gate: %s",
-        exc,
-    )
-
-    return JSONResponse(
-        status_code=400,
-        content={
-            "detail": str(exc),
             "timestamp": utc_timestamp(),
         },
     )
