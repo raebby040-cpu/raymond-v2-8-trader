@@ -21,6 +21,7 @@ from app.advisory_brains import (
     AdvisorySnapshot,
     BrainVote,
 )
+
 from app.advisory_comparison import (
     AGREE,
     DISAGREE,
@@ -53,7 +54,11 @@ def make_advisory(
             name=f"Test Brain {index}",
             direction=direction,
             confidence=confidence,
-            score=70.0 if direction == "BUY" else -70.0,
+            score=(
+                70.0
+                if direction == "BUY"
+                else -70.0
+            ),
             summary="Test advisory vote.",
         )
         for index in range(1, 9)
@@ -63,7 +68,11 @@ def make_advisory(
         brains=brains,
         master_direction=direction,
         master_confidence=confidence,
-        master_score=70.0 if direction == "BUY" else -70.0,
+        master_score=(
+            70.0
+            if direction == "BUY"
+            else -70.0
+        ),
         buy_votes=buy_votes,
         sell_votes=sell_votes,
         wait_votes=wait_votes,
@@ -205,11 +214,13 @@ def test_sell_signal_with_advisory_wait_is_weak_entry():
         advisory,
     )
 
+    assert result.raymond_direction == "SELL"
+    assert result.advisory_direction == "WAIT"
     assert result.comparison == WEAK_ENTRY
     assert result.entry_quality == "WEAK"
 
 
-def test_r Raymond_wait_does_not_become_trade_confirmation():
+def test_raymond_wait_does_not_become_trade_confirmation():
     decision = FakeDecision(direction="WAIT")
 
     advisory = make_advisory(
@@ -249,6 +260,8 @@ def test_same_direction_but_weak_consensus_is_weak_entry():
         advisory,
     )
 
+    assert result.raymond_direction == "BUY"
+    assert result.advisory_direction == "BUY"
     assert result.comparison == WEAK_ENTRY
     assert result.entry_quality == "WEAK"
 
@@ -307,7 +320,7 @@ def test_comparison_contains_no_execution_fields():
     assert "position_id" not in data
 
 
-def test_comparison_does_not_modify_r Raymond_decision():
+def test_comparison_does_not_modify_raymond_decision():
     decision = FakeDecision(direction="SELL")
 
     advisory = make_advisory(
