@@ -158,11 +158,8 @@ class _PositionsPageState extends State<PositionsPage> {
 
     final local = parsed.toLocal();
 
-    final hh =
-        local.hour.toString().padLeft(2, '0');
-
-    final mm =
-        local.minute.toString().padLeft(2, '0');
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
 
     return '${local.year}-'
         '${local.month.toString().padLeft(2, '0')}-'
@@ -196,34 +193,24 @@ class _PositionsPageState extends State<PositionsPage> {
                   ),
                 ),
                 IconButton(
-                  onPressed:
-                      loading ? null : _loadPositions,
+                  onPressed: loading ? null : _loadPositions,
                   icon: const Icon(Icons.refresh),
                   tooltip: 'Refresh positions',
                 ),
               ],
             ),
-
             const Text(
               'Authoritative RAYMOND persistent trade state',
               style: TextStyle(
                 color: muted,
               ),
             ),
-
             const SizedBox(height: 16),
-
             _modeCard(),
-
             const SizedBox(height: 14),
-
             _summaryCard(),
-
             const SizedBox(height: 14),
-
-            if (error.isNotEmpty)
-              _errorCard(),
-
+            if (error.isNotEmpty) _errorCard(),
             if (loading)
               const Padding(
                 padding: EdgeInsets.only(top: 60),
@@ -255,13 +242,10 @@ class _PositionsPageState extends State<PositionsPage> {
             Icons.shield_outlined,
             color: gold,
           ),
-
           SizedBox(width: 12),
-
           Expanded(
             child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   'PAPER MODE • READ ONLY',
@@ -270,9 +254,7 @@ class _PositionsPageState extends State<PositionsPage> {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-
                 SizedBox(height: 4),
-
                 Text(
                   'These are RAYMOND paper positions. '
                   'No MT5 or broker orders are used here.',
@@ -302,12 +284,10 @@ class _PositionsPageState extends State<PositionsPage> {
       pnl += value;
 
       if (value > 0) positive++;
-
       if (value < 0) negative++;
     }
 
-    final pnlColor =
-        pnl >= 0 ? green : red;
+    final pnlColor = pnl >= 0 ? green : red;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -325,7 +305,6 @@ class _PositionsPageState extends State<PositionsPage> {
               blue,
             ),
           ),
-
           Expanded(
             child: _summaryValue(
               'P/L',
@@ -333,7 +312,6 @@ class _PositionsPageState extends State<PositionsPage> {
               pnlColor,
             ),
           ),
-
           Expanded(
             child: _summaryValue(
               'WINNING',
@@ -341,7 +319,6 @@ class _PositionsPageState extends State<PositionsPage> {
               green,
             ),
           ),
-
           Expanded(
             child: _summaryValue(
               'LOSING',
@@ -360,8 +337,7 @@ class _PositionsPageState extends State<PositionsPage> {
     Color color,
   ) {
     return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
@@ -371,9 +347,7 @@ class _PositionsPageState extends State<PositionsPage> {
             fontWeight: FontWeight.bold,
           ),
         ),
-
         const SizedBox(height: 5),
-
         Text(
           value,
           style: TextStyle(
@@ -398,36 +372,41 @@ class _PositionsPageState extends State<PositionsPage> {
 
     final isBuy = direction == 'BUY';
 
-    final directionColor =
-        isBuy ? green : red;
+    final directionColor = isBuy ? green : red;
 
-    final symbol =
-        _text(position['symbol'], 'XAUUSD');
+    final symbol = _text(
+      position['symbol'],
+      'XAUUSD',
+    );
 
-    final status =
-        _text(position['status'], 'open')
-            .toUpperCase();
+    final status = _text(
+      position['status'],
+      'open',
+    ).toUpperCase();
 
-    final pnl =
-        _number(position['pnl']);
+    final pnl = _number(position['pnl']);
 
-    final pnlColor =
-        pnl >= 0 ? green : red;
+    final pnlColor = pnl >= 0 ? green : red;
 
-    final breakEven =
-        _bool(position['break_even_applied']);
+    final breakEven = _bool(
+      position['break_even_applied'],
+    );
 
-    final partial =
-        _bool(position['partial_close_applied']);
+    final partial = _bool(
+      position['partial_close_applied'],
+    );
 
-    final trailing =
-        _bool(position['trailing_active']);
+    final trailing = _bool(
+      position['trailing_active'],
+    );
 
-    final entry =
-        _optionalNumber(position['entry_price']);
+    final entry = _optionalNumber(
+      position['entry_price'],
+    );
 
-    final current =
-        _optionalNumber(position['current_price']);
+    final current = _optionalNumber(
+      position['current_price'],
+    );
 
     final stop = _optionalNumber(
       position['current_stop_loss'] ??
@@ -439,13 +418,11 @@ class _PositionsPageState extends State<PositionsPage> {
           position['take_profit'],
     );
 
-    final tp2 =
-        _optionalNumber(
+    final tp2 = _optionalNumber(
       position['take_profit_2'],
     );
 
-    final currentR =
-        position['current_r'];
+    final currentR = position['current_r'];
 
     final quantity =
         position['remaining_quantity'] ??
@@ -457,87 +434,72 @@ class _PositionsPageState extends State<PositionsPage> {
       ),
       decoration: BoxDecoration(
         color: card,
-        borderRadius:
-            BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color:
-              directionColor.withOpacity(.38),
+          color: directionColor.withValues(
+            alpha: .38,
+          ),
         ),
       ),
       child: ExpansionTile(
         initiallyExpanded: true,
-
-        tilePadding:
-            const EdgeInsets.fromLTRB(
+        tilePadding: const EdgeInsets.fromLTRB(
           16,
           8,
           16,
           8,
         ),
-
-        childrenPadding:
-            const EdgeInsets.fromLTRB(
+        childrenPadding: const EdgeInsets.fromLTRB(
           16,
           0,
           16,
           16,
         ),
-
         iconColor: muted,
         collapsedIconColor: muted,
-
         title: Row(
           children: [
             Container(
-              padding:
-                  const EdgeInsets.symmetric(
+              padding: const EdgeInsets.symmetric(
                 horizontal: 10,
                 vertical: 6,
               ),
               decoration: BoxDecoration(
-                color: directionColor
-                    .withOpacity(.12),
-                borderRadius:
-                    BorderRadius.circular(8),
+                color: directionColor.withValues(
+                  alpha: .12,
+                ),
+                borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
                 direction,
                 style: TextStyle(
                   color: directionColor,
-                  fontWeight:
-                      FontWeight.bold,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
-
             const SizedBox(width: 10),
-
             Expanded(
               child: Text(
                 symbol,
                 style: const TextStyle(
                   fontSize: 18,
-                  fontWeight:
-                      FontWeight.w800,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
             ),
-
             Text(
               _money(pnl),
               style: TextStyle(
                 color: pnlColor,
-                fontWeight:
-                    FontWeight.w800,
+                fontWeight: FontWeight.w800,
                 fontSize: 16,
               ),
             ),
           ],
         ),
-
         subtitle: Padding(
-          padding:
-              const EdgeInsets.only(top: 5),
+          padding: const EdgeInsets.only(top: 5),
           child: Text(
             '$status  •  '
             '${_r(currentR)}  •  '
@@ -548,7 +510,6 @@ class _PositionsPageState extends State<PositionsPage> {
             ),
           ),
         ),
-
         children: [
           _priceMap(
             direction: direction,
@@ -558,13 +519,9 @@ class _PositionsPageState extends State<PositionsPage> {
             tp1: tp1,
             tp2: tp2,
           ),
-
           const SizedBox(height: 16),
-
           _sectionTitle('TRADE LEVELS'),
-
           const SizedBox(height: 8),
-
           Row(
             children: [
               Expanded(
@@ -573,14 +530,12 @@ class _PositionsPageState extends State<PositionsPage> {
                   _price(entry),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'CURRENT',
                   _price(current),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'VOLUME',
@@ -589,9 +544,7 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 14),
-
           Row(
             children: [
               Expanded(
@@ -600,14 +553,12 @@ class _PositionsPageState extends State<PositionsPage> {
                   _price(stop),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'TP1',
                   _price(tp1),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'TP2',
@@ -616,13 +567,9 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 16),
-
           _sectionTitle('PERFORMANCE'),
-
           const SizedBox(height: 8),
-
           Row(
             children: [
               Expanded(
@@ -632,7 +579,6 @@ class _PositionsPageState extends State<PositionsPage> {
                   valueColor: pnlColor,
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'P/L %',
@@ -642,7 +588,6 @@ class _PositionsPageState extends State<PositionsPage> {
                   valueColor: pnlColor,
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'CURRENT R',
@@ -652,13 +597,9 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 16),
-
           _sectionTitle('MANAGEMENT'),
-
           const SizedBox(height: 8),
-
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -668,13 +609,11 @@ class _PositionsPageState extends State<PositionsPage> {
                 breakEven,
                 green,
               ),
-
               _stateChip(
                 'PARTIAL CLOSE',
                 partial,
                 gold,
               ),
-
               _stateChip(
                 'TRAILING',
                 trailing,
@@ -682,21 +621,17 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 10),
-
           Row(
             children: [
               Expanded(
                 child: _detail(
                   'MANAGEMENT',
                   _text(
-                    position[
-                        'management_status'],
+                    position['management_status'],
                   ),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'LAST ACTION',
@@ -708,9 +643,7 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 10),
-
           Row(
             children: [
               Expanded(
@@ -721,7 +654,6 @@ class _PositionsPageState extends State<PositionsPage> {
                   ),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'TRADE ID',
@@ -733,15 +665,9 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 16),
-
-          _sectionTitle(
-            'RAYMOND CONTEXT',
-          ),
-
+          _sectionTitle('RAYMOND CONTEXT'),
           const SizedBox(height: 8),
-
           Row(
             children: [
               Expanded(
@@ -752,7 +678,6 @@ class _PositionsPageState extends State<PositionsPage> {
                   ),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'SETUP',
@@ -763,21 +688,17 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 10),
-
           Row(
             children: [
               Expanded(
                 child: _detail(
                   'TECH SCORE',
                   _text(
-                    position[
-                        'technical_score'],
+                    position['technical_score'],
                   ),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'CONFLUENCE',
@@ -786,7 +707,6 @@ class _PositionsPageState extends State<PositionsPage> {
                   ),
                 ),
               ),
-
               Expanded(
                 child: _detail(
                   'CONFIDENCE',
@@ -797,21 +717,17 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ],
           ),
-
           if (_text(
                 position['trade_thesis'],
                 '',
               ).isNotEmpty) ...[
             const SizedBox(height: 12),
-
             Container(
               width: double.infinity,
-              padding:
-                  const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: background,
-                borderRadius:
-                    BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(12),
                 border: Border.all(
                   color: border,
                 ),
@@ -828,9 +744,7 @@ class _PositionsPageState extends State<PositionsPage> {
               ),
             ),
           ],
-
           const SizedBox(height: 14),
-
           _safetyStrip(),
         ],
       ),
@@ -845,7 +759,7 @@ class _PositionsPageState extends State<PositionsPage> {
     required double? tp1,
     required double? tp2,
   }) {
-    final values = <double>[
+    final values = <double?>[
       entry,
       current,
       stop,
@@ -855,12 +769,10 @@ class _PositionsPageState extends State<PositionsPage> {
 
     if (values.length < 2) {
       return Container(
-        padding:
-            const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: background,
-          borderRadius:
-              BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: border,
           ),
@@ -875,29 +787,23 @@ class _PositionsPageState extends State<PositionsPage> {
       );
     }
 
-    final minValue =
-        values.reduce(
+    final minValue = values.reduce(
       (a, b) => a < b ? a : b,
     );
 
-    final maxValue =
-        values.reduce(
+    final maxValue = values.reduce(
       (a, b) => a > b ? a : b,
     );
 
     final span =
-        (maxValue - minValue).abs() <
-                0.000001
+        (maxValue - minValue).abs() < 0.000001
             ? 1.0
             : maxValue - minValue;
 
-    double location(
-      double? value,
-    ) {
+    double location(double? value) {
       if (value == null) return 0.0;
 
-      return ((value - minValue) /
-              span)
+      return ((value - minValue) / span)
           .clamp(0.0, 1.0);
     }
 
@@ -911,44 +817,32 @@ class _PositionsPageState extends State<PositionsPage> {
       }
 
       return Positioned(
-        left: location(value) *
-            100,
-
+        left: location(value) * 100,
         top: 0,
-
         child: Transform.translate(
-          offset:
-              const Offset(-12, 0),
-
+          offset: const Offset(-12, 0),
           child: Column(
             children: [
               Container(
                 width: 24,
                 height: 24,
-                decoration:
-                    BoxDecoration(
+                decoration: BoxDecoration(
                   color: color,
-                  shape:
-                      BoxShape.circle,
+                  shape: BoxShape.circle,
                 ),
               ),
-
               const SizedBox(height: 4),
-
               Text(
                 label,
                 style: TextStyle(
                   color: color,
                   fontSize: 9,
-                  fontWeight:
-                      FontWeight.bold,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
-
               Text(
                 value.toStringAsFixed(2),
-                style:
-                    const TextStyle(
+                style: const TextStyle(
                   color: muted,
                   fontSize: 8,
                 ),
@@ -960,27 +854,22 @@ class _PositionsPageState extends State<PositionsPage> {
     }
 
     return LayoutBuilder(
-      builder:
-          (context, constraints) {
+      builder: (context, constraints) {
         return Container(
           height: 82,
-          padding:
-              const EdgeInsets.symmetric(
+          padding: const EdgeInsets.symmetric(
             horizontal: 8,
             vertical: 8,
           ),
-          decoration:
-              BoxDecoration(
+          decoration: BoxDecoration(
             color: background,
-            borderRadius:
-                BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(12),
             border: Border.all(
               color: border,
             ),
           ),
           child: Stack(
-            clipBehavior:
-                Clip.none,
+            clipBehavior: Clip.none,
             children: [
               Positioned(
                 left: 0,
@@ -988,23 +877,18 @@ class _PositionsPageState extends State<PositionsPage> {
                 top: 12,
                 child: Container(
                   height: 4,
-                  decoration:
-                      BoxDecoration(
+                  decoration: BoxDecoration(
                     color: border,
                     borderRadius:
-                        BorderRadius.circular(
-                      4,
-                    ),
+                        BorderRadius.circular(4),
                   ),
                 ),
               ),
-
               Positioned(
                 left: 0,
                 right: 0,
                 top: 12,
-                child:
-                    FractionallySizedBox(
+                child: FractionallySizedBox(
                   alignment:
                       direction == 'BUY'
                           ? Alignment.centerLeft
@@ -1012,45 +896,37 @@ class _PositionsPageState extends State<PositionsPage> {
                   widthFactor: .5,
                   child: Container(
                     height: 4,
-                    decoration:
-                        BoxDecoration(
+                    decoration: BoxDecoration(
                       color:
-                          direction ==
-                                  'BUY'
+                          direction == 'BUY'
                               ? green
                               : red,
                       borderRadius:
-                          BorderRadius
-                              .circular(4),
+                          BorderRadius.circular(4),
                     ),
                   ),
                 ),
               ),
-
               marker(
                 'SL',
                 stop,
                 red,
               ),
-
               marker(
                 'TP1',
                 tp1,
                 green,
               ),
-
               marker(
                 'TP2',
                 tp2,
                 blue,
               ),
-
               marker(
                 'ENTRY',
                 entry,
                 gold,
               ),
-
               marker(
                 'NOW',
                 current,
@@ -1063,9 +939,7 @@ class _PositionsPageState extends State<PositionsPage> {
     );
   }
 
-  Widget _sectionTitle(
-    String title,
-  ) {
+  Widget _sectionTitle(String title) {
     return Text(
       title,
       style: const TextStyle(
@@ -1083,48 +957,38 @@ class _PositionsPageState extends State<PositionsPage> {
     Color color,
   ) {
     return Container(
-      padding:
-          const EdgeInsets.symmetric(
+      padding: const EdgeInsets.symmetric(
         horizontal: 10,
         vertical: 7,
       ),
       decoration: BoxDecoration(
         color: active
-            ? color.withOpacity(.12)
+            ? color.withValues(alpha: .12)
             : background,
-        borderRadius:
-            BorderRadius.circular(9),
+        borderRadius: BorderRadius.circular(9),
         border: Border.all(
           color: active
-              ? color.withOpacity(.45)
+              ? color.withValues(alpha: .45)
               : border,
         ),
       ),
       child: Row(
-        mainAxisSize:
-            MainAxisSize.min,
+        mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
             active
                 ? Icons.check_circle
-                : Icons
-                    .radio_button_unchecked,
+                : Icons.radio_button_unchecked,
             size: 14,
-            color:
-                active ? color : muted,
+            color: active ? color : muted,
           ),
-
           const SizedBox(width: 6),
-
           Text(
-            '$label: '
-            '${active ? 'ON' : 'OFF'}',
+            '$label: ${active ? 'ON' : 'OFF'}',
             style: TextStyle(
-              color:
-                  active ? color : muted,
+              color: active ? color : muted,
               fontSize: 10,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
         ],
@@ -1135,14 +999,12 @@ class _PositionsPageState extends State<PositionsPage> {
   Widget _safetyStrip() {
     return Container(
       width: double.infinity,
-      padding:
-          const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: gold.withOpacity(.07),
-        borderRadius:
-            BorderRadius.circular(12),
+        color: gold.withValues(alpha: .07),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: gold.withOpacity(.22),
+          color: gold.withValues(alpha: .22),
         ),
       ),
       child: const Wrap(
@@ -1154,38 +1016,31 @@ class _PositionsPageState extends State<PositionsPage> {
             style: TextStyle(
               color: gold,
               fontSize: 10,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
-
           Text(
             'READ ONLY',
             style: TextStyle(
               color: gold,
               fontSize: 10,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
-
           Text(
             'LIVE OFF',
             style: TextStyle(
               color: green,
               fontSize: 10,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
-
           Text(
             'BROKER OFF',
             style: TextStyle(
               color: green,
               fontSize: 10,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
         ],
@@ -1199,28 +1054,23 @@ class _PositionsPageState extends State<PositionsPage> {
     Color? valueColor,
   }) {
     return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
           style: const TextStyle(
             color: muted,
             fontSize: 9,
-            fontWeight:
-                FontWeight.bold,
+            fontWeight: FontWeight.bold,
           ),
         ),
-
         const SizedBox(height: 5),
-
         Text(
           value,
           style: TextStyle(
             color: valueColor,
             fontSize: 13,
-            fontWeight:
-                FontWeight.w700,
+            fontWeight: FontWeight.w700,
           ),
         ),
       ],
@@ -1229,12 +1079,10 @@ class _PositionsPageState extends State<PositionsPage> {
 
   Widget _emptyCard() {
     return Container(
-      padding:
-          const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
         color: card,
-        borderRadius:
-            BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: border,
         ),
@@ -1242,30 +1090,23 @@ class _PositionsPageState extends State<PositionsPage> {
       child: const Column(
         children: [
           Icon(
-            Icons
-                .swap_vert_circle_outlined,
+            Icons.swap_vert_circle_outlined,
             size: 48,
             color: muted,
           ),
-
           SizedBox(height: 12),
-
           Text(
             'No open paper positions',
             style: TextStyle(
               fontSize: 18,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
-
           SizedBox(height: 6),
-
           Text(
             'When RAYMOND accepts a paper trade, '
             'the persistent position will appear here.',
-            textAlign:
-                TextAlign.center,
+            textAlign: TextAlign.center,
             style: TextStyle(
               color: muted,
             ),
@@ -1277,26 +1118,20 @@ class _PositionsPageState extends State<PositionsPage> {
 
   Widget _errorCard() {
     return Container(
-      margin:
-          const EdgeInsets.only(
+      margin: const EdgeInsets.only(
         bottom: 14,
       ),
-      padding:
-          const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color:
-            red.withOpacity(.10),
-        borderRadius:
-            BorderRadius.circular(12),
+        color: red.withValues(alpha: .10),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color:
-              red.withOpacity(.30),
+          color: red.withValues(alpha: .30),
         ),
       ),
       child: Text(
         error,
-        style:
-            const TextStyle(
+        style: const TextStyle(
           color: red,
         ),
       ),
