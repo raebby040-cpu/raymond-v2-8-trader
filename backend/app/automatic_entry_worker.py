@@ -93,6 +93,7 @@ class AutomaticEntryWorker:
         value: Any,
     ) -> Any:
         """Resolve either a normal value or an awaitable."""
+
         if inspect.isawaitable(value):
             return await value
 
@@ -119,7 +120,6 @@ class AutomaticEntryWorker:
 
             if candles is None:
                 candles = chart.get("bars")
-
         else:
             candles = chart
 
@@ -390,9 +390,10 @@ class AutomaticEntryWorker:
 
         candles = await self._fetch_market_chart()
 
-        # Evaluate the existing AI decision.
-        # This step does not execute an order.
-        decision = await self.pipeline.evaluate_decision(
+        # IMPORTANT:
+        # TradingPipelineService.evaluate_decision() is synchronous.
+        # Do NOT use "await" here.
+        decision = self.pipeline.evaluate_decision(
             symbol=self.config.symbol,
             timeframe=self.config.timeframe,
             candles=candles,
@@ -460,6 +461,7 @@ class AutomaticEntryWorker:
         # Execute through the existing pipeline.
         #
         # TradingPipelineService remains responsible for:
+        # - technical indicators
         # - AI decision
         # - Risk Engine
         # - position sizing
