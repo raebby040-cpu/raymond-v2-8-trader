@@ -17,7 +17,9 @@ It does NOT replace or modify:
 - paper execution gateway
 - persistent position system
 - existing lifecycle manager
-- existing break-even/trailing/partial manager
+- existing break-even manager
+- existing trailing manager
+- existing partial-close manager
 
 Possible decisions:
 - HOLD
@@ -27,12 +29,14 @@ Possible decisions:
 - MODIFY_SL_TP
 
 Safety:
-- Paper decision layer only
-- Never creates a position
-- Never opens a trade
+- Paper only
+- Decision layer only
 - Never contacts MT5
 - Never contacts a live broker
+- Never creates a new position
+- Never executes a broker order
 - Never widens an existing stop-loss
+- Never bypasses the risk engine
 """
 
 from __future__ import annotations
@@ -53,13 +57,13 @@ class AutomaticManagementAction(str, Enum):
 @dataclass(frozen=True)
 class AutomaticManagementConfig:
     """
-    Conservative configuration for automatic position management.
+    Conservative automatic-management configuration.
     """
 
-    # Begin protection once profit reaches this many R.
+    # Protection begins after this many R of profit.
     profit_protection_r: float = 1.0
 
-    # Lock this much of the ORIGINAL risk as profit.
+    # At protection, lock this many R of original risk.
     lock_profit_r: float = 0.25
 
     # Strong reversal threshold.
@@ -68,10 +72,10 @@ class AutomaticManagementConfig:
     # Trailing distance in price units.
     trailing_distance: float = 5.0
 
-    # Minimum stop movement before another SL modification.
+    # Minimum SL movement before another modification.
     trailing_step: float = 1.0
 
-    # Allow TP extension after this many R.
+    # TP extension can begin after this many R.
     extend_tp_after_r: float = 2.0
 
     # Distance beyond current price for TP extension.
@@ -86,6 +90,11 @@ class AutomaticManagementConfig:
         if self.lock_profit_r < 0:
             raise ValueError(
                 "lock_profit_r cannot be negative"
+            )
+
+        if self.lock_profit_r >= self.profit_protection_r:
+            raise ValueError(
+                "lock_profit_r must be less than profit_protection_r"
             )
 
         if not 0 < self.reversal_threshold <= 1:
@@ -119,7 +128,9 @@ class AutomaticManagementDecision:
     """
     Decision produced by the automatic trade manager.
 
-    This object does not execute anything.
+    This object contains instructions only.
+
+    It does not execute anything.
     """
 
     action: AutomaticManagementAction
@@ -156,20 +167,22 @@ class AutomaticManagementDecision:
 
 class AutomaticTradeManager:
     """
-    Higher-level management decision engine.
+    Automatic management decision engine.
 
-    Existing RAYMOND components decide whether to OPEN.
+    Existing RAYMOND entry logic decides whether to OPEN.
 
-    This component decides what to do AFTER a position is open.
+    This manager acts only AFTER a position already exists.
 
-    It can:
+    It can decide:
+
         HOLD
         CLOSE
         MODIFY_SL
         MODIFY_TP
         MODIFY_SL_TP
 
-    It never creates a new position.
+    It never creates a position.
+    It never executes an order.
     """
 
     def __init__(
@@ -195,10 +208,6 @@ class AutomaticTradeManager:
         entry_price: float,
         current_price: float,
     ) -> float:
-        """
-        Positive value means the position is profitable.
-        Negative value means the position is losing.
-        """
 
         direction = direction.lower()
 
@@ -217,13 +226,6 @@ class AutomaticTradeManager:
         entry_price: float,
         stop_loss: Optional[float],
     ) -> float:
-        """
-        Calculate a positive price-distance risk.
-
-        NOTE:
-        This is intended to work with the original protective
-        stop or another stable 1R reference.
-        """
 
         if stop_loss is None:
             raise ValueError(
@@ -251,12 +253,15 @@ class AutomaticTradeManager:
         initial_stop_loss: Optional[float] = None,
     ) -> float:
         """
-        Calculate current profit in R.
+        Calculate profit in R.
 
-        If initial_stop_loss is available, it is preferred.
+        IMPORTANT:
 
-        This prevents R from changing artificially when an
-        existing stop has already been moved to breakeven/profit.
+        If initial_stop_loss is available, it is used as the
+        denominator so that 1R remains the original trade risk.
+
+        Tightening the current stop therefore does not
+        artificially change the trade's R value.
         """
 
         profit = cls.profit_distance(
@@ -265,7 +270,7 @@ class AutomaticTradeManager:
             current_price,
         )
 
-        risk_reference = (
+        reference_stop = (
             initial_stop_loss
             if initial_stop_loss is not None
             else stop_loss
@@ -273,7 +278,7 @@ class AutomaticTradeManager:
 
         risk = cls.risk_distance(
             entry_price,
-            risk_reference,
+            reference_stop,
         )
 
         return profit / risk
@@ -289,13 +294,13 @@ class AutomaticTradeManager:
         new_stop: float,
     ) -> bool:
         """
-        A stop may only move in the protective direction.
+        True only when the new SL improves protection.
 
         BUY:
-            higher stop = improvement
+            higher SL = improvement
 
         SELL:
-            lower stop = improvement
+            lower SL = improvement
         """
 
         if old_stop is None:
@@ -321,32 +326,47 @@ class AutomaticTradeManager:
         current_price: Optional[float] = None,
     ) -> bool:
         """
-        Validate that a stop is on the protective side.
-
-        IMPORTANT:
-        A stop is allowed to move beyond entry once the trade
-        becomes profitable.
+        Validate an SL without preventing profitable
+        stop-loss movement.
 
         BUY:
-            stop must remain below current market price.
+            SL must remain below current price.
 
         SELL:
-            stop must remain above current market price.
+            SL must remain above current price.
+
+        This deliberately allows:
+
+        BUY:
+            SL > entry
+
+        SELL:
+            SL < entry
+
+        once the position is profitable.
         """
 
         direction = direction.lower()
 
-        reference_price = (
-            current_price
-            if current_price is not None
-            else entry_price
-        )
-
         if direction == "buy":
-            return stop_loss < reference_price
+
+            if stop_loss >= entry_price:
+                if current_price is None:
+                    return True
+
+                return stop_loss < current_price
+
+            return stop_loss < entry_price
 
         if direction == "sell":
-            return stop_loss > reference_price
+
+            if stop_loss <= entry_price:
+                if current_price is None:
+                    return True
+
+                return stop_loss > current_price
+
+            return stop_loss > entry_price
 
         raise ValueError(
             "direction must be BUY or SELL"
@@ -366,6 +386,38 @@ class AutomaticTradeManager:
 
         if direction == "sell":
             return take_profit < entry_price
+
+        raise ValueError(
+            "direction must be BUY or SELL"
+        )
+
+    @staticmethod
+    def take_profit_improves(
+        direction: str,
+        old_take_profit: Optional[float],
+        new_take_profit: float,
+    ) -> bool:
+        """
+        TP modifications are only allowed when they extend
+        the target in the direction of the trade.
+
+        BUY:
+            higher TP = improvement
+
+        SELL:
+            lower TP = improvement
+        """
+
+        if old_take_profit is None:
+            return True
+
+        direction = direction.lower()
+
+        if direction == "buy":
+            return new_take_profit > old_take_profit
+
+        if direction == "sell":
+            return new_take_profit < old_take_profit
 
         raise ValueError(
             "direction must be BUY or SELL"
@@ -410,6 +462,224 @@ class AutomaticTradeManager:
         )
 
     # ============================================================
+    # CANDIDATE STOP
+    # ============================================================
+
+    def _candidate_stop_loss(
+        self,
+        *,
+        direction: str,
+        entry_price: float,
+        current_price: float,
+        current_stop_loss: float,
+        current_r: float,
+    ) -> Optional[float]:
+        """
+        Produce a safer SL candidate.
+
+        The candidate can only move the stop in the protective
+        direction.
+
+        It can cross entry once the market has moved far enough
+        in profit.
+
+        No widening is permitted.
+        """
+
+        direction = direction.lower()
+
+        candidate: Optional[float] = None
+
+        # --------------------------------------------------------
+        # PROFIT PROTECTION
+        # --------------------------------------------------------
+
+        if current_r >= self.config.profit_protection_r:
+
+            if direction == "buy":
+                risk_distance = abs(
+                    entry_price - current_stop_loss
+                )
+
+                # Use original-risk approximation when the current
+                # stop has already moved.
+                protection_distance = (
+                    risk_distance
+                    * self.config.lock_profit_r
+                )
+
+                candidate = (
+                    entry_price
+                    + protection_distance
+                )
+
+            elif direction == "sell":
+                risk_distance = abs(
+                    entry_price - current_stop_loss
+                )
+
+                protection_distance = (
+                    risk_distance
+                    * self.config.lock_profit_r
+                )
+
+                candidate = (
+                    entry_price
+                    - protection_distance
+                )
+
+        # --------------------------------------------------------
+        # TRAILING PROTECTION
+        # --------------------------------------------------------
+
+        if direction == "buy":
+
+            trailing_candidate = (
+                current_price
+                - self.config.trailing_distance
+            )
+
+            if candidate is None:
+                candidate = trailing_candidate
+            else:
+                candidate = max(
+                    candidate,
+                    trailing_candidate,
+                )
+
+            if candidate <= current_stop_loss:
+                return None
+
+            if candidate >= current_price:
+                return None
+
+        elif direction == "sell":
+
+            trailing_candidate = (
+                current_price
+                + self.config.trailing_distance
+            )
+
+            if candidate is None:
+                candidate = trailing_candidate
+            else:
+                candidate = min(
+                    candidate,
+                    trailing_candidate,
+                )
+
+            if candidate >= current_stop_loss:
+                return None
+
+            if candidate <= current_price:
+                return None
+
+        if candidate is None:
+            return None
+
+        if not self.stop_is_valid(
+            direction,
+            entry_price,
+            candidate,
+            current_price,
+        ):
+            return None
+
+        if not self.stop_improves(
+            direction,
+            current_stop_loss,
+            candidate,
+        ):
+            return None
+
+        movement = abs(
+            candidate - current_stop_loss
+        )
+
+        if movement < self.config.trailing_step:
+            return None
+
+        return candidate
+
+    # ============================================================
+    # CANDIDATE TAKE PROFIT
+    # ============================================================
+
+    def _candidate_take_profit(
+        self,
+        *,
+        direction: str,
+        entry_price: float,
+        current_price: float,
+        current_take_profit: Optional[float],
+        current_r: float,
+        market_strength: float,
+    ) -> Optional[float]:
+        """
+        Extend TP only during strong profitable continuation.
+
+        Existing TP is never reduced.
+        """
+
+        if current_take_profit is None:
+            return None
+
+        if current_r < self.config.extend_tp_after_r:
+            return None
+
+        if market_strength < self.config.reversal_threshold:
+            return None
+
+        direction = direction.lower()
+
+        if direction == "buy":
+
+            candidate = (
+                current_price
+                + self.config.tp_extension_distance
+            )
+
+            candidate = max(
+                candidate,
+                current_take_profit
+                + self.config.tp_extension_distance,
+            )
+
+        elif direction == "sell":
+
+            candidate = (
+                current_price
+                - self.config.tp_extension_distance
+            )
+
+            candidate = min(
+                candidate,
+                current_take_profit
+                - self.config.tp_extension_distance,
+            )
+
+        else:
+            raise ValueError(
+                "direction must be BUY or SELL"
+            )
+
+        if not self.take_profit_is_valid(
+            direction,
+            entry_price,
+            candidate,
+        ):
+            return None
+
+        if not self.take_profit_improves(
+            direction,
+            current_take_profit,
+            candidate,
+        ):
+            return None
+
+        return candidate
+
+    # ============================================================
     # MAIN DECISION
     # ============================================================
 
@@ -427,18 +697,16 @@ class AutomaticTradeManager:
         initial_stop_loss: Optional[float] = None,
     ) -> AutomaticManagementDecision:
         """
-        Evaluate one already-open paper position.
+        Evaluate an already-open position.
 
-        market_strength:
-            -1.0 = strong bearish pressure
-             0.0 = neutral
-            +1.0 = strong bullish pressure
+        This method is decision-only.
 
-        thesis_invalidated:
-            True means the original trade thesis is no longer valid.
-
-        initial_stop_loss:
-            Original SL used to establish stable 1R calculations.
+        It does not:
+            - close database records
+            - modify database state
+            - create orders
+            - send broker orders
+            - contact MT5
         """
 
         direction = direction.lower()
@@ -451,7 +719,7 @@ class AutomaticTradeManager:
                 "direction must be BUY or SELL"
             )
 
-        if not trade_id.strip():
+        if not trade_id:
             raise ValueError(
                 "trade_id is required"
             )
@@ -475,17 +743,29 @@ class AutomaticTradeManager:
             direction,
             entry_price,
             stop_loss,
-            current_price=current_price,
+            current_price,
         ):
             raise ValueError(
-                "Existing stop_loss is invalid for "
-                "the current position direction/price"
+                "Existing stop_loss is invalid for position direction"
+            )
+
+        try:
+            market_strength = float(
+                market_strength
+            )
+        except (TypeError, ValueError):
+            raise ValueError(
+                "market_strength must be numeric"
             )
 
         if not -1.0 <= market_strength <= 1.0:
             raise ValueError(
-                "market_strength must be between -1.0 and 1.0"
+                "market_strength must be between -1 and 1"
             )
+
+        # --------------------------------------------------------
+        # STABLE R CALCULATION
+        # --------------------------------------------------------
 
         current_r = self.profit_r(
             direction=direction,
@@ -495,9 +775,9 @@ class AutomaticTradeManager:
             initial_stop_loss=initial_stop_loss,
         )
 
-        # ========================================================
+        # --------------------------------------------------------
         # 1. THESIS INVALIDATION
-        # ========================================================
+        # --------------------------------------------------------
 
         if thesis_invalidated:
 
@@ -505,212 +785,176 @@ class AutomaticTradeManager:
                 trade_id=trade_id,
                 current_r=current_r,
                 reason=(
-                    "Original trade thesis has been invalidated; "
-                    "close the paper position at the current market price."
+                    "Trade thesis invalidated by existing "
+                    "RAYMOND decision information."
                 ),
             )
 
-        # ========================================================
+        # --------------------------------------------------------
         # 2. STRONG REVERSAL WHILE LOSING
-        # ========================================================
-
-        strong_reversal = (
-            (
-                direction == "buy"
-                and market_strength
-                <= -self.config.reversal_threshold
-            )
-            or
-            (
-                direction == "sell"
-                and market_strength
-                >= self.config.reversal_threshold
-            )
-        )
-
-        if strong_reversal and current_r < 0:
-
-            return self._close_decision(
-                trade_id=trade_id,
-                current_r=current_r,
-                reason=(
-                    "Strong market reversal detected while "
-                    "the position is losing; close at the "
-                    "current market price."
-                ),
-            )
-
-        # ========================================================
-        # 3. PROFIT PROTECTION
-        # ========================================================
-
-        if current_r >= self.config.profit_protection_r:
-
-            risk_distance = self.risk_distance(
-                entry_price,
-                (
-                    initial_stop_loss
-                    if initial_stop_loss is not None
-                    else stop_loss
-                ),
-            )
-
-            if direction == "buy":
-
-                protected_stop = (
-                    entry_price
-                    + (
-                        risk_distance
-                        * self.config.lock_profit_r
-                    )
-                )
-
-                trailing_stop = (
-                    current_price
-                    - self.config.trailing_distance
-                )
-
-                candidate_stop = max(
-                    protected_stop,
-                    trailing_stop,
-                )
-
-            else:
-
-                protected_stop = (
-                    entry_price
-                    - (
-                        risk_distance
-                        * self.config.lock_profit_r
-                    )
-                )
-
-                trailing_stop = (
-                    current_price
-                    + self.config.trailing_distance
-                )
-
-                candidate_stop = min(
-                    protected_stop,
-                    trailing_stop,
-                )
-
-            stop_change_is_valid = (
-                self.stop_is_valid(
-                    direction,
-                    entry_price,
-                    candidate_stop,
-                    current_price=current_price,
-                )
-                and self.stop_improves(
-                    direction,
-                    stop_loss,
-                    candidate_stop,
-                )
-            )
-
-            if stop_change_is_valid:
-
-                if (
-                    abs(
-                        candidate_stop - stop_loss
-                    )
-                    >= self.config.trailing_step
-                ):
-
-                    return AutomaticManagementDecision(
-                        action=AutomaticManagementAction.MODIFY_SL,
-                        trade_id=trade_id,
-                        new_stop_loss=candidate_stop,
-                        new_take_profit=None,
-                        profit_r=current_r,
-                        reason=(
-                            "Profit protection conditions justify "
-                            "tightening the stop-loss."
-                        ),
-                    )
-
-        # ========================================================
-        # 4. TP EXTENSION
-        # ========================================================
-
-        continuation = (
-            (
-                direction == "buy"
-                and market_strength
-                >= self.config.reversal_threshold
-            )
-            or
-            (
-                direction == "sell"
-                and market_strength
-                <= -self.config.reversal_threshold
-            )
-        )
+        # --------------------------------------------------------
 
         if (
-            continuation
-            and current_r >= self.config.extend_tp_after_r
-            and take_profit is not None
+            current_r < 0
+            and abs(market_strength)
+            >= self.config.reversal_threshold
         ):
 
-            if direction == "buy":
+            reversal_against_trade = (
+                direction == "buy"
+                and market_strength
+                <= -self.config.reversal_threshold
+            ) or (
+                direction == "sell"
+                and market_strength
+                >= self.config.reversal_threshold
+            )
 
-                candidate_tp = max(
-                    take_profit,
-                    current_price
-                    + self.config.tp_extension_distance,
-                )
+            if reversal_against_trade:
 
-            else:
-
-                candidate_tp = min(
-                    take_profit,
-                    current_price
-                    - self.config.tp_extension_distance,
-                )
-
-            if (
-                candidate_tp != take_profit
-                and self.take_profit_is_valid(
-                    direction,
-                    entry_price,
-                    candidate_tp,
-                )
-            ):
-
-                return AutomaticManagementDecision(
-                    action=AutomaticManagementAction.MODIFY_TP,
+                return self._close_decision(
                     trade_id=trade_id,
-                    new_stop_loss=None,
-                    new_take_profit=candidate_tp,
-                    profit_r=current_r,
+                    current_r=current_r,
                     reason=(
-                        "Strong continuation detected; "
-                        "extend take-profit to allow the "
-                        "trend to continue."
+                        "Strong market reversal detected "
+                        "against the open position while "
+                        "the position is losing."
                     ),
                 )
 
-        # ========================================================
-        # 5. NOTHING REQUIRES CHANGE
-        # ========================================================
+        # --------------------------------------------------------
+        # 3. CALCULATE PROTECTIVE SL CANDIDATE
+        # --------------------------------------------------------
+
+        new_stop_loss = self._candidate_stop_loss(
+            direction=direction,
+            entry_price=entry_price,
+            current_price=current_price,
+            current_stop_loss=stop_loss,
+            current_r=current_r,
+        )
+
+        # --------------------------------------------------------
+        # 4. CALCULATE CONTINUATION TP CANDIDATE
+        # --------------------------------------------------------
+
+        new_take_profit = self._candidate_take_profit(
+            direction=direction,
+            entry_price=entry_price,
+            current_price=current_price,
+            current_take_profit=take_profit,
+            current_r=current_r,
+            market_strength=market_strength,
+        )
+
+        # --------------------------------------------------------
+        # 5. BOTH SL + TP
+        # --------------------------------------------------------
+
+        if (
+            new_stop_loss is not None
+            and new_take_profit is not None
+        ):
+
+            return AutomaticManagementDecision(
+                action=AutomaticManagementAction.MODIFY_SL_TP,
+                trade_id=trade_id,
+                new_stop_loss=new_stop_loss,
+                new_take_profit=new_take_profit,
+                profit_r=current_r,
+                reason=(
+                    "Profitable continuation detected. "
+                    "Protective stop-loss improvement and "
+                    "take-profit extension are both justified."
+                ),
+            )
+
+        # --------------------------------------------------------
+        # 6. SL ONLY
+        # --------------------------------------------------------
+
+        if new_stop_loss is not None:
+
+            return AutomaticManagementDecision(
+                action=AutomaticManagementAction.MODIFY_SL,
+                trade_id=trade_id,
+                new_stop_loss=new_stop_loss,
+                new_take_profit=None,
+                profit_r=current_r,
+                reason=(
+                    "Position has reached a protective level. "
+                    "Stop-loss can be improved without widening "
+                    "risk."
+                ),
+            )
+
+        # --------------------------------------------------------
+        # 7. TP ONLY
+        # --------------------------------------------------------
+
+        if new_take_profit is not None:
+
+            return AutomaticManagementDecision(
+                action=AutomaticManagementAction.MODIFY_TP,
+                trade_id=trade_id,
+                new_stop_loss=None,
+                new_take_profit=new_take_profit,
+                profit_r=current_r,
+                reason=(
+                    "Strong profitable continuation detected. "
+                    "Take-profit can be extended."
+                ),
+            )
+
+        # --------------------------------------------------------
+        # 8. OTHERWISE HOLD
+        # --------------------------------------------------------
 
         return self._hold_decision(
             trade_id=trade_id,
             current_r=current_r,
             reason=(
-                "Current market conditions do not require "
-                "closing or modifying the position."
+                "No management change is currently justified. "
+                "Existing position protection remains in place."
             ),
         )
 
 
-def automatic_management_decision_to_dict(
-    decision: AutomaticManagementDecision,
-) -> dict:
+def evaluate_automatic_trade_management(
+    *,
+    trade_id: str,
+    direction: str,
+    entry_price: float,
+    current_price: float,
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+    market_strength: float = 0.0,
+    thesis_invalidated: bool = False,
+    initial_stop_loss: Optional[float] = None,
+    manager: Optional[AutomaticTradeManager] = None,
+) -> AutomaticManagementDecision:
     """
-    Compatibility helper for API/dashboard serialization.
+    Convenience function for future integration.
+
+    Decision-only.
+
+    No database or broker action occurs here.
     """
 
-    return decision.to_dict()
+    automatic_manager = (
+        manager
+        if manager is not None
+        else AutomaticTradeManager()
+    )
+
+    return automatic_manager.evaluate(
+        trade_id=trade_id,
+        direction=direction,
+        entry_price=entry_price,
+        current_price=current_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        market_strength=market_strength,
+        thesis_invalidated=thesis_invalidated,
+        initial_stop_loss=initial_stop_loss,
+    )
