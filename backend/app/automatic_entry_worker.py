@@ -33,7 +33,7 @@ from .trading_pipeline_service import (
     PaperRiskState,
     TradingPipelineService,
 )
-from .symbol_specification import SymbolSpecification
+from .risk_engine import SymbolSpecification
 
 
 logger = logging.getLogger(__name__)
@@ -54,9 +54,8 @@ class AutomaticEntryWorker:
     """
     Stage 17.6 automatic paper-entry worker.
 
-    The worker deliberately delegates the actual trading decision,
-    risk evaluation, sizing and paper execution to the existing
-    TradingPipelineService.
+    The worker delegates the actual trading decision, risk evaluation,
+    sizing and paper execution to the existing TradingPipelineService.
 
     Persistence is delegated to the existing Stage 15 persistence
     function in app.main after a paper execution is accepted.
@@ -67,9 +66,13 @@ class AutomaticEntryWorker:
         *,
         db: Any,
         specification: SymbolSpecification,
-        account_equity_provider: Callable[[], float | Awaitable[float]],
+        account_equity_provider: Callable[
+            [],
+            float | Awaitable[float],
+        ],
         risk_state_provider: Callable[
-            [], PaperRiskState | Awaitable[PaperRiskState]
+            [],
+            PaperRiskState | Awaitable[PaperRiskState],
         ],
         config: Optional[AutomaticEntryWorkerConfig] = None,
         pipeline: Optional[TradingPipelineService] = None,
@@ -88,13 +91,16 @@ class AutomaticEntryWorker:
         self,
         value: Any,
     ) -> Any:
-        """Resolve a normal value or awaitable value."""
+        """Resolve either a normal value or an awaitable."""
         if inspect.isawaitable(value):
             return await value
+
         return value
 
-    async def _fetch_market_chart(self) -> list[dict[str, Any]]:
-        """Fetch a fresh online paper-market chart."""
+    async def _fetch_market_chart(
+        self,
+    ) -> list[dict[str, Any]]:
+        """Fetch fresh online paper-market candles."""
         chart = await _fetch_chart(
             self.config.symbol,
             self.config.timeframe,
@@ -102,7 +108,9 @@ class AutomaticEntryWorker:
         )
 
         if not chart:
-            raise RuntimeError("Online market feed returned no candles")
+            raise RuntimeError(
+                "Online market feed returned no candles"
+            )
 
         return chart
 
@@ -121,14 +129,22 @@ class AutomaticEntryWorker:
                 if name in obj:
                     return obj[name]
 
-            value = getattr(obj, name, None)
+            value = getattr(
+                obj,
+                name,
+                None,
+            )
+
             if value is not None:
                 return value
 
         return default
 
     @classmethod
-    def _decision_action(cls, decision: Any) -> str:
+    def _decision_action(
+        cls,
+        decision: Any,
+    ) -> str:
         """Return the normalized decision action."""
         action = cls._get_value(
             decision,
@@ -141,7 +157,10 @@ class AutomaticEntryWorker:
         return str(action).strip().upper()
 
     @classmethod
-    def _decision_direction(cls, decision: Any) -> str:
+    def _decision_direction(
+        cls,
+        decision: Any,
+    ) -> str:
         """Return the normalized trade direction."""
         direction = cls._get_value(
             decision,
@@ -154,7 +173,10 @@ class AutomaticEntryWorker:
         return str(direction).strip().upper()
 
     @classmethod
-    def _decision_signal(cls, decision: Any) -> str:
+    def _decision_signal(
+        cls,
+        decision: Any,
+    ) -> str:
         """Return the displayed signal."""
         signal = cls._get_value(
             decision,
@@ -166,7 +188,10 @@ class AutomaticEntryWorker:
         return str(signal).strip().upper()
 
     @classmethod
-    def _decision_confidence(cls, decision: Any) -> Any:
+    def _decision_confidence(
+        cls,
+        decision: Any,
+    ) -> Any:
         return cls._get_value(
             decision,
             "confidence",
@@ -175,7 +200,10 @@ class AutomaticEntryWorker:
         )
 
     @classmethod
-    def _decision_score(cls, decision: Any) -> Any:
+    def _decision_score(
+        cls,
+        decision: Any,
+    ) -> Any:
         return cls._get_value(
             decision,
             "score",
@@ -191,8 +219,8 @@ class AutomaticEntryWorker:
         Persist an accepted paper execution through the existing
         Stage 15 persistence path.
 
-        The import is intentionally lazy so that online_main.py can
-        initialize app.main before this worker requests the helper.
+        The import is intentionally lazy to avoid an import cycle
+        during application startup.
         """
 
         execution_result = self._get_value(
@@ -220,41 +248,58 @@ class AutomaticEntryWorker:
             )
         ).strip().lower()
 
-        # Hard safety check: this worker may only persist paper executions.
+        # Absolute safety gate:
+        # only paper executions may reach persistence.
         if execution_type != "paper":
             logger.error(
                 "RAYMOND Stage 17.6 persistence blocked: "
                 "execution_type=%s is not paper",
                 execution_type,
             )
+
             return False, None
 
-        if status not in {"accepted", "filled"}:
+        if status not in {
+            "accepted",
+            "filled",
+        }:
             logger.warning(
                 "RAYMOND Stage 17.6 persistence skipped: "
                 "paper execution status=%s",
                 status,
             )
+
             return False, None
 
         try:
-            from .main import persist_step15_paper_execution
+            from .main import (
+                persist_step15_paper_execution,
+            )
+
         except Exception:
             logger.exception(
                 "RAYMOND Stage 17.6 could not import "
                 "the existing Stage 15 persistence helper"
             )
+
             return False, None
 
         try:
-            persisted = persist_step15_paper_execution(result)
-            persisted = await self._resolve(persisted)
+            persisted = persist_step15_paper_execution(
+                result
+            )
+
+            persisted = await self._resolve(
+                persisted
+            )
 
             if persisted is None:
                 logger.error(
-                    "RAYMOND Stage 17.6 paper execution was accepted "
-                    "but persistence returned None"
+                    "RAYMOND Stage 17.6 paper execution "
+                    "was accepted but persistence "
+                    "returned None"
                 )
+
                 return False, None
 
             return True, persisted
@@ -264,11 +309,14 @@ class AutomaticEntryWorker:
                 "RAYMOND Stage 17.6 failed to persist "
                 "accepted paper execution"
             )
+
             return False, None
 
-    async def run_once(self) -> Any:
+    async def run_once(
+        self,
+    ) -> Any:
         """
-        Execute one complete automatic-entry evaluation cycle.
+        Execute one complete automatic-entry cycle.
 
         Flow:
 
@@ -292,26 +340,45 @@ class AutomaticEntryWorker:
 
         candles = await self._fetch_market_chart()
 
-        # Evaluate the decision only first.
-        # This does not execute anything.
+        # Evaluate the existing AI decision.
+        # This step does not execute an order.
         decision = await self.pipeline.evaluate_decision(
             symbol=self.config.symbol,
             timeframe=self.config.timeframe,
             candles=candles,
         )
 
-        action = self._decision_action(decision)
-        direction = self._decision_direction(decision)
-        signal = self._decision_signal(decision)
-        confidence = self._decision_confidence(decision)
-        score = self._decision_score(decision)
+        action = self._decision_action(
+            decision
+        )
 
-        # Only BUY and SELL are eligible for the execution path.
-        if action not in {"BUY", "SELL"}:
+        direction = self._decision_direction(
+            decision
+        )
+
+        signal = self._decision_signal(
+            decision
+        )
+
+        confidence = self._decision_confidence(
+            decision
+        )
+
+        score = self._decision_score(
+            decision
+        )
+
+        # WAIT / NEUTRAL / anything other than BUY or SELL
+        # must not create an order.
+        if action not in {
+            "BUY",
+            "SELL",
+        }:
             logger.info(
                 "RAYMOND Stage 17.6 entry cycle: "
-                "action=%s direction=%s signal=%s confidence=%s "
-                "score=%s executed=False status=not_executed "
+                "action=%s direction=%s signal=%s "
+                "confidence=%s score=%s "
+                "executed=False status=not_executed "
                 "order_id=None persisted=False",
                 action,
                 direction,
@@ -319,33 +386,45 @@ class AutomaticEntryWorker:
                 confidence,
                 score,
             )
+
             return decision
 
-        # Resolve the existing paper-account equity provider.
+        # Use the existing paper account equity provider.
         account_equity = await self._resolve(
             self.account_equity_provider()
         )
 
-        # Resolve the existing paper-account risk state provider.
+        # Use the existing paper risk-state provider.
         risk_state = await self._resolve(
             self.risk_state_provider()
         )
 
-        if not isinstance(risk_state, PaperRiskState):
+        if not isinstance(
+            risk_state,
+            PaperRiskState,
+        ):
             raise TypeError(
                 "risk_state_provider must return PaperRiskState"
             )
 
-        # Execute through the existing pipeline.
+        # Send the trade through the existing
+        # TradingPipelineService.
         #
-        # This is still paper-only because TradingPipelineService is
-        # constructed with the existing PaperExecutionGateway.
+        # TradingPipelineService is responsible for:
+        # - AI decision
+        # - Risk Engine
+        # - position sizing
+        # - paper execution
+        #
+        # No live broker order is allowed.
         result = await self.pipeline.execute_paper(
             symbol=self.config.symbol,
             timeframe=self.config.timeframe,
             candles=candles,
             specification=self.specification,
-            account_equity=float(account_equity),
+            account_equity=float(
+                account_equity
+            ),
             risk_state=risk_state,
         )
 
@@ -355,7 +434,9 @@ class AutomaticEntryWorker:
             default=None,
         )
 
-        executed = execution_result is not None
+        executed = (
+            execution_result is not None
+        )
 
         status = self._get_value(
             execution_result,
@@ -373,15 +454,22 @@ class AutomaticEntryWorker:
         persisted = False
         persisted_trade = None
 
+        # Only attempt persistence after a real
+        # paper execution was returned.
         if executed:
-            persisted, persisted_trade = await self._persist_execution(
+            (
+                persisted,
+                persisted_trade,
+            ) = await self._persist_execution(
                 result
             )
 
         logger.info(
             "RAYMOND Stage 17.6 entry cycle: "
-            "action=%s direction=%s signal=%s confidence=%s "
-            "score=%s executed=%s status=%s order_id=%s persisted=%s",
+            "action=%s direction=%s signal=%s "
+            "confidence=%s score=%s "
+            "executed=%s status=%s "
+            "order_id=%s persisted=%s",
             action,
             direction,
             signal,
@@ -407,8 +495,10 @@ class AutomaticEntryWorker:
         """
 
         logger.info(
-            "RAYMOND Stage 17.6 automatic paper-entry worker started: "
-            "symbol=%s timeframe=%s interval=%ss enabled=%s",
+            "RAYMOND Stage 17.6 automatic "
+            "paper-entry worker started: "
+            "symbol=%s timeframe=%s interval=%ss "
+            "enabled=%s",
             self.config.symbol,
             self.config.timeframe,
             self.config.interval_seconds,
@@ -418,6 +508,7 @@ class AutomaticEntryWorker:
         self._stop_event.clear()
 
         while not self._stop_event.is_set():
+
             try:
                 await self.run_once()
 
@@ -426,7 +517,8 @@ class AutomaticEntryWorker:
 
             except Exception:
                 logger.exception(
-                    "RAYMOND Stage 17.6 automatic entry cycle failed"
+                    "RAYMOND Stage 17.6 automatic "
+                    "entry cycle failed"
                 )
 
             try:
@@ -434,30 +526,42 @@ class AutomaticEntryWorker:
                     self._stop_event.wait(),
                     timeout=max(
                         1.0,
-                        float(self.config.interval_seconds),
+                        float(
+                            self.config.interval_seconds
+                        ),
                     ),
                 )
+
             except asyncio.TimeoutError:
                 continue
 
         logger.info(
-            "RAYMOND Stage 17.6 automatic paper-entry worker stopped"
+            "RAYMOND Stage 17.6 automatic "
+            "paper-entry worker stopped"
         )
 
     async def start(self) -> None:
-        """Start the worker as a background asyncio task."""
-        if self._task is not None and not self._task.done():
+        """Start the worker as a background task."""
+
+        if (
+            self._task is not None
+            and not self._task.done()
+        ):
             return
 
         self._stop_event.clear()
 
         self._task = asyncio.create_task(
             self.run(),
-            name="raymond-stage-17-6-automatic-entry",
+            name=(
+                "raymond-stage-17-6-"
+                "automatic-entry"
+            ),
         )
 
     async def stop(self) -> None:
         """Stop the worker cleanly."""
+
         self._stop_event.set()
 
         task = self._task
@@ -468,6 +572,7 @@ class AutomaticEntryWorker:
         if not task.done():
             try:
                 await task
+
             except asyncio.CancelledError:
                 pass
 
@@ -475,5 +580,9 @@ class AutomaticEntryWorker:
 
     @property
     def running(self) -> bool:
-        """Whether the background worker is currently running."""
-        return self._task is not None and not self._task.done()
+        """Return whether the worker is running."""
+
+        return (
+            self._task is not None
+            and not self._task.done()
+        )
