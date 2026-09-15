@@ -54,8 +54,9 @@ class AutomaticEntryWorker:
     """
     Stage 17.6 automatic paper-entry worker.
 
-    The worker delegates the actual trading decision, risk evaluation,
-    sizing and paper execution to the existing TradingPipelineService.
+    The worker deliberately delegates the actual trading decision,
+    risk evaluation, sizing and paper execution to the existing
+    TradingPipelineService.
 
     Persistence is delegated to the existing Stage 15 persistence
     function in app.main after a paper execution is accepted.
@@ -100,19 +101,64 @@ class AutomaticEntryWorker:
     async def _fetch_market_chart(
         self,
     ) -> list[dict[str, Any]]:
-        """Fetch fresh online paper-market candles."""
+        """
+        Fetch and normalize fresh online paper-market candles.
+
+        The online market API returns a response dictionary containing
+        the actual chronological candle list under the "candles" key.
+        """
+
         chart = await _fetch_chart(
             self.config.symbol,
             self.config.timeframe,
             self.config.candle_limit,
         )
 
-        if not chart:
+        if isinstance(chart, dict):
+            candles = chart.get("candles")
+
+            if candles is None:
+                candles = chart.get("bars")
+
+        else:
+            candles = chart
+
+        if not isinstance(candles, list):
+            raise RuntimeError(
+                "Online market feed returned an invalid candle payload"
+            )
+
+        if not candles:
             raise RuntimeError(
                 "Online market feed returned no candles"
             )
 
-        return chart
+        normalized: list[dict[str, Any]] = []
+
+        for candle in candles:
+            if not isinstance(candle, dict):
+                raise RuntimeError(
+                    "Online market feed returned a non-dictionary candle"
+                )
+
+            required = (
+                "open",
+                "high",
+                "low",
+                "close",
+            )
+
+            if any(
+                candle.get(field) is None
+                for field in required
+            ):
+                raise RuntimeError(
+                    "Online market feed returned an incomplete candle"
+                )
+
+            normalized.append(candle)
+
+        return normalized
 
     @staticmethod
     def _get_value(
@@ -121,6 +167,7 @@ class AutomaticEntryWorker:
         default: Any = None,
     ) -> Any:
         """Read an attribute or mapping value safely."""
+
         for name in names:
             if obj is None:
                 continue
@@ -146,6 +193,7 @@ class AutomaticEntryWorker:
         decision: Any,
     ) -> str:
         """Return the normalized decision action."""
+
         action = cls._get_value(
             decision,
             "action",
@@ -162,6 +210,7 @@ class AutomaticEntryWorker:
         decision: Any,
     ) -> str:
         """Return the normalized trade direction."""
+
         direction = cls._get_value(
             decision,
             "direction",
@@ -178,6 +227,7 @@ class AutomaticEntryWorker:
         decision: Any,
     ) -> str:
         """Return the displayed signal."""
+
         signal = cls._get_value(
             decision,
             "signal",
@@ -407,10 +457,9 @@ class AutomaticEntryWorker:
                 "risk_state_provider must return PaperRiskState"
             )
 
-        # Send the trade through the existing
-        # TradingPipelineService.
+        # Execute through the existing pipeline.
         #
-        # TradingPipelineService is responsible for:
+        # TradingPipelineService remains responsible for:
         # - AI decision
         # - Risk Engine
         # - position sizing
@@ -489,7 +538,9 @@ class AutomaticEntryWorker:
             "persisted_trade": persisted_trade,
         }
 
-    async def run(self) -> None:
+    async def run(
+        self,
+    ) -> None:
         """
         Run continuously until stop() is requested.
         """
@@ -540,7 +591,9 @@ class AutomaticEntryWorker:
             "paper-entry worker stopped"
         )
 
-    async def start(self) -> None:
+    async def start(
+        self,
+    ) -> None:
         """Start the worker as a background task."""
 
         if (
@@ -559,7 +612,9 @@ class AutomaticEntryWorker:
             ),
         )
 
-    async def stop(self) -> None:
+    async def stop(
+        self,
+    ) -> None:
         """Stop the worker cleanly."""
 
         self._stop_event.set()
@@ -570,6 +625,7 @@ class AutomaticEntryWorker:
             return
 
         if not task.done():
+
             try:
                 await task
 
@@ -579,8 +635,10 @@ class AutomaticEntryWorker:
         self._task = None
 
     @property
-    def running(self) -> bool:
-        """Return whether the worker is running."""
+    def running(
+        self,
+    ) -> bool:
+        """Return whether the background worker is running."""
 
         return (
             self._task is not None
