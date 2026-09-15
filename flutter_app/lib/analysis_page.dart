@@ -268,6 +268,18 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
+  String _formatNullable(
+    dynamic value, {
+    int decimals = 2,
+    String fallback = '--',
+  }) {
+    return _format(
+      value,
+      decimals: decimals,
+      fallback: fallback,
+    );
+  }
+
   String _percent(dynamic value) {
     final number =
         _numberNullable(value);
@@ -781,8 +793,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
             ),
             border: Border.all(
               color:
-                  signalColor.withOpacity(
-                0.55,
+                  signalColor.withValues(
+                alpha: 0.55,
               ),
             ),
           ),
@@ -933,17 +945,14 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
     final advisory =
         _map(
-      comparison['advisory'],
-    );
+          comparison['advisory'],
+        );
 
     final comparisonResult =
         _map(
-      comparison['comparison'],
-    );
+          comparison['comparison'],
+        );
 
-    // api_service.dart normalizes these fields,
-    // but the fallback below also supports the
-    // original nested API structure.
     final advisoryDirection =
         _string(
       comparison['advisory_direction'],
@@ -1237,8 +1246,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
         ),
         border: Border.all(
           color:
-              color.withOpacity(
-            0.35,
+              color.withValues(
+            alpha: 0.35,
           ),
         ),
       ),
@@ -1841,27 +1850,27 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
     final comparisonMap =
         _map(
-      comparison['comparison'],
-    );
+          comparison['comparison'],
+        );
 
     final summary =
         _string(
-      comparison['summary'],
-      fallback: _string(
-        comparisonMap['summary'],
-        fallback:
-            'No comparison summary available.',
-      ),
-    );
+          comparison['summary'],
+          fallback: _string(
+            comparisonMap['summary'],
+            fallback:
+                'No comparison summary available.',
+          ),
+        );
 
     final warning =
         _string(
-      comparison['warning'],
-      fallback: _string(
-        comparisonMap['warning'],
-        fallback: '',
-      ),
-    );
+          comparison['warning'],
+          fallback: _string(
+            comparisonMap['warning'],
+            fallback: '',
+          ),
+        );
 
     return _section(
       title: '🧩 DECISION REASONING',
@@ -1898,37 +1907,37 @@ class _AnalysisPageState extends State<AnalysisPage> {
   Widget _technicalIndicatorsSection() {
     final indicators =
         _map(
-      analysis['indicators'],
-    );
+          analysis['indicators'],
+        );
 
     final values =
         _map(
-      indicators['indicators'],
-    );
+          indicators['indicators'],
+        );
 
     final trend =
         _string(
-      _map(
-        indicators['analysis'],
-      )['trend'],
-      fallback:
-          _string(
-        indicators['trend'],
-        fallback: '--',
-      ),
-    );
+          _map(
+            indicators['analysis'],
+          )['trend'],
+          fallback:
+              _string(
+            indicators['trend'],
+            fallback: '--',
+          ),
+        );
 
     final signal =
         _string(
-      _map(
-        indicators['analysis'],
-      )['signal'],
-      fallback:
-          _string(
-        indicators['signal'],
-        fallback: '--',
-      ),
-    );
+          _map(
+            indicators['analysis'],
+          )['signal'],
+          fallback:
+              _string(
+            indicators['signal'],
+            fallback: '--',
+          ),
+        );
 
     final score =
         _numberNullable(
@@ -2033,44 +2042,44 @@ class _AnalysisPageState extends State<AnalysisPage> {
   Widget _safetySection() {
     final safety =
         _map(
-      analysis['safety'],
-    );
+          analysis['safety'],
+        );
 
     final paper =
         _bool(
-      safety['paper_trading_enabled'],
-      fallback: true,
-    );
+          safety['paper_trading_enabled'],
+          fallback: true,
+        );
 
     final live =
         _bool(
-      safety['live_trading_enabled'],
-      fallback: false,
-    );
+          safety['live_trading_enabled'],
+          fallback: false,
+        );
 
     final execution =
         _bool(
-      safety['execution_authorized'],
-      fallback: false,
-    );
+          safety['execution_authorized'],
+          fallback: false,
+        );
 
     final broker =
         _bool(
-      safety['broker_orders_allowed'],
-      fallback: false,
-    );
+          safety['broker_orders_allowed'],
+          fallback: false,
+        );
 
     final riskBypass =
         _bool(
-      safety['risk_engine_bypass'],
-      fallback: false,
-    );
+          safety['risk_engine_bypass'],
+          fallback: false,
+        );
 
     final step13Replaced =
         _bool(
-      safety['step13_replaced'],
-      fallback: false,
-    );
+          safety['step13_replaced'],
+          fallback: false,
+        );
 
     return _section(
       title: '🛡️ SAFETY PANEL',
@@ -2126,7 +2135,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
             ),
             border: Border.all(
               color: Colors.green
-                  .withOpacity(0.5),
+                  .withValues(
+                alpha: 0.5,
+              ),
             ),
           ),
           child: const Column(
@@ -2289,8 +2300,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
         ),
         border: Border.all(
           color:
-              color.withOpacity(
-            0.5,
+              color.withValues(
+            alpha: 0.5,
           ),
         ),
       ),
@@ -2363,8 +2374,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
         ),
         border: Border.all(
           color:
-              Colors.orange.withOpacity(
-            0.5,
+              Colors.orange.withValues(
+            alpha: 0.5,
           ),
         ),
       ),
