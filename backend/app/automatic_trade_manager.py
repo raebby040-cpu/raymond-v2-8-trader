@@ -5,7 +5,9 @@ Stage 17.5
 
 ADDITIVE ONLY.
 
-This module does NOT replace or modify:
+This module manages an ALREADY OPEN paper position.
+
+It does NOT replace or modify:
 - the 9 brains
 - indicators
 - existing strategy
@@ -13,10 +15,9 @@ This module does NOT replace or modify:
 - risk engine
 - entry pipeline
 - paper execution gateway
-- existing persistent position system
+- persistent position system
 - existing lifecycle manager
-
-This manager is responsible only for an ALREADY OPEN paper position.
+- existing break-even/trailing/partial manager
 
 Possible decisions:
 - HOLD
@@ -26,13 +27,15 @@ Possible decisions:
 - MODIFY_SL_TP
 
 Safety:
-- Paper only
-- Read only decision layer
+- Paper decision layer only
+- Never creates a position
+- Never opens a trade
 - Never contacts MT5
 - Never contacts a live broker
-- Never creates a new position
 - Never widens an existing stop-loss
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
@@ -50,15 +53,13 @@ class AutomaticManagementAction(str, Enum):
 @dataclass(frozen=True)
 class AutomaticManagementConfig:
     """
-    Configuration for automatic management.
-
-    These are deliberately conservative defaults.
+    Conservative configuration for automatic position management.
     """
 
-    # When profit reaches this many R, protection can begin.
+    # Begin protection once profit reaches this many R.
     profit_protection_r: float = 1.0
 
-    # Amount of the original risk that may be locked as profit.
+    # Lock this much of the ORIGINAL risk as profit.
     lock_profit_r: float = 0.25
 
     # Strong reversal threshold.
@@ -67,13 +68,13 @@ class AutomaticManagementConfig:
     # Trailing distance in price units.
     trailing_distance: float = 5.0
 
-    # Minimum stop movement before another modification.
+    # Minimum stop movement before another SL modification.
     trailing_step: float = 1.0
 
-    # Allow TP extension after strong profitable continuation.
+    # Allow TP extension after this many R.
     extend_tp_after_r: float = 2.0
 
-    # Distance added beyond current price when extending TP.
+    # Distance beyond current price for TP extension.
     tp_extension_distance: float = 5.0
 
     def validate(self) -> None:
@@ -118,8 +119,7 @@ class AutomaticManagementDecision:
     """
     Decision produced by the automatic trade manager.
 
-    This is a decision only.
-    It does not execute anything.
+    This object does not execute anything.
     """
 
     action: AutomaticManagementAction
@@ -158,9 +158,9 @@ class AutomaticTradeManager:
     """
     Higher-level management decision engine.
 
-    The existing RAYMOND entry system decides whether to OPEN.
+    Existing RAYMOND components decide whether to OPEN.
 
-    This manager decides what to do AFTER a position is already open.
+    This component decides what to do AFTER a position is open.
 
     It can:
         HOLD
@@ -195,6 +195,10 @@ class AutomaticTradeManager:
         entry_price: float,
         current_price: float,
     ) -> float:
+        """
+        Positive value means the position is profitable.
+        Negative value means the position is losing.
+        """
 
         direction = direction.lower()
 
@@ -213,6 +217,13 @@ class AutomaticTradeManager:
         entry_price: float,
         stop_loss: Optional[float],
     ) -> float:
+        """
+        Calculate a positive price-distance risk.
+
+        NOTE:
+        This is intended to work with the original protective
+        stop or another stable 1R reference.
+        """
 
         if stop_loss is None:
             raise ValueError(
@@ -237,7 +248,16 @@ class AutomaticTradeManager:
         entry_price: float,
         current_price: float,
         stop_loss: Optional[float],
+        initial_stop_loss: Optional[float] = None,
     ) -> float:
+        """
+        Calculate current profit in R.
+
+        If initial_stop_loss is available, it is preferred.
+
+        This prevents R from changing artificially when an
+        existing stop has already been moved to breakeven/profit.
+        """
 
         profit = cls.profit_distance(
             direction,
@@ -245,9 +265,15 @@ class AutomaticTradeManager:
             current_price,
         )
 
+        risk_reference = (
+            initial_stop_loss
+            if initial_stop_loss is not None
+            else stop_loss
+        )
+
         risk = cls.risk_distance(
             entry_price,
-            stop_loss,
+            risk_reference,
         )
 
         return profit / risk
@@ -262,6 +288,15 @@ class AutomaticTradeManager:
         old_stop: Optional[float],
         new_stop: float,
     ) -> bool:
+        """
+        A stop may only move in the protective direction.
+
+        BUY:
+            higher stop = improvement
+
+        SELL:
+            lower stop = improvement
+        """
 
         if old_stop is None:
             return True
@@ -283,15 +318,35 @@ class AutomaticTradeManager:
         direction: str,
         entry_price: float,
         stop_loss: float,
+        current_price: Optional[float] = None,
     ) -> bool:
+        """
+        Validate that a stop is on the protective side.
+
+        IMPORTANT:
+        A stop is allowed to move beyond entry once the trade
+        becomes profitable.
+
+        BUY:
+            stop must remain below current market price.
+
+        SELL:
+            stop must remain above current market price.
+        """
 
         direction = direction.lower()
 
+        reference_price = (
+            current_price
+            if current_price is not None
+            else entry_price
+        )
+
         if direction == "buy":
-            return stop_loss < entry_price
+            return stop_loss < reference_price
 
         if direction == "sell":
-            return stop_loss > entry_price
+            return stop_loss > reference_price
 
         raise ValueError(
             "direction must be BUY or SELL"
@@ -317,6 +372,44 @@ class AutomaticTradeManager:
         )
 
     # ============================================================
+    # DECISION HELPERS
+    # ============================================================
+
+    @staticmethod
+    def _close_decision(
+        *,
+        trade_id: str,
+        current_r: float,
+        reason: str,
+    ) -> AutomaticManagementDecision:
+
+        return AutomaticManagementDecision(
+            action=AutomaticManagementAction.CLOSE,
+            trade_id=trade_id,
+            new_stop_loss=None,
+            new_take_profit=None,
+            profit_r=current_r,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _hold_decision(
+        *,
+        trade_id: str,
+        current_r: float,
+        reason: str,
+    ) -> AutomaticManagementDecision:
+
+        return AutomaticManagementDecision(
+            action=AutomaticManagementAction.HOLD,
+            trade_id=trade_id,
+            new_stop_loss=None,
+            new_take_profit=None,
+            profit_r=current_r,
+            reason=reason,
+        )
+
+    # ============================================================
     # MAIN DECISION
     # ============================================================
 
@@ -331,7 +424,22 @@ class AutomaticTradeManager:
         take_profit: Optional[float],
         market_strength: float = 0.0,
         thesis_invalidated: bool = False,
+        initial_stop_loss: Optional[float] = None,
     ) -> AutomaticManagementDecision:
+        """
+        Evaluate one already-open paper position.
+
+        market_strength:
+            -1.0 = strong bearish pressure
+             0.0 = neutral
+            +1.0 = strong bullish pressure
+
+        thesis_invalidated:
+            True means the original trade thesis is no longer valid.
+
+        initial_stop_loss:
+            Original SL used to establish stable 1R calculations.
+        """
 
         direction = direction.lower()
 
@@ -341,6 +449,11 @@ class AutomaticTradeManager:
         }:
             raise ValueError(
                 "direction must be BUY or SELL"
+            )
+
+        if not trade_id.strip():
+            raise ValueError(
+                "trade_id is required"
             )
 
         if entry_price <= 0:
@@ -362,16 +475,24 @@ class AutomaticTradeManager:
             direction,
             entry_price,
             stop_loss,
+            current_price=current_price,
         ):
             raise ValueError(
-                "Existing stop_loss is invalid for position direction"
+                "Existing stop_loss is invalid for "
+                "the current position direction/price"
+            )
+
+        if not -1.0 <= market_strength <= 1.0:
+            raise ValueError(
+                "market_strength must be between -1.0 and 1.0"
             )
 
         current_r = self.profit_r(
-            direction,
-            entry_price,
-            current_price,
-            stop_loss,
+            direction=direction,
+            entry_price=entry_price,
+            current_price=current_price,
+            stop_loss=stop_loss,
+            initial_stop_loss=initial_stop_loss,
         )
 
         # ========================================================
@@ -380,15 +501,12 @@ class AutomaticTradeManager:
 
         if thesis_invalidated:
 
-            return AutomaticManagementDecision(
-                action=AutomaticManagementAction.CLOSE,
+            return self._close_decision(
                 trade_id=trade_id,
-                new_stop_loss=None,
-                new_take_profit=None,
-                profit_r=current_r,
+                current_r=current_r,
                 reason=(
                     "Original trade thesis has been invalidated; "
-                    "close the paper position."
+                    "close the paper position at the current market price."
                 ),
             )
 
@@ -412,15 +530,13 @@ class AutomaticTradeManager:
 
         if strong_reversal and current_r < 0:
 
-            return AutomaticManagementDecision(
-                action=AutomaticManagementAction.CLOSE,
+            return self._close_decision(
                 trade_id=trade_id,
-                new_stop_loss=None,
-                new_take_profit=None,
-                profit_r=current_r,
+                current_r=current_r,
                 reason=(
                     "Strong market reversal detected while "
-                    "the position is losing; close now."
+                    "the position is losing; close at the "
+                    "current market price."
                 ),
             )
 
@@ -430,15 +546,21 @@ class AutomaticTradeManager:
 
         if current_r >= self.config.profit_protection_r:
 
+            risk_distance = self.risk_distance(
+                entry_price,
+                (
+                    initial_stop_loss
+                    if initial_stop_loss is not None
+                    else stop_loss
+                ),
+            )
+
             if direction == "buy":
 
                 protected_stop = (
                     entry_price
                     + (
-                        self.risk_distance(
-                            entry_price,
-                            stop_loss,
-                        )
+                        risk_distance
                         * self.config.lock_profit_r
                     )
                 )
@@ -458,10 +580,7 @@ class AutomaticTradeManager:
                 protected_stop = (
                     entry_price
                     - (
-                        self.risk_distance(
-                            entry_price,
-                            stop_loss,
-                        )
+                        risk_distance
                         * self.config.lock_profit_r
                     )
                 )
@@ -476,18 +595,21 @@ class AutomaticTradeManager:
                     trailing_stop,
                 )
 
-            if (
+            stop_change_is_valid = (
                 self.stop_is_valid(
                     direction,
                     entry_price,
                     candidate_stop,
+                    current_price=current_price,
                 )
                 and self.stop_improves(
                     direction,
                     stop_loss,
                     candidate_stop,
                 )
-            ):
+            )
+
+            if stop_change_is_valid:
 
                 if (
                     abs(
@@ -528,8 +650,7 @@ class AutomaticTradeManager:
 
         if (
             continuation
-            and current_r
-            >= self.config.extend_tp_after_r
+            and current_r >= self.config.extend_tp_after_r
             and take_profit is not None
         ):
 
@@ -566,8 +687,8 @@ class AutomaticTradeManager:
                     profit_r=current_r,
                     reason=(
                         "Strong continuation detected; "
-                        "extend take-profit to allow the trend "
-                        "to continue."
+                        "extend take-profit to allow the "
+                        "trend to continue."
                     ),
                 )
 
@@ -575,12 +696,9 @@ class AutomaticTradeManager:
         # 5. NOTHING REQUIRES CHANGE
         # ========================================================
 
-        return AutomaticManagementDecision(
-            action=AutomaticManagementAction.HOLD,
+        return self._hold_decision(
             trade_id=trade_id,
-            new_stop_loss=None,
-            new_take_profit=None,
-            profit_r=current_r,
+            current_r=current_r,
             reason=(
                 "Current market conditions do not require "
                 "closing or modifying the position."
@@ -591,5 +709,8 @@ class AutomaticTradeManager:
 def automatic_management_decision_to_dict(
     decision: AutomaticManagementDecision,
 ) -> dict:
+    """
+    Compatibility helper for API/dashboard serialization.
+    """
 
     return decision.to_dict()
