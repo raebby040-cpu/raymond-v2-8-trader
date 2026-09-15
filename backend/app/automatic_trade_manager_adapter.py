@@ -1,62 +1,44 @@
 """
 RAYMOND v2.8 - Automatic Trade Manager Adapter
 
-Stage 17.5A
+Stage 17.5
 
-PURPOSE
--------
-Bridge the Stage 17.5 AutomaticTradeManager decision engine
-to the existing persistent paper-position system.
+ADDITIVE INTEGRATION LAYER.
 
-This module is ADDITIVE ONLY.
+Purpose:
+    Connect the existing RAYMOND decision output to the new
+    AutomaticTradeManager without changing the existing:
 
-It does NOT replace or modify:
-- the 9 brains
-- indicators
-- existing strategy
-- AI scoring
-- Risk Engine
-- entry pipeline
-- paper execution gateway
-- PositionRepository
-- PaperPositionManager
-- lifecycle manager
-- break-even management
-- trailing management
-- partial-close management
+    - 9 brains
+    - indicators
+    - strategy
+    - AI scoring
+    - risk engine
+    - entry pipeline
+    - paper execution gateway
+    - persistent position system
+    - existing lifecycle manager
+    - break-even manager
+    - trailing manager
+    - partial-close manager
 
-SAFETY
-------
-- PAPER ONLY
-- NO MT5
-- NO Exness
-- NO broker connection
-- NO live orders
-- NO new position creation
-- NO Risk Engine bypass
+This module ONLY translates existing information into a
+management decision.
 
-The adapter only manages positions that already exist in
-the persistent paper-position database.
-
-IMPORTANT
----------
-The existing PaperPositionManager remains responsible for the
-existing mechanical management system.
-
-This adapter adds higher-level decisions:
-    HOLD
-    CLOSE
-    MODIFY_SL
-    MODIFY_TP
-    MODIFY_SL_TP
-
-The adapter never creates an entry.
+It does NOT:
+    - create positions
+    - open trades
+    - place broker orders
+    - contact MT5
+    - bypass Risk Engine
+    - close database positions
+    - modify database state
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 try:
     from .automatic_trade_manager import (
@@ -64,84 +46,48 @@ try:
         AutomaticManagementDecision,
         AutomaticTradeManager,
     )
-    from .models import PositionStatus
-    from .position_repository import PositionRepository
 except ImportError:
     from automatic_trade_manager import (
         AutomaticManagementAction,
         AutomaticManagementDecision,
         AutomaticTradeManager,
     )
-    from models import PositionStatus
-    from position_repository import PositionRepository
-
-
-# ============================================================
-# RESULT
-# ============================================================
 
 
 @dataclass(frozen=True)
-class AutomaticManagementResult:
+class AutomaticManagementInput:
     """
-    Result of evaluating one persistent paper position.
-
-    This object describes what the adapter decided/applied.
+    Normalized read-only information required by the manager.
     """
 
-    position_id: str
-    trade_id: Optional[str]
-    symbol: str
-    action: str
-    applied: bool
-    profit_r: Optional[float]
-    reason: str
-    error: Optional[str] = None
+    trade_id: str
+    direction: str
+    entry_price: float
+    current_price: float
+    stop_loss: float
+    take_profit: Optional[float]
 
-    paper_only: bool = True
-    live_trading_enabled: bool = False
-    broker_order_allowed: bool = False
+    initial_stop_loss: Optional[float] = None
+    risk_1r: Optional[float] = None
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "position_id": self.position_id,
-            "trade_id": self.trade_id,
-            "symbol": self.symbol,
-            "action": self.action,
-            "applied": self.applied,
-            "profit_r": self.profit_r,
-            "reason": self.reason,
-            "error": self.error,
-            "safety": {
-                "paper_only": self.paper_only,
-                "live_trading_enabled": self.live_trading_enabled,
-                "broker_order_allowed": self.broker_order_allowed,
-            },
-        }
-
-
-# ============================================================
-# ADAPTER
-# ============================================================
+    market_strength: float = 0.0
+    thesis_invalidated: bool = False
 
 
 class AutomaticTradeManagerAdapter:
     """
-    Safe bridge between AutomaticTradeManager and PositionRepository.
+    Safe adapter around AutomaticTradeManager.
 
-    The adapter receives an already-open persistent position and
-    applies only paper/database state changes.
+    This class does not execute decisions.
 
-    It does not execute broker orders.
+    It only converts an existing persistent position and
+    existing strategy/AI information into a decision object.
     """
 
     def __init__(
         self,
-        db,
         manager: Optional[AutomaticTradeManager] = None,
     ) -> None:
-
-        self.db = db
 
         self.manager = (
             manager
@@ -149,623 +95,608 @@ class AutomaticTradeManagerAdapter:
             else AutomaticTradeManager()
         )
 
-    # ========================================================
-    # SAFETY
-    # ========================================================
-
-    @staticmethod
-    def _assert_paper_only() -> None:
-        """
-        Hard safety barrier.
-
-        This adapter must never become a live execution path.
-        """
-
-        live_trading_enabled = False
-        broker_orders_allowed = False
-        execution_authorized = False
-
-        if live_trading_enabled:
-            raise RuntimeError(
-                "AutomaticTradeManagerAdapter cannot operate "
-                "with live trading enabled."
-            )
-
-        if broker_orders_allowed:
-            raise RuntimeError(
-                "AutomaticTradeManagerAdapter cannot send "
-                "broker orders."
-            )
-
-        if execution_authorized:
-            raise RuntimeError(
-                "AutomaticTradeManagerAdapter cannot operate "
-                "with execution authorization enabled."
-            )
-
-    # ========================================================
+    # ============================================================
     # NORMALIZATION
-    # ========================================================
+    # ============================================================
 
     @staticmethod
-    def _direction(position) -> str:
-        direction = position.direction
+    def _value(
+        source: Any,
+        name: str,
+        default: Any = None,
+    ) -> Any:
+        """
+        Read either an object attribute or dictionary key.
+        """
 
-        value = getattr(
-            direction,
-            "value",
-            direction,
+        if source is None:
+            return default
+
+        if isinstance(source, dict):
+            return source.get(name, default)
+
+        return getattr(
+            source,
+            name,
+            default,
         )
 
-        value = str(value).lower()
+    @classmethod
+    def _direction(
+        cls,
+        position: Any,
+    ) -> str:
+        """
+        Normalize Position.direction.
 
-        if value not in {
+        Supports:
+            BUY
+            SELL
+            buy
+            sell
+            enum-like values
+        """
+
+        direction = cls._value(
+            position,
+            "direction",
+        )
+
+        if direction is None:
+            raise ValueError(
+                "Open position has no direction"
+            )
+
+        if hasattr(direction, "value"):
+            direction = direction.value
+
+        direction = str(direction).lower()
+
+        if direction not in {
             "buy",
             "sell",
         }:
             raise ValueError(
-                f"Unsupported position direction: {value}"
+                "Position direction must be BUY or SELL"
             )
 
-        return value
+        return direction
 
-    @staticmethod
-    def _current_stop(position) -> Optional[float]:
-        value = getattr(
-            position,
-            "current_stop_loss",
-            None,
-        )
+    @classmethod
+    def _trade_id(
+        cls,
+        position: Any,
+    ) -> str:
+        """
+        Prefer trade_id.
 
-        if value is None:
-            value = getattr(
-                position,
-                "stop_loss",
-                None,
-            )
+        Fall back to position_id so older persistent positions
+        can still be evaluated.
+        """
 
-        if value is None:
-            return None
-
-        return float(value)
-
-    @staticmethod
-    def _current_take_profit(
-        position,
-    ) -> Optional[float]:
-
-        value = getattr(
-            position,
-            "take_profit_1",
-            None,
-        )
-
-        if value is None:
-            value = getattr(
-                position,
-                "take_profit",
-                None,
-            )
-
-        if value is None:
-            return None
-
-        return float(value)
-
-    @staticmethod
-    def _trade_id(position) -> str:
-        trade_id = getattr(
+        trade_id = cls._value(
             position,
             "trade_id",
-            None,
         )
 
         if trade_id:
             return str(trade_id)
 
-        return str(
-            getattr(
-                position,
-                "position_id",
-                "",
-            )
+        position_id = cls._value(
+            position,
+            "position_id",
         )
 
-    # ========================================================
-    # DECISION INPUT
-    # ========================================================
-
-    @staticmethod
-    def _build_decision_inputs(
-        position,
-        current_price: float,
-        market_strength: float,
-        thesis_invalidated: bool,
-    ) -> dict[str, Any]:
-
-        return {
-            "trade_id": AutomaticTradeManagerAdapter._trade_id(
-                position
-            ),
-            "direction": AutomaticTradeManagerAdapter._direction(
-                position
-            ),
-            "entry_price": float(
-                position.entry_price
-            ),
-            "current_price": float(
-                current_price
-            ),
-            "stop_loss": AutomaticTradeManagerAdapter._current_stop(
-                position
-            ),
-            "take_profit": AutomaticTradeManagerAdapter._current_take_profit(
-                position
-            ),
-            "market_strength": float(
-                market_strength
-            ),
-            "thesis_invalidated": bool(
-                thesis_invalidated
-            ),
-        }
-
-    # ========================================================
-    # APPLY CLOSE
-    # ========================================================
-
-    def _apply_close(
-        self,
-        position,
-        current_price: float,
-        decision: AutomaticManagementDecision,
-    ) -> None:
-        """
-        Close the persistent PAPER position.
-
-        This changes database state only.
-
-        It does not send a broker close order.
-        """
-
-        PositionRepository.close(
-            self.db,
-            position.position_id,
-            exit_price=float(current_price),
-            management_action=(
-                "AUTOMATIC_TRADE_MANAGER_CLOSE"
-            ),
-        )
-
-    # ========================================================
-    # APPLY STOP LOSS
-    # ========================================================
-
-    def _apply_stop_loss(
-        self,
-        position,
-        new_stop_loss: float,
-    ) -> None:
-        """
-        Persist a tighter paper stop-loss.
-
-        The existing repository protects the original stop-loss
-        and updates only the current stop-loss.
-        """
-
-        old_stop = self._current_stop(
-            position
-        )
-
-        if old_stop is not None:
-
-            direction = self._direction(
-                position
-            )
-
-            if direction == "buy":
-                if float(new_stop_loss) <= float(old_stop):
-                    return
-
-            elif direction == "sell":
-                if float(new_stop_loss) >= float(old_stop):
-                    return
-
-        PositionRepository.update_stop_loss(
-            self.db,
-            position.position_id,
-            float(new_stop_loss),
-            management_action=(
-                "AUTOMATIC_TRADE_MANAGER_MODIFY_SL"
-            ),
-            management_status="protected",
-        )
-
-    # ========================================================
-    # APPLY TAKE PROFIT
-    # ========================================================
-
-    def _apply_take_profit(
-        self,
-        position,
-        new_take_profit: float,
-    ) -> None:
-        """
-        Persist a higher-level paper TP change.
-
-        The repository's generic state API does not expose a
-        dedicated TP mutation method, so this adapter performs
-        the minimal direct persistent-field update through the
-        existing SQLAlchemy position object.
-
-        No broker order is sent.
-        """
-
-        direction = self._direction(
-            position
-        )
-
-        entry_price = float(
-            position.entry_price
-        )
-
-        candidate = float(
-            new_take_profit
-        )
-
-        if direction == "buy":
-            if candidate <= entry_price:
-                raise ValueError(
-                    "BUY take-profit must remain above entry price"
-                )
-
-        else:
-            if candidate >= entry_price:
-                raise ValueError(
-                    "SELL take-profit must remain below entry price"
-                )
-
-        # Keep both Stage 16 fields and legacy compatibility field
-        # synchronized.
-        position.take_profit_1 = candidate
-        position.take_profit = candidate
-
-        position.last_management_action = (
-            "AUTOMATIC_TRADE_MANAGER_MODIFY_TP"
-        )
-
-        position.management_status = (
-            "protected"
-        )
-
-        from datetime import datetime
-
-        position.last_management_time = (
-            datetime.utcnow()
-        )
-
-        self.db.commit()
-        self.db.refresh(position)
-
-    # ========================================================
-    # APPLY SL + TP
-    # ========================================================
-
-    def _apply_stop_and_take_profit(
-        self,
-        position,
-        new_stop_loss: Optional[float],
-        new_take_profit: Optional[float],
-    ) -> None:
-        """
-        Apply both paper SL and TP changes.
-
-        The SL must improve the existing stop.
-        """
-
-        if new_stop_loss is not None:
-            self._apply_stop_loss(
-                position,
-                float(new_stop_loss),
-            )
-
-            position = PositionRepository.get_by_position_id(
-                self.db,
-                position.position_id,
-            )
-
-        if new_take_profit is not None:
-            self._apply_take_profit(
-                position,
-                float(new_take_profit),
-            )
-
-    # ========================================================
-    # APPLY DECISION
-    # ========================================================
-
-    def apply_decision(
-        self,
-        position,
-        decision: AutomaticManagementDecision,
-        current_price: float,
-    ) -> bool:
-        """
-        Apply a decision produced by AutomaticTradeManager.
-
-        Returns True when a state-changing action was applied.
-        """
-
-        self._assert_paper_only()
-
-        action = decision.action
-
-        if action == AutomaticManagementAction.HOLD:
-            return False
-
-        if action == AutomaticManagementAction.CLOSE:
-
-            self._apply_close(
-                position,
-                current_price,
-                decision,
-            )
-
-            return True
-
-        if action == AutomaticManagementAction.MODIFY_SL:
-
-            if decision.new_stop_loss is None:
-                return False
-
-            self._apply_stop_loss(
-                position,
-                float(decision.new_stop_loss),
-            )
-
-            return True
-
-        if action == AutomaticManagementAction.MODIFY_TP:
-
-            if decision.new_take_profit is None:
-                return False
-
-            self._apply_take_profit(
-                position,
-                float(decision.new_take_profit),
-            )
-
-            return True
-
-        if action == AutomaticManagementAction.MODIFY_SL_TP:
-
-            self._apply_stop_and_take_profit(
-                position,
-                decision.new_stop_loss,
-                decision.new_take_profit,
-            )
-
-            return True
+        if position_id:
+            return str(position_id)
 
         raise ValueError(
-            f"Unsupported automatic management action: {action}"
+            "Position has neither trade_id nor position_id"
         )
 
-    # ========================================================
-    # EVALUATE ONE POSITION
-    # ========================================================
+    @classmethod
+    def _entry_price(
+        cls,
+        position: Any,
+    ) -> float:
 
-    def evaluate_position(
-        self,
-        position,
-        current_price: float,
-        *,
-        market_strength: float = 0.0,
-        thesis_invalidated: bool = False,
-    ) -> AutomaticManagementResult:
-        """
-        Evaluate and, when appropriate, apply automatic management
-        to one already-open persistent paper position.
-
-        The caller supplies the market/strategy assessment.
-
-        This keeps the 9 brains and existing strategy untouched.
-        """
-
-        self._assert_paper_only()
-
-        position_id = str(
-            position.position_id
-        )
-
-        trade_id = getattr(
+        value = cls._value(
             position,
-            "trade_id",
+            "entry_price",
+        )
+
+        if value is None:
+            raise ValueError(
+                "Position has no entry_price"
+            )
+
+        return float(value)
+
+    @classmethod
+    def _current_price(
+        cls,
+        position: Any,
+        current_price: Optional[float],
+    ) -> float:
+
+        if current_price is not None:
+            return float(current_price)
+
+        value = cls._value(
+            position,
+            "current_price",
+        )
+
+        if value is None:
+            raise ValueError(
+                "Current market price is required"
+            )
+
+        return float(value)
+
+    @classmethod
+    def _current_stop(
+        cls,
+        position: Any,
+    ) -> float:
+        """
+        Prefer current_stop_loss.
+
+        Fall back to legacy stop_loss for compatibility.
+        """
+
+        value = cls._value(
+            position,
+            "current_stop_loss",
+        )
+
+        if value is None:
+            value = cls._value(
+                position,
+                "stop_loss",
+            )
+
+        if value is None:
+            raise ValueError(
+                "Open position has no stop_loss"
+            )
+
+        return float(value)
+
+    @classmethod
+    def _initial_stop(
+        cls,
+        position: Any,
+    ) -> Optional[float]:
+
+        value = cls._value(
+            position,
+            "initial_stop_loss",
+        )
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    @classmethod
+    def _risk_1r(
+        cls,
+        position: Any,
+    ) -> Optional[float]:
+
+        value = cls._value(
+            position,
+            "risk_1r",
+        )
+
+        if value is None:
+            return None
+
+        value = float(value)
+
+        if value <= 0:
+            return None
+
+        return value
+
+    @classmethod
+    def _take_profit(
+        cls,
+        position: Any,
+    ) -> Optional[float]:
+        """
+        Prefer take_profit_1.
+
+        Fall back to legacy take_profit.
+        """
+
+        value = cls._value(
+            position,
+            "take_profit_1",
+        )
+
+        if value is None:
+            value = cls._value(
+                position,
+                "take_profit",
+            )
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    # ============================================================
+    # MARKET-STRENGTH TRANSLATION
+    # ============================================================
+
+    @staticmethod
+    def _clamp_strength(
+        value: float,
+    ) -> float:
+        """
+        Keep market strength within the manager's safe range.
+        """
+
+        return max(
+            -1.0,
+            min(
+                1.0,
+                float(value),
+            ),
+        )
+
+    @classmethod
+    def market_strength_from_decision(
+        cls,
+        decision: Any,
+    ) -> float:
+        """
+        Translate existing RAYMOND decision information into
+        a normalized directional market-strength value.
+
+        This does NOT recalculate indicators.
+
+        Priority:
+
+        1. Explicit market_strength if already supplied.
+        2. Existing direction + confidence.
+        3. Existing technical/confluence score.
+        4. Neutral fallback.
+
+        The adapter deliberately remains conservative.
+        """
+
+        explicit = cls._value(
+            decision,
+            "market_strength",
             None,
         )
 
-        symbol = str(
-            position.symbol
+        if explicit is not None:
+            return cls._clamp_strength(
+                float(explicit)
+            )
+
+        direction = cls._value(
+            decision,
+            "direction",
+            None,
         )
 
-        # Never act on closed positions.
-        if position.status != PositionStatus.OPEN:
+        if hasattr(direction, "value"):
+            direction = direction.value
 
-            return AutomaticManagementResult(
-                position_id=position_id,
-                trade_id=trade_id,
-                symbol=symbol,
-                action=(
-                    AutomaticManagementAction.HOLD.value
-                ),
-                applied=False,
-                profit_r=None,
-                reason=(
-                    "Position is not open; "
-                    "automatic management skipped."
-                ),
-            )
+        if direction is None:
+            return 0.0
+
+        direction = str(direction).lower()
+
+        if direction not in {
+            "buy",
+            "sell",
+        }:
+            return 0.0
+
+        confidence = cls._value(
+            decision,
+            "confidence",
+            None,
+        )
+
+        if confidence is None:
+            confidence = 0.0
 
         try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            confidence = 0.0
 
-            inputs = self._build_decision_inputs(
-                position,
-                float(current_price),
-                float(market_strength),
-                bool(thesis_invalidated),
-            )
+        # Handle either 0-1 or percentage-style confidence.
+        if confidence > 1.0:
+            confidence /= 100.0
 
-            decision = self.manager.evaluate(
-                **inputs
-            )
-
-            applied = self.apply_decision(
-                position,
-                decision,
-                float(current_price),
-            )
-
-            return AutomaticManagementResult(
-                position_id=position_id,
-                trade_id=trade_id,
-                symbol=symbol,
-                action=decision.action.value,
-                applied=applied,
-                profit_r=decision.profit_r,
-                reason=decision.reason,
-            )
-
-        except Exception as exc:
-
-            return AutomaticManagementResult(
-                position_id=position_id,
-                trade_id=trade_id,
-                symbol=symbol,
-                action=(
-                    AutomaticManagementAction.HOLD.value
-                ),
-                applied=False,
-                profit_r=None,
-                reason=(
-                    "Automatic management evaluation "
-                    "was safely skipped because the "
-                    "position state was incompatible."
-                ),
-                error=str(exc),
-            )
-
-    # ========================================================
-    # EVALUATE SYMBOL
-    # ========================================================
-
-    def evaluate_symbol(
-        self,
-        symbol: str,
-        current_price: float,
-        *,
-        market_strength: float = 0.0,
-        thesis_invalidated: bool = False,
-    ) -> list[AutomaticManagementResult]:
-        """
-        Evaluate all open persistent paper positions for a symbol.
-
-        No new positions are created.
-        """
-
-        self._assert_paper_only()
-
-        normalized_symbol = (
-            str(symbol)
-            .strip()
-            .upper()
+        confidence = max(
+            0.0,
+            min(
+                1.0,
+                confidence,
+            ),
         )
 
-        if not normalized_symbol:
-            raise ValueError(
-                "symbol is required"
-            )
-
-        price = float(
-            current_price
+        technical_score = cls._value(
+            decision,
+            "technical_score",
+            None,
         )
 
-        if price <= 0:
-            raise ValueError(
-                "current_price must be greater than zero"
-            )
+        if technical_score is not None:
+            try:
+                score = float(technical_score)
 
-        positions = (
-            PositionRepository.get_open_positions(
-                self.db
-            )
-        )
+                # Typical score systems may be percentage-like.
+                if abs(score) > 1.0:
+                    score /= 100.0
 
-        results: list[
-            AutomaticManagementResult
-        ] = []
+                score = cls._clamp_strength(score)
 
-        for position in positions:
+                if direction == "buy":
+                    return cls._clamp_strength(
+                        max(
+                            confidence,
+                            score,
+                        )
+                    )
 
-            if (
-                str(position.symbol)
-                .strip()
-                .upper()
-                != normalized_symbol
-            ):
-                continue
-
-            results.append(
-                self.evaluate_position(
-                    position,
-                    price,
-                    market_strength=(
-                        market_strength
-                    ),
-                    thesis_invalidated=(
-                        thesis_invalidated
-                    ),
+                return cls._clamp_strength(
+                    min(
+                        -confidence,
+                        score,
+                    )
                 )
+
+            except (TypeError, ValueError):
+                pass
+
+        if direction == "buy":
+            return confidence
+
+        if direction == "sell":
+            return -confidence
+
+        return 0.0
+
+    # ============================================================
+    # THESIS VALIDATION
+    # ============================================================
+
+    @classmethod
+    def thesis_invalidated_from_decision(
+        cls,
+        decision: Any,
+        position: Any,
+    ) -> bool:
+        """
+        Determine whether the existing trade thesis appears
+        invalidated.
+
+        IMPORTANT:
+
+        We do NOT invent a new trading strategy here.
+
+        Explicit invalidation signals are honored when the
+        existing system already provides them.
+
+        Otherwise this remains False.
+
+        This prevents the adapter from unexpectedly closing
+        trades simply because a field is missing.
+        """
+
+        explicit = cls._value(
+            decision,
+            "thesis_invalidated",
+            None,
+        )
+
+        if explicit is not None:
+            return bool(explicit)
+
+        position_value = cls._value(
+            position,
+            "thesis_invalidated",
+            None,
+        )
+
+        if position_value is not None:
+            return bool(position_value)
+
+        return False
+
+    # ============================================================
+    # BUILD NORMALIZED INPUT
+    # ============================================================
+
+    @classmethod
+    def build_input(
+        cls,
+        *,
+        position: Any,
+        decision: Any = None,
+        current_price: Optional[float] = None,
+    ) -> AutomaticManagementInput:
+        """
+        Build the manager's normalized read-only input.
+        """
+
+        direction = cls._direction(
+            position
+        )
+
+        market_strength = (
+            cls.market_strength_from_decision(
+                decision
             )
+            if decision is not None
+            else 0.0
+        )
 
-        return results
+        thesis_invalidated = (
+            cls.thesis_invalidated_from_decision(
+                decision,
+                position,
+            )
+            if decision is not None
+            else False
+        )
 
-    # ========================================================
-    # READ-ONLY STATUS
-    # ========================================================
+        return AutomaticManagementInput(
+            trade_id=cls._trade_id(
+                position
+            ),
+            direction=direction,
+            entry_price=cls._entry_price(
+                position
+            ),
+            current_price=cls._current_price(
+                position,
+                current_price,
+            ),
+            stop_loss=cls._current_stop(
+                position
+            ),
+            take_profit=cls._take_profit(
+                position
+            ),
+            initial_stop_loss=cls._initial_stop(
+                position
+            ),
+            risk_1r=cls._risk_1r(
+                position
+            ),
+            market_strength=market_strength,
+            thesis_invalidated=thesis_invalidated,
+        )
+
+    # ============================================================
+    # EVALUATE
+    # ============================================================
+
+    def evaluate(
+        self,
+        *,
+        position: Any,
+        decision: Any = None,
+        current_price: Optional[float] = None,
+    ) -> AutomaticManagementDecision:
+        """
+        Evaluate an existing open position.
+
+        Returns a decision only.
+
+        No database mutation occurs.
+        No broker operation occurs.
+        """
+
+        data = self.build_input(
+            position=position,
+            decision=decision,
+            current_price=current_price,
+        )
+
+        return self.manager.evaluate(
+            trade_id=data.trade_id,
+            direction=data.direction,
+            entry_price=data.entry_price,
+            current_price=data.current_price,
+            stop_loss=data.stop_loss,
+            take_profit=data.take_profit,
+            market_strength=data.market_strength,
+            thesis_invalidated=data.thesis_invalidated,
+            initial_stop_loss=data.initial_stop_loss,
+        )
+
+    # ============================================================
+    # SERIALIZATION
+    # ============================================================
 
     @staticmethod
-    def status() -> dict[str, Any]:
+    def to_dict(
+        decision: AutomaticManagementDecision,
+    ) -> dict:
         """
-        Return the safety declaration for this adapter.
+        Convert a management decision into API/dashboard-safe
+        JSON-compatible data.
         """
 
-        return {
-            "component": (
-                "automatic_trade_manager_adapter"
-            ),
-            "stage": "17.5A",
-            "status": "available",
-            "capabilities": [
-                "HOLD",
-                "CLOSE",
-                "MODIFY_SL",
-                "MODIFY_TP",
-                "MODIFY_SL_TP",
-            ],
-            "safety": {
-                "paper_only": True,
-                "read_only_decision_layer": True,
-                "live_trading_enabled": False,
-                "execution_authorized": False,
-                "broker_orders_allowed": False,
-                "mt5_execution_allowed": False,
-                "risk_engine_bypass": False,
-                "creates_new_positions": False,
-            },
+        return decision.to_dict()
+
+    @staticmethod
+    def is_actionable(
+        decision: AutomaticManagementDecision,
+    ) -> bool:
+        """
+        Return True when the decision requires an action.
+
+        HOLD is intentionally non-actionable.
+        """
+
+        return (
+            decision.action
+            != AutomaticManagementAction.HOLD
+        )
+
+    @staticmethod
+    def is_close(
+        decision: AutomaticManagementDecision,
+    ) -> bool:
+
+        return (
+            decision.action
+            == AutomaticManagementAction.CLOSE
+        )
+
+    @staticmethod
+    def is_stop_modification(
+        decision: AutomaticManagementDecision,
+    ) -> bool:
+
+        return decision.action in {
+            AutomaticManagementAction.MODIFY_SL,
+            AutomaticManagementAction.MODIFY_SL_TP,
+        }
+
+    @staticmethod
+    def is_take_profit_modification(
+        decision: AutomaticManagementDecision,
+    ) -> bool:
+
+        return decision.action in {
+            AutomaticManagementAction.MODIFY_TP,
+            AutomaticManagementAction.MODIFY_SL_TP,
         }
 
 
-__all__ = [
-    "AutomaticManagementResult",
-    "AutomaticTradeManagerAdapter",
-]
+def evaluate_automatic_trade_management(
+    *,
+    position: Any,
+    decision: Any = None,
+    current_price: Optional[float] = None,
+    manager: Optional[AutomaticTradeManager] = None,
+) -> AutomaticManagementDecision:
+    """
+    Convenience function for future service/API integration.
+
+    This remains decision-only.
+    """
+
+    adapter = AutomaticTradeManagerAdapter(
+        manager=manager
+    )
+
+    return adapter.evaluate(
+        position=position,
+        decision=decision,
+        current_price=current_price,
+    )
