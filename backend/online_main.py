@@ -1,9 +1,28 @@
-"""Online deployment entrypoint for RAYMOND v2.8."""
+"""Online deployment entrypoint for RAYMOND v2.8.
+
+Stages started here:
+- 17.4.3 lifecycle-aware paper-position market loop
+- 17.5 automatic paper trade management
+- 17.6 automatic paper entry worker
+
+SAFETY:
+- Paper trading only.
+- No broker orders.
+- No MT5 execution.
+- No live trading.
+- Stage 17.6 delegates risk, sizing, execution and persistence to the
+  existing TradingPipelineService / Step 14 path.
+"""
 
 from datetime import datetime, timezone
 import asyncio
 
-from app.main import app
+from app.main import (
+    app,
+    build_symbol_specification,
+    get_paper_equity,
+    build_paper_risk_state,
+)
 from app.online_market_api import (
     router as online_market_router,
     _fetch_price,
@@ -22,6 +41,10 @@ from app.automatic_trade_management_service import (
     AutomaticTradeManagementService,
     AutomaticTradeManagementServiceConfig,
 )
+from app.automatic_entry_worker import (
+    AutomaticEntryWorker,
+    AutomaticEntryWorkerConfig,
+)
 from app.database import SessionLocal
 
 
@@ -29,43 +52,50 @@ from app.database import SessionLocal
 # ROUTERS
 # ---------------------------------------------------------------------------
 
-# Online public market-data and analysis routes.
 app.include_router(online_market_router)
-
-# Stage 16.4:
-# 8-brain advisory comparison API.
 app.include_router(advisory_analysis_router)
-
-# Stage 17.2:
-# Persistent paper-position management API.
-#
-# SAFETY:
-# - Paper positions only.
-# - No broker orders.
-# - No MT5 execution.
-# - Live trading remains disabled.
 app.include_router(paper_position_management_router)
+
+
+# ---------------------------------------------------------------------------
+# XAUUSD PAPER SYMBOL SPECIFICATION
+# ---------------------------------------------------------------------------
+#
+# Stage 17.6 requires the same SymbolSpecification shape used by the existing
+# Step 14 risk/execution pipeline. These values match the repository's tested
+# XAUUSD paper specification.
+# ---------------------------------------------------------------------------
+
+_XAUUSD_SPECIFICATION = build_symbol_specification(
+    {
+        "symbol": "XAUUSD",
+        "digits": 2,
+        "point": 0.01,
+        "tick_size": 0.01,
+        "tick_value": 1.0,
+        "tick_value_profit": 1.0,
+        "tick_value_loss": 1.0,
+        "contract_size": 100.0,
+        "volume_min": 0.01,
+        "volume_max": 100.0,
+        "volume_step": 0.01,
+        "volume_limit": 100.0,
+        "trade_mode": 4,
+        "trade_execution_mode": 0,
+        "trade_stops_level": 0,
+        "trade_freeze_level": 0,
+        "currency_base": "XAU",
+        "currency_profit": "USD",
+        "currency_margin": "USD",
+        "spread": 30,
+        "spread_float": True,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # STAGE 17.4.3
 # LIFECYCLE-AWARE AUTOMATIC PAPER POSITION MARKET LOOP
-# ---------------------------------------------------------------------------
-#
-# Existing worker:
-#
-# Public XAUUSD price
-#        ↓
-# Lifecycle engine
-#        ↓
-# SL / TP detection
-#        ↓
-# Persist closed positions
-#        ↓
-# Advanced paper-position management
-#        ↓
-# BE / trailing / partial management
-#
 # ---------------------------------------------------------------------------
 
 _paper_market_loop = None
@@ -73,25 +103,13 @@ _paper_market_loop_db = None
 
 
 async def _paper_market_price_provider(symbol: str) -> float:
-    """
-    Supply the automatic paper-position lifecycle/management loop
-    with the latest public market price.
-
-    SAFETY:
-    - Public market data only.
-    - No broker connection.
-    - No MT5 execution.
-    - No live trading.
-    """
+    """Return the latest public market price. Never executes a trade."""
 
     market_data = await _fetch_price(symbol)
-
     price = market_data.get("price")
 
     if price is None:
-        raise RuntimeError(
-            "Online market feed returned no usable price"
-        )
+        raise RuntimeError("Online market feed returned no usable price")
 
     return float(price)
 
@@ -100,51 +118,12 @@ async def _paper_market_price_provider(symbol: str) -> float:
 # STAGE 17.5
 # AUTOMATIC TRADE MANAGEMENT WORKER
 # ---------------------------------------------------------------------------
-#
-# This worker is ADDITIVE.
-#
-# It does not replace Stage 17.4.3.
-#
-# Flow:
-#
-# Open paper position
-#        ↓
-# Fresh public XAUUSD candles
-#        ↓
-# Existing indicators / AI decision pipeline
-#        ↓
-# Automatic Trade Manager
-#        ↓
-# HOLD / CLOSE / MODIFY SL / MODIFY TP / MODIFY SL+TP
-#        ↓
-# Persist approved SL/TP modifications
-#
-# CLOSE is currently decision-only.
-# Existing lifecycle closure remains authoritative.
-#
-# SAFETY:
-# - PAPER ONLY
-# - NO BROKER ORDERS
-# - NO MT5
-# - NO LIVE TRADING
-# - NO NEW POSITION CREATION
-# - NO RISK ENGINE BYPASS
-# ---------------------------------------------------------------------------
 
 _automatic_management_task = None
 
 
 async def _automatic_trade_management_worker():
-    """
-    Run Stage 17.5 automatic management every 30 seconds.
-
-    A fresh database session is created for every cycle.
-
-    This is intentional:
-    - prevents a long-lived SQLAlchemy session from becoming stale
-    - isolates management commits/rollbacks
-    - keeps this worker independent from the existing lifecycle worker
-    """
+    """Run Stage 17.5 automatic paper-position management every 30 seconds."""
 
     config = AutomaticTradeManagementServiceConfig(
         symbol="XAUUSD",
@@ -162,9 +141,7 @@ async def _automatic_trade_management_worker():
                 config=config,
             )
 
-            results = (
-                await service.evaluate_open_positions()
-            )
+            results = await service.evaluate_open_positions()
 
             for result in results:
                 print(
@@ -181,16 +158,13 @@ async def _automatic_trade_management_worker():
                 if result.error:
                     print(
                         "RAYMOND Stage 17.5 ERROR: "
-                        f"position={result.position_id} "
-                        f"{result.error}"
+                        f"position={result.position_id} {result.error}"
                     )
 
         except asyncio.CancelledError:
             raise
 
         except Exception as exc:
-            # Management failure must never bring down the
-            # Render web service or the existing lifecycle worker.
             print(
                 "RAYMOND Stage 17.5: "
                 "automatic management cycle failed safely: "
@@ -203,24 +177,86 @@ async def _automatic_trade_management_worker():
         await asyncio.sleep(30.0)
 
 
+# ---------------------------------------------------------------------------
+# STAGE 17.6
+# AUTOMATIC PAPER ENTRY WORKER
+# ---------------------------------------------------------------------------
+#
+# Flow:
+#
+# Fresh XAUUSD M15 candles
+#        -> existing indicators / AI decision engine
+#        -> WAIT: do nothing
+#        -> BUY/SELL: existing Step 14 risk + sizing
+#        -> existing PaperExecutionGateway
+#        -> existing persistence path
+#
+# This worker deliberately does NOT create positions directly and does NOT
+# duplicate the risk engine.
+# ---------------------------------------------------------------------------
+
+_automatic_entry_worker = None
+
+
+async def _automatic_entry_worker_task():
+    """Run Stage 17.6 automatic paper entries every 30 seconds."""
+
+    global _automatic_entry_worker
+
+    config = AutomaticEntryWorkerConfig(
+        symbol="XAUUSD",
+        timeframe="M15",
+        candle_limit=100,
+        interval_seconds=30.0,
+        enabled=True,
+    )
+
+    db = SessionLocal()
+
+    try:
+        _automatic_entry_worker = AutomaticEntryWorker(
+            db=db,
+            specification=_XAUUSD_SPECIFICATION,
+            account_equity_provider=get_paper_equity,
+            risk_state_provider=build_paper_risk_state,
+            config=config,
+        )
+
+        await _automatic_entry_worker.run()
+
+    except asyncio.CancelledError:
+        raise
+
+    except Exception as exc:
+        print(
+            "RAYMOND Stage 17.6: "
+            "automatic paper-entry worker failed safely: "
+            f"{exc}"
+        )
+
+    finally:
+        db.close()
+        _automatic_entry_worker = None
+
+
+_automatic_entry_task = None
+
+
+# ---------------------------------------------------------------------------
+# STARTUP
+# ---------------------------------------------------------------------------
+
 @app.on_event("startup")
 async def start_paper_position_market_loop():
-    """
-    Start both automatic paper-position workers.
-
-    Stage 17.4.3:
-        lifecycle + existing BE/trailing/partial management
-
-    Stage 17.5:
-        fresh market analysis + automatic trade management
-    """
+    """Start all automatic paper-position and paper-entry workers."""
 
     global _paper_market_loop
     global _paper_market_loop_db
     global _automatic_management_task
+    global _automatic_entry_task
 
     # ---------------------------------------------------------------
-    # STAGE 17.4.3 EXISTING WORKER
+    # STAGE 17.4.3 EXISTING LIFECYCLE WORKER
     # ---------------------------------------------------------------
 
     config = PaperPositionMarketLoopConfig.from_values(
@@ -252,7 +288,7 @@ async def start_paper_position_market_loop():
         )
 
     # ---------------------------------------------------------------
-    # STAGE 17.5 NEW WORKER
+    # STAGE 17.5 AUTOMATIC MANAGEMENT
     # ---------------------------------------------------------------
 
     if (
@@ -269,16 +305,60 @@ async def start_paper_position_market_loop():
             "(XAUUSD / M15 / 30s / PAPER ONLY)"
         )
 
+    # ---------------------------------------------------------------
+    # STAGE 17.6 AUTOMATIC ENTRY
+    # ---------------------------------------------------------------
+
+    if _automatic_entry_task is None or _automatic_entry_task.done():
+        _automatic_entry_task = asyncio.create_task(
+            _automatic_entry_worker_task()
+        )
+
+        print(
+            "RAYMOND Stage 17.6: "
+            "automatic paper-entry worker started "
+            "(XAUUSD / M15 / 30s / PAPER ONLY)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# SHUTDOWN
+# ---------------------------------------------------------------------------
 
 @app.on_event("shutdown")
 async def stop_paper_position_market_loop():
-    """
-    Stop all automatic paper-position workers cleanly.
-    """
+    """Stop all automatic paper workers cleanly."""
 
     global _paper_market_loop
     global _paper_market_loop_db
     global _automatic_management_task
+    global _automatic_entry_task
+    global _automatic_entry_worker
+
+    # ---------------------------------------------------------------
+    # STOP STAGE 17.6
+    # ---------------------------------------------------------------
+
+    if _automatic_entry_worker is not None:
+        try:
+            await _automatic_entry_worker.stop()
+        except Exception as exc:
+            print(
+                "RAYMOND Stage 17.6: "
+                f"worker stop warning: {exc}"
+            )
+
+    if _automatic_entry_task is not None:
+        _automatic_entry_task.cancel()
+
+        try:
+            await _automatic_entry_task
+        except asyncio.CancelledError:
+            pass
+
+        _automatic_entry_task = None
+
+    _automatic_entry_worker = None
 
     # ---------------------------------------------------------------
     # STOP STAGE 17.5
@@ -306,10 +386,7 @@ async def stop_paper_position_market_loop():
         _paper_market_loop_db.close()
         _paper_market_loop_db = None
 
-    print(
-        "RAYMOND: "
-        "paper-position workers stopped"
-    )
+    print("RAYMOND: paper-position and paper-entry workers stopped")
 
 
 # ---------------------------------------------------------------------------
@@ -318,18 +395,13 @@ async def stop_paper_position_market_loop():
 
 @app.get("/health", tags=["Health"])
 async def health():
-    """Lightweight health check for Render."""
+    """Lightweight Render health check with worker status."""
 
     return {
         "status": "healthy",
         "service": "raymond-v2-8-trader",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-
-        # ---------------------------------------------------------------
-        # SAFETY LOCK — LIVE TRADING REMAINS DISABLED.
-        # ---------------------------------------------------------------
         "live_trading_enabled": False,
-
         "paper_trading_enabled": True,
 
         "paper_position_market_loop": {
@@ -356,6 +428,18 @@ async def health():
             "close_execution_enabled": False,
         },
 
+        "automatic_paper_entry": {
+            "enabled": True,
+            "running": (
+                _automatic_entry_task is not None
+                and not _automatic_entry_task.done()
+            ),
+            "symbol": "XAUUSD",
+            "timeframe": "M15",
+            "interval_seconds": 30.0,
+            "paper_only": True,
+        },
+
         "safety": {
             "paper_only": True,
             "read_only": True,
@@ -364,4 +448,4 @@ async def health():
             "mt5_execution_allowed": False,
             "risk_engine_bypass": False,
         },
-}
+    }
