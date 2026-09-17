@@ -74,6 +74,8 @@ exactly 1.5R while retaining a hard minimum risk/reward floor.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 
 from enum import Enum
@@ -137,6 +139,74 @@ class AIDecisionConfig:
     def validate(self) -> None:
 
         """Validate AI configuration."""
+
+        integer_fields = {
+
+            "buy_score_threshold": self.buy_score_threshold,
+
+            "sell_score_threshold": self.sell_score_threshold,
+
+            "strong_confluence": self.strong_confluence,
+
+            "very_strong_confluence": self.very_strong_confluence,
+
+            "exceptional_confluence": self.exceptional_confluence,
+
+            "minimum_confluence": self.minimum_confluence,
+
+        }
+
+        for name, value in integer_fields.items():
+
+            if isinstance(value, bool) or not isinstance(value, int):
+
+                raise AIDecisionError(
+
+                    f"{name} must be an integer"
+
+                )
+
+        float_fields = {
+
+            "minimum_confidence": self.minimum_confidence,
+
+            "max_confidence": self.max_confidence,
+
+            "minimum_risk_reward": self.minimum_risk_reward,
+
+            "maximum_risk_reward": self.maximum_risk_reward,
+
+            "very_strong_confidence": self.very_strong_confidence,
+
+            "exceptional_confidence": self.exceptional_confidence,
+
+        }
+
+        for name, value in float_fields.items():
+
+            if isinstance(value, bool):
+
+                raise AIDecisionError(
+
+                    f"{name} must be numeric"
+
+                )
+
+            if not isinstance(value, (int, float)):
+
+                raise AIDecisionError(
+
+                    f"{name} must be numeric"
+
+                )
+
+            if not math.isfinite(float(value)):
+
+                raise AIDecisionError(
+
+                    f"{name} must be finite"
+
+                )
 
         if not 0 <= self.buy_score_threshold <= 100:
 
@@ -206,35 +276,45 @@ class AIDecisionConfig:
 
             )
 
-        if not 0 <= self.minimum_confluence <= 100:
+        confluence_values = {
+
+            "minimum_confluence": self.minimum_confluence,
+
+            "strong_confluence": self.strong_confluence,
+
+            "very_strong_confluence": self.very_strong_confluence,
+
+            "exceptional_confluence": self.exceptional_confluence,
+
+        }
+
+        for name, value in confluence_values.items():
+
+            if not 0 <= value <= 100:
+
+                raise AIDecisionError(
+
+                    f"{name} must be between 0 and 100"
+
+                )
+
+        if not (
+
+            self.minimum_confluence
+
+            <= self.strong_confluence
+
+            <= self.very_strong_confluence
+
+            <= self.exceptional_confluence
+
+        ):
 
             raise AIDecisionError(
 
-                "minimum_confluence must be between 0 and 100"
+                "Confluence thresholds must be ordered from "
 
-            )
-
-        if not 0 <= self.strong_confluence <= 100:
-
-            raise AIDecisionError(
-
-                "strong_confluence must be between 0 and 100"
-
-            )
-
-        if not 0 <= self.very_strong_confluence <= 100:
-
-            raise AIDecisionError(
-
-                "very_strong_confluence must be between 0 and 100"
-
-            )
-
-        if not 0 <= self.exceptional_confluence <= 100:
-
-            raise AIDecisionError(
-
-                "exceptional_confluence must be between 0 and 100"
+                "minimum to exceptional"
 
             )
 
@@ -251,6 +331,22 @@ class AIDecisionConfig:
             raise AIDecisionError(
 
                 "exceptional_confidence must be between 0 and 100"
+
+            )
+
+        if (
+
+            self.very_strong_confidence
+
+            > self.exceptional_confidence
+
+        ):
+
+            raise AIDecisionError(
+
+                "very_strong_confidence cannot exceed "
+
+                "exceptional_confidence"
 
             )
 
@@ -300,6 +396,22 @@ class TechnicalContext:
 
     market_pressure_available: bool = False
 
+    @staticmethod
+
+    def _is_finite_number(value: object) -> bool:
+
+        """Return True when value is a finite numeric value."""
+
+        return (
+
+            isinstance(value, (int, float))
+
+            and not isinstance(value, bool)
+
+            and math.isfinite(float(value))
+
+        )
+
     def validate(self) -> None:
 
         """Validate technical context."""
@@ -318,6 +430,14 @@ class TechnicalContext:
 
             raise AIDecisionError("timeframe is required")
 
+        if not self._is_finite_number(self.close):
+
+            raise AIDecisionError(
+
+                "close must be a finite number"
+
+            )
+
         if self.close <= 0:
 
             raise AIDecisionError(
@@ -326,11 +446,39 @@ class TechnicalContext:
 
             )
 
+        if isinstance(self.score, bool) or not isinstance(
+
+            self.score,
+
+            int,
+
+        ):
+
+            raise AIDecisionError(
+
+                "score must be an integer"
+
+            )
+
         if not 0 <= self.score <= 100:
 
             raise AIDecisionError(
 
                 "score must be between 0 and 100"
+
+            )
+
+        if isinstance(self.candles_used, bool) or not isinstance(
+
+            self.candles_used,
+
+            int,
+
+        ):
+
+            raise AIDecisionError(
+
+                "candles_used must be an integer"
 
             )
 
@@ -394,6 +542,8 @@ class TechnicalContext:
 
             "previous_close": self.previous_close,
 
+            "market_pressure_score": self.market_pressure_score,
+
         }
 
         for name, value in numeric_fields.items():
@@ -402,25 +552,11 @@ class TechnicalContext:
 
                 continue
 
-            if value != value:
+            if not self._is_finite_number(value):
 
                 raise AIDecisionError(
 
-                    f"{name} cannot be NaN"
-
-                )
-
-            if value in (
-
-                float("inf"),
-
-                float("-inf"),
-
-            ):
-
-                raise AIDecisionError(
-
-                    f"{name} must be finite"
+                    f"{name} must be a finite number"
 
                 )
 
@@ -454,6 +590,14 @@ class TechnicalContext:
 
                 )
 
+        if not isinstance(self.market_pressure_available, bool):
+
+            raise AIDecisionError(
+
+                "market_pressure_available must be boolean"
+
+            )
+
         # --------------------------------------------------------
 
         # MARKET PRESSURE VALIDATION
@@ -466,11 +610,13 @@ class TechnicalContext:
 
                 raise AIDecisionError(
 
-                    "market_pressure_score must be between -100 and 100"
+                    "market_pressure_score must be between "
+
+                    "-100 and 100"
 
                 )
 
-        if self.market_pressure_label not in {
+        valid_pressure_labels = {
 
             "BUY_PRESSURE",
 
@@ -480,7 +626,9 @@ class TechnicalContext:
 
             "UNAVAILABLE",
 
-        }:
+        }
+
+        if self.market_pressure_label not in valid_pressure_labels:
 
             raise AIDecisionError(
 
@@ -502,11 +650,13 @@ class TechnicalContext:
 
                 raise AIDecisionError(
 
-                    "available market pressure cannot be UNAVAILABLE"
+                    "available market pressure cannot be "
+
+                    "UNAVAILABLE"
 
                 )
 
-        if not self.market_pressure_available:
+        else:
 
             if self.market_pressure_label != "UNAVAILABLE":
 
@@ -522,7 +672,9 @@ class TechnicalContext:
 
                 raise AIDecisionError(
 
-                    "unavailable market pressure cannot contain a score"
+                    "unavailable market pressure cannot contain "
+
+                    "a score"
 
                 )
 
@@ -538,7 +690,9 @@ class TechnicalContext:
 
                 raise AIDecisionError(
 
-                    "BUY_PRESSURE requires a positive pressure score"
+                    "BUY_PRESSURE requires a positive "
+
+                    "pressure score"
 
                 )
 
@@ -554,7 +708,9 @@ class TechnicalContext:
 
                 raise AIDecisionError(
 
-                    "SELL_PRESSURE requires a negative pressure score"
+                    "SELL_PRESSURE requires a negative "
+
+                    "pressure score"
 
                 )
 
@@ -754,17 +910,35 @@ class AITradingDecisionEngine:
 
             return False
 
-        assert context.ema20 is not None
+        ema20 = context.ema20
 
-        assert context.ema50 is not None
+        ema50 = context.ema50
 
-        assert context.rsi14 is not None
+        rsi14 = context.rsi14
 
-        assert context.macd is not None
+        macd = context.macd
 
-        assert context.macd_signal is not None
+        macd_signal = context.macd_signal
 
-        assert context.macd_histogram is not None
+        macd_histogram = context.macd_histogram
+
+        if (
+
+            ema20 is None
+
+            or ema50 is None
+
+            or rsi14 is None
+
+            or macd is None
+
+            or macd_signal is None
+
+            or macd_histogram is None
+
+        ):
+
+            return False
 
         if direction == AIDirection.BUY:
 
@@ -774,13 +948,13 @@ class AITradingDecisionEngine:
 
                 and context.signal == "BUY"
 
-                and context.ema20 > context.ema50
+                and ema20 > ema50
 
-                and context.macd > context.macd_signal
+                and macd > macd_signal
 
-                and context.macd_histogram > 0
+                and macd_histogram > 0
 
-                and 0 < context.rsi14 <= 70
+                and 0 < rsi14 <= 70
 
             )
 
@@ -792,13 +966,13 @@ class AITradingDecisionEngine:
 
                 and context.signal == "SELL"
 
-                and context.ema20 < context.ema50
+                and ema20 < ema50
 
-                and context.macd < context.macd_signal
+                and macd < macd_signal
 
-                and context.macd_histogram < 0
+                and macd_histogram < 0
 
-                and 30 <= context.rsi14 < 100
+                and 30 <= rsi14 < 100
 
             )
 
@@ -842,23 +1016,33 @@ class AITradingDecisionEngine:
 
             )
 
-        if risk <= 0:
+        if not math.isfinite(risk) or risk <= 0:
 
             raise AIDecisionError(
 
-                "stop_loss must create positive risk"
+                "stop_loss must create positive finite risk"
 
             )
 
-        if reward <= 0:
+        if not math.isfinite(reward) or reward <= 0:
 
             raise AIDecisionError(
 
-                "take_profit must create positive reward"
+                "take_profit must create positive finite reward"
 
             )
 
-        return reward / risk
+        result = reward / risk
+
+        if not math.isfinite(result):
+
+            raise AIDecisionError(
+
+                "risk/reward calculation is not finite"
+
+            )
+
+        return result
 
     def _market_regime(
 
@@ -1186,15 +1370,25 @@ class AITradingDecisionEngine:
 
             return 0
 
+        normalized = (
+
+            points / possible
+
+        ) * 100.0
+
         return int(
 
-            self._clamp(
+            round(
 
-                (points / possible) * 100.0,
+                self._clamp(
 
-                0.0,
+                    normalized,
 
-                100.0,
+                    0.0,
+
+                    100.0,
+
+                )
 
             )
 
@@ -1246,7 +1440,9 @@ class AITradingDecisionEngine:
 
                 context.trend == "Bullish"
 
-                and context.score >= self.config.buy_score_threshold
+                and context.score
+
+                >= self.config.buy_score_threshold
 
                 and self._indicators_are_directionally_aligned(
 
@@ -1266,7 +1462,9 @@ class AITradingDecisionEngine:
 
                 context.trend == "Bearish"
 
-                and context.score <= self.config.sell_score_threshold
+                and context.score
+
+                <= self.config.sell_score_threshold
 
                 and self._indicators_are_directionally_aligned(
 
@@ -1428,7 +1626,9 @@ class AITradingDecisionEngine:
 
             confluence >= self.config.very_strong_confluence
 
-            and confidence >= self.config.very_strong_confidence
+            and confidence
+
+            >= self.config.very_strong_confidence
 
         ):
 
@@ -1442,9 +1642,13 @@ class AITradingDecisionEngine:
 
         if (
 
-            confluence >= self.config.exceptional_confluence
+            confluence
 
-            and confidence >= self.config.exceptional_confidence
+            >= self.config.exceptional_confluence
+
+            and confidence
+
+            >= self.config.exceptional_confidence
 
         ):
 
@@ -1502,7 +1706,11 @@ class AITradingDecisionEngine:
 
             )
 
-        if not self._required_indicators_available(context):
+        if not self._required_indicators_available(
+
+            context
+
+        ):
 
             reasons.append(
 
@@ -1592,7 +1800,11 @@ class AITradingDecisionEngine:
 
             )
 
-        return "WAIT: " + "; ".join(reasons) + "."
+        return "WAIT: " + "; ".join(
+
+            dict.fromkeys(reasons)
+
+        ) + "."
 
     def _build_proposal(
 
@@ -1648,6 +1860,16 @@ class AITradingDecisionEngine:
 
             )
 
+        if not math.isfinite(context.atr14):
+
+            return (
+
+                None,
+
+                "WAIT: ATR is not finite.",
+
+            )
+
         if context.atr14 <= 0:
 
             return (
@@ -1659,6 +1881,16 @@ class AITradingDecisionEngine:
             )
 
         entry = context.close
+
+        if not math.isfinite(entry):
+
+            return (
+
+                None,
+
+                "WAIT: entry price is not finite.",
+
+            )
 
         if entry <= 0:
 
@@ -1758,6 +1990,32 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
+        # FINITE PRICE VALIDATION
+
+        # --------------------------------------------------------
+
+        if not math.isfinite(stop_loss):
+
+            return (
+
+                None,
+
+                "WAIT: calculated stop-loss is not finite.",
+
+            )
+
+        if not math.isfinite(take_profit):
+
+            return (
+
+                None,
+
+                "WAIT: calculated take-profit is not finite.",
+
+            )
+
+        # --------------------------------------------------------
+
         # STOP VALIDATION
 
         # --------------------------------------------------------
@@ -1792,9 +2050,9 @@ class AITradingDecisionEngine:
 
                     None,
 
-                    "WAIT: BUY stop-loss/take-profit geometry "
+                    "WAIT: BUY stop-loss/take-profit "
 
-                    "is invalid.",
+                    "geometry is invalid.",
 
                 )
 
@@ -1810,9 +2068,9 @@ class AITradingDecisionEngine:
 
                     None,
 
-                    "WAIT: SELL stop-loss/take-profit geometry "
+                    "WAIT: SELL stop-loss/take-profit "
 
-                    "is invalid.",
+                    "geometry is invalid.",
 
                 )
 
@@ -1852,7 +2110,13 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        if risk_reward < self.config.minimum_risk_reward:
+        if (
+
+            risk_reward
+
+            < self.config.minimum_risk_reward
+
+        ):
 
             return (
 
@@ -1861,6 +2125,30 @@ class AITradingDecisionEngine:
                 "WAIT: calculated risk/reward "
 
                 "is below the minimum.",
+
+            )
+
+        # --------------------------------------------------------
+
+        # MAXIMUM R:R SAFETY CEILING
+
+        # --------------------------------------------------------
+
+        if (
+
+            risk_reward
+
+            > self.config.maximum_risk_reward + 1e-9
+
+        ):
+
+            return (
+
+                None,
+
+                "WAIT: calculated risk/reward "
+
+                "exceeds the maximum.",
 
             )
 
@@ -2006,9 +2294,27 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
+        if not isinstance(
+
+            context,
+
+            TechnicalContext,
+
+        ):
+
+            raise AIDecisionError(
+
+                "context must be a TechnicalContext instance"
+
+            )
+
         context.validate()
 
-        regime = self._market_regime(context)
+        regime = self._market_regime(
+
+            context
+
+        )
 
         setup = self._setup_type(
 
@@ -2096,6 +2402,8 @@ class AITradingDecisionEngine:
 
                 ),
 
+                # HARD PAPER-ONLY SETTINGS
+
                 execution_type="paper",
 
                 read_only=True,
@@ -2120,7 +2428,13 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        if confidence < self.config.minimum_confidence:
+        if (
+
+            confidence
+
+            < self.config.minimum_confidence
+
+        ):
 
             return AIDecision(
 
@@ -2178,7 +2492,13 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        if confluence < self.config.minimum_confluence:
+        if (
+
+            confluence
+
+            < self.config.minimum_confluence
+
+        ):
 
             return AIDecision(
 
@@ -2236,15 +2556,19 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        proposal, proposal_error = self._build_proposal(
+        proposal, proposal_error = (
 
-            context,
+            self._build_proposal(
 
-            direction,
+                context,
 
-            confidence,
+                direction,
 
-            confluence,
+                confidence,
+
+                confluence,
+
+            )
 
         )
 
@@ -2377,6 +2701,20 @@ def ai_decision_to_dict(
 ) -> dict:
 
     """Serialize an AI decision safely."""
+
+    if not isinstance(
+
+        decision,
+
+        AIDecision,
+
+    ):
+
+        raise AIDecisionError(
+
+            "decision must be an AIDecision instance"
+
+        )
 
     proposal = None
 
