@@ -114,7 +114,43 @@ class TradingPipelineService:
 
     ) -> TechnicalContext:
 
-        """Convert indicator output into the Step 13 technical context."""
+        """Convert indicator output into the Step 13 technical context.
+
+        Market pressure is advisory only.
+
+        IMPORTANT:
+
+        When pressure is unavailable, the hardened AI layer must receive:
+
+            market_pressure_score=None
+
+            market_pressure_label="UNAVAILABLE"
+
+            market_pressure_available=False
+
+        It must NOT receive a fabricated numeric score such as 0.
+
+        """
+
+        pressure_available = (
+
+            market_pressure is not None
+
+            and bool(market_pressure.available)
+
+        )
+
+        if pressure_available:
+
+            pressure_score = market_pressure.score
+
+            pressure_label = market_pressure.label
+
+        else:
+
+            pressure_score = None
+
+            pressure_label = "UNAVAILABLE"
 
         return TechnicalContext(
 
@@ -146,35 +182,11 @@ class TradingPipelineService:
 
             candles_used=result.candles_used,
 
-            market_pressure_score=(
+            market_pressure_score=pressure_score,
 
-                market_pressure.score
+            market_pressure_label=pressure_label,
 
-                if market_pressure is not None
-
-                else None
-
-            ),
-
-            market_pressure_label=(
-
-                market_pressure.label
-
-                if market_pressure is not None
-
-                else "UNAVAILABLE"
-
-            ),
-
-            market_pressure_available=(
-
-                market_pressure.available
-
-                if market_pressure is not None
-
-                else False
-
-            ),
+            market_pressure_available=pressure_available,
 
         )
 
@@ -194,13 +206,21 @@ class TradingPipelineService:
 
         """Build technical context while treating pressure as advisory."""
 
-        if not symbol.strip():
+        if not isinstance(symbol, str) or not symbol.strip():
 
-            raise TradingPipelineServiceError("Symbol is required.")
+            raise TradingPipelineServiceError(
 
-        if not timeframe.strip():
+                "Symbol is required."
 
-            raise TradingPipelineServiceError("Timeframe is required.")
+            )
+
+        if not isinstance(timeframe, str) or not timeframe.strip():
+
+            raise TradingPipelineServiceError(
+
+                "Timeframe is required."
+
+            )
 
         if not candles:
 
@@ -238,7 +258,13 @@ class TradingPipelineService:
 
         except (MarketPressureError, ValueError):
 
-            # Pressure must never disable Raymond's established strategy.
+            # Market pressure is advisory only.
+
+            #
+
+            # A pressure calculation failure must never disable
+
+            # Raymond's established technical strategy.
 
             market_pressure = None
 
@@ -264,7 +290,11 @@ class TradingPipelineService:
 
     ) -> AIDecision:
 
-        """Run indicators -> pressure -> Step 13 AI; no execution occurs."""
+        """Run indicators -> pressure -> Step 13 AI.
+
+        No execution occurs in this method.
+
+        """
 
         context = self.build_context(
 
@@ -308,7 +338,13 @@ class TradingPipelineService:
 
     ) -> Step14Result:
 
-        """Run indicators -> pressure -> Step 13 -> Step 14; no execution."""
+        """Run indicators -> pressure -> Step 13 -> Step 14.
+
+        This method evaluates the controlled pipeline but does not execute
+
+        a broker order.
+
+        """
 
         context = self.build_context(
 
@@ -320,21 +356,31 @@ class TradingPipelineService:
 
         )
 
-        return self.step14.evaluate(
+        try:
 
-            context,
+            return self.step14.evaluate(
 
-            specification,
+                context,
 
-            account_equity=account_equity,
+                specification,
 
-            daily_loss=risk_state.daily_loss,
+                account_equity=account_equity,
 
-            open_positions=risk_state.open_positions,
+                daily_loss=risk_state.daily_loss,
 
-            total_exposure=risk_state.total_exposure,
+                open_positions=risk_state.open_positions,
 
-        )
+                total_exposure=risk_state.total_exposure,
+
+            )
+
+        except Exception as exc:
+
+            raise TradingPipelineServiceError(
+
+                f"Risk evaluation failed safely: {exc}"
+
+            ) from exc
 
     async def execute_paper(
 
@@ -356,7 +402,11 @@ class TradingPipelineService:
 
     ) -> Step14Result:
 
-        """Run the complete paper-only pipeline. Live execution is disabled."""
+        """Run the complete paper-only pipeline.
+
+        Live execution remains disabled.
+
+        """
 
         context = self.build_context(
 
@@ -478,6 +528,12 @@ class TradingPipelineService:
 
         }
 
+        # Preserve market-pressure fields when they are exposed by the
+
+        # AIDecision model. This keeps the API compatible with both the
+
+        # pressure-aware and legacy decision models.
+
         for field in (
 
             "market_pressure_score",
@@ -501,6 +557,8 @@ class TradingPipelineService:
         risk_decision: Optional[RiskDecision],
 
     ) -> Optional[dict]:
+
+        """Convert a risk decision into a stable API response."""
 
         if risk_decision is None:
 
@@ -535,6 +593,8 @@ class TradingPipelineService:
         execution_result: Any,
 
     ) -> Optional[dict]:
+
+        """Convert an execution result into a stable API response."""
 
         if execution_result is None:
 
@@ -582,11 +642,21 @@ class TradingPipelineService:
 
     ) -> dict:
 
+        """Convert the complete Step 14 result into an API response."""
+
         return {
 
-            "decision": cls.serialize_decision(result.decision),
+            "decision": cls.serialize_decision(
 
-            "risk": cls.serialize_risk_decision(result.risk_decision),
+                result.decision
+
+            ),
+
+            "risk": cls.serialize_risk_decision(
+
+                result.risk_decision
+
+            ),
 
             "position_size": result.position_size,
 
