@@ -194,19 +194,19 @@ def test_bearish_context_produces_sell_proposal():
 
     assert proposal.entry_price == 2300.0
 
-    # Strong-confluence setup uses adaptive 2.0R.
+    # This bearish context remains at the 1.5R minimum.
 
     # ATR = 10
 
     # SELL SL = 2300 + 10 = 2310
 
-    # SELL TP = 2300 - (10 * 2.0) = 2280
+    # SELL TP = 2300 - (10 * 1.5) = 2285
 
     assert proposal.stop_loss == 2310.0
 
-    assert proposal.take_profit == 2280.0
+    assert proposal.take_profit == 2285.0
 
-    assert proposal.risk_reward == 2.0
+    assert proposal.risk_reward == 1.5
 
     assert proposal.execution_type == "paper"
 
@@ -622,13 +622,7 @@ def test_ai_never_requires_broker_order():
 
         if decision.proposal is not None:
 
-            assert (
-
-                decision.proposal.broker_order_required
-
-                is False
-
-            )
+            assert decision.proposal.broker_order_required is False
 
 def test_ai_always_requires_risk_engine():
 
@@ -650,13 +644,7 @@ def test_ai_always_requires_risk_engine():
 
         if decision.proposal is not None:
 
-            assert (
-
-                decision.proposal.risk_engine_required
-
-                is True
-
-            )
+            assert decision.proposal.risk_engine_required is True
 
 def test_ai_proposals_are_paper_only():
 
