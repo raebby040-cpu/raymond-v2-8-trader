@@ -54,11 +54,7 @@ RISK/REWARD:
 
 The minimum risk/reward remains configurable and defaults to 1.5R.
 
-Unlike the previous implementation, take-profit is NOT always
-
-forced to exactly 1.5R.
-
-Raymond now adapts the target multiple according to the strength
+Raymond adapts the target multiple according to the strength
 
 of the validated setup:
 
@@ -114,15 +110,15 @@ class AIDecisionConfig:
 
     require_stop_loss: bool = True
 
-    # Hard minimum.
+    # Hard minimum risk/reward.
 
     minimum_risk_reward: float = 1.5
 
-    # Adaptive maximum target.
+    # Maximum adaptive target.
 
     maximum_risk_reward: float = 3.0
 
-    # Confluence thresholds used by the adaptive target engine.
+    # Confluence thresholds.
 
     strong_confluence: int = 75
 
@@ -132,13 +128,15 @@ class AIDecisionConfig:
 
     minimum_confluence: int = 60
 
-    # Confidence thresholds used together with confluence.
+    # Confidence thresholds.
 
     very_strong_confidence: float = 80.0
 
     exceptional_confidence: float = 85.0
 
     def validate(self) -> None:
+
+        """Validate AI configuration."""
 
         if not 0 <= self.buy_score_threshold <= 100:
 
@@ -303,6 +301,8 @@ class TechnicalContext:
     market_pressure_available: bool = False
 
     def validate(self) -> None:
+
+        """Validate technical context."""
 
         if not isinstance(self.symbol, str) or not self.symbol.strip():
 
@@ -580,6 +580,8 @@ class AITradeProposal:
 
     reason: str
 
+    # Hard paper-only safety defaults.
+
     execution_type: str = "paper"
 
     read_only: bool = True
@@ -611,6 +613,8 @@ class AIDecision:
     proposal: Optional[AITradeProposal]
 
     reasoning: str
+
+    # Hard paper-only safety defaults.
 
     execution_type: str = "paper"
 
@@ -738,7 +742,7 @@ class AITradingDecisionEngine:
 
         This prevents a strong score from overriding contradictory
 
-        EMA/MACD/trend information.
+        EMA, MACD or trend information.
 
         """
 
@@ -815,6 +819,8 @@ class AITradingDecisionEngine:
         take_profit: float,
 
     ) -> float:
+
+        """Calculate actual risk/reward."""
 
         if direction == AIDirection.BUY:
 
@@ -1240,9 +1246,7 @@ class AITradingDecisionEngine:
 
                 context.trend == "Bullish"
 
-                and context.score
-
-                >= self.config.buy_score_threshold
+                and context.score >= self.config.buy_score_threshold
 
                 and self._indicators_are_directionally_aligned(
 
@@ -1262,9 +1266,7 @@ class AITradingDecisionEngine:
 
                 context.trend == "Bearish"
 
-                and context.score
-
-                <= self.config.sell_score_threshold
+                and context.score <= self.config.sell_score_threshold
 
                 and self._indicators_are_directionally_aligned(
 
@@ -1388,15 +1390,7 @@ class AITradingDecisionEngine:
 
         """
 
-        Determine the target R:R from setup strength.
-
-        IMPORTANT:
-
-        This does not lower the configured minimum.
-
-        The result is always between minimum_risk_reward and
-
-        maximum_risk_reward.
+        Determine target R:R from setup strength.
 
         Rules:
 
@@ -1407,6 +1401,10 @@ class AITradingDecisionEngine:
         3. Very strong confluence + confidence -> 2.5R.
 
         4. Exceptional confluence + confidence -> 3.0R.
+
+        The configured minimum is always respected.
+
+        The configured maximum is always respected.
 
         """
 
@@ -1622,7 +1620,7 @@ class AITradingDecisionEngine:
 
         ATR supplies the initial stop distance.
 
-        The take-profit multiple is now adaptive instead of being
+        The take-profit multiple is adaptive rather than
 
         permanently fixed at exactly 1.5R.
 
@@ -1854,13 +1852,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        if (
-
-            risk_reward
-
-            < self.config.minimum_risk_reward
-
-        ):
+        if risk_reward < self.config.minimum_risk_reward:
 
             return (
 
@@ -2128,13 +2120,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        if (
-
-            confidence
-
-            < self.config.minimum_confidence
-
-        ):
+        if confidence < self.config.minimum_confidence:
 
             return AIDecision(
 
@@ -2192,13 +2178,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        if (
-
-            confluence
-
-            < self.config.minimum_confluence
-
-        ):
+        if confluence < self.config.minimum_confluence:
 
             return AIDecision(
 
@@ -2369,6 +2349,8 @@ class AITradingDecisionEngine:
             proposal=proposal,
 
             reasoning=reasoning,
+
+            # HARD PAPER-ONLY SETTINGS
 
             execution_type="paper",
 
