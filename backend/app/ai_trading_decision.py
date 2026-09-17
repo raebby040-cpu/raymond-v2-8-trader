@@ -20,7 +20,7 @@ Layers:
 
 7. WAIT Filter
 
-8. Risk-aware Paper Proposal
+8. Adaptive Risk-aware Paper Proposal
 
 SAFETY:
 
@@ -49,6 +49,30 @@ FAIL-CLOSED RULE:
 If required market information is missing, inconsistent,
 
 invalid, weak, or unsafe, the result is WAIT.
+
+RISK/REWARD:
+
+The minimum risk/reward remains configurable and defaults to 1.5R.
+
+Unlike the previous implementation, take-profit is NOT always
+
+forced to exactly 1.5R.
+
+Raymond now adapts the target multiple according to the strength
+
+of the validated setup:
+
+- Normal qualified setup: minimum R:R
+
+- Strong confluence: higher target multiple
+
+- Very strong confluence + confidence: higher target multiple
+
+- Exceptional confluence + confidence: maximum configured target
+
+This prevents the AI from artificially forcing every trade to
+
+exactly 1.5R while retaining a hard minimum risk/reward floor.
 
 """
 
@@ -90,11 +114,29 @@ class AIDecisionConfig:
 
     require_stop_loss: bool = True
 
+    # Hard minimum.
+
     minimum_risk_reward: float = 1.5
+
+    # Adaptive maximum target.
+
+    maximum_risk_reward: float = 3.0
+
+    # Confluence thresholds used by the adaptive target engine.
+
+    strong_confluence: int = 75
+
+    very_strong_confluence: int = 80
+
+    exceptional_confluence: int = 85
 
     minimum_confluence: int = 60
 
-    strong_confluence: int = 75
+    # Confidence thresholds used together with confluence.
+
+    very_strong_confidence: float = 80.0
+
+    exceptional_confidence: float = 85.0
 
     def validate(self) -> None:
 
@@ -156,6 +198,16 @@ class AIDecisionConfig:
 
             )
 
+        if self.maximum_risk_reward < self.minimum_risk_reward:
+
+            raise AIDecisionError(
+
+                "maximum_risk_reward cannot be below "
+
+                "minimum_risk_reward"
+
+            )
+
         if not 0 <= self.minimum_confluence <= 100:
 
             raise AIDecisionError(
@@ -169,6 +221,38 @@ class AIDecisionConfig:
             raise AIDecisionError(
 
                 "strong_confluence must be between 0 and 100"
+
+            )
+
+        if not 0 <= self.very_strong_confluence <= 100:
+
+            raise AIDecisionError(
+
+                "very_strong_confluence must be between 0 and 100"
+
+            )
+
+        if not 0 <= self.exceptional_confluence <= 100:
+
+            raise AIDecisionError(
+
+                "exceptional_confluence must be between 0 and 100"
+
+            )
+
+        if not 0 <= self.very_strong_confidence <= 100:
+
+            raise AIDecisionError(
+
+                "very_strong_confidence must be between 0 and 100"
+
+            )
+
+        if not 0 <= self.exceptional_confidence <= 100:
+
+            raise AIDecisionError(
+
+                "exceptional_confidence must be between 0 and 100"
 
             )
 
@@ -224,7 +308,13 @@ class TechnicalContext:
 
             raise AIDecisionError("symbol is required")
 
-        if not isinstance(self.timeframe, str) or not self.timeframe.strip():
+        if (
+
+            not isinstance(self.timeframe, str)
+
+            or not self.timeframe.strip()
+
+        ):
 
             raise AIDecisionError("timeframe is required")
 
@@ -398,8 +488,6 @@ class TechnicalContext:
 
             )
 
-        # Available pressure must have a valid score.
-
         if self.market_pressure_available:
 
             if self.market_pressure_score is None:
@@ -417,8 +505,6 @@ class TechnicalContext:
                     "available market pressure cannot be UNAVAILABLE"
 
                 )
-
-        # Unavailable pressure must not contain a directional label.
 
         if not self.market_pressure_available:
 
@@ -439,8 +525,6 @@ class TechnicalContext:
                     "unavailable market pressure cannot contain a score"
 
                 )
-
-        # Directional pressure labels must agree with score sign.
 
         if self.market_pressure_label == "BUY_PRESSURE":
 
@@ -561,6 +645,10 @@ class AITradingDecisionEngine:
     Market pressure is advisory only.
 
     The AI cannot authorize live execution.
+
+    The target engine is adaptive but remains constrained by the
+
+    configured minimum and maximum risk/reward values.
 
     """
 
@@ -874,7 +962,7 @@ class AITradingDecisionEngine:
 
         Calculate technical confluence.
 
-        Existing Raymond technical logic:
+        Base weights:
 
         - Technical score: 40
 
@@ -886,9 +974,7 @@ class AITradingDecisionEngine:
 
         - Trend/signal agreement: 10
 
-        Market pressure:
-
-        - Additional advisory weight: 10
+        Market pressure is an additional advisory component.
 
         Missing indicators do not receive artificial points.
 
@@ -900,7 +986,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        # 1. TECHNICAL SCORE - 40%
+        # 1. TECHNICAL SCORE - 40
 
         # --------------------------------------------------------
 
@@ -910,7 +996,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        # 2. EMA ALIGNMENT - 20%
+        # 2. EMA ALIGNMENT - 20
 
         # --------------------------------------------------------
 
@@ -938,7 +1024,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        # 3. RSI - 15%
+        # 3. RSI - 15
 
         # --------------------------------------------------------
 
@@ -968,7 +1054,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        # 4. MACD - 15%
+        # 4. MACD - 15
 
         # --------------------------------------------------------
 
@@ -1018,7 +1104,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        # 5. TREND / SIGNAL AGREEMENT - 10%
+        # 5. TREND / SIGNAL AGREEMENT - 10
 
         # --------------------------------------------------------
 
@@ -1046,7 +1132,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        # 6. MARKET PRESSURE - ADVISORY 10%
+        # 6. MARKET PRESSURE - ADVISORY
 
         # --------------------------------------------------------
 
@@ -1288,6 +1374,100 @@ class AITradingDecisionEngine:
 
         )
 
+    def _adaptive_risk_reward(
+
+        self,
+
+        *,
+
+        confluence: int,
+
+        confidence: float,
+
+    ) -> float:
+
+        """
+
+        Determine the target R:R from setup strength.
+
+        IMPORTANT:
+
+        This does not lower the configured minimum.
+
+        The result is always between minimum_risk_reward and
+
+        maximum_risk_reward.
+
+        Rules:
+
+        1. Default qualified setup -> minimum R:R.
+
+        2. Strong confluence -> 2.0R.
+
+        3. Very strong confluence + confidence -> 2.5R.
+
+        4. Exceptional confluence + confidence -> 3.0R.
+
+        """
+
+        minimum_rr = self.config.minimum_risk_reward
+
+        maximum_rr = self.config.maximum_risk_reward
+
+        target_rr = minimum_rr
+
+        if confluence >= self.config.strong_confluence:
+
+            target_rr = max(
+
+                target_rr,
+
+                2.0,
+
+            )
+
+        if (
+
+            confluence >= self.config.very_strong_confluence
+
+            and confidence >= self.config.very_strong_confidence
+
+        ):
+
+            target_rr = max(
+
+                target_rr,
+
+                2.5,
+
+            )
+
+        if (
+
+            confluence >= self.config.exceptional_confluence
+
+            and confidence >= self.config.exceptional_confidence
+
+        ):
+
+            target_rr = max(
+
+                target_rr,
+
+                3.0,
+
+            )
+
+        return self._clamp(
+
+            target_rr,
+
+            minimum_rr,
+
+            maximum_rr,
+
+        )
+
     def _wait_reason(
 
         self,
@@ -1426,6 +1606,8 @@ class AITradingDecisionEngine:
 
         confidence: float,
 
+        confluence: int,
+
     ) -> tuple[
 
         Optional[AITradeProposal],
@@ -1440,7 +1622,11 @@ class AITradingDecisionEngine:
 
         ATR supplies the initial stop distance.
 
-        Minimum RR determines the target distance.
+        The take-profit multiple is now adaptive instead of being
+
+        permanently fixed at exactly 1.5R.
+
+        The configured minimum remains a hard safety floor.
 
         """
 
@@ -1486,13 +1672,51 @@ class AITradingDecisionEngine:
 
             )
 
+        # --------------------------------------------------------
+
+        # ADAPTIVE TARGET SELECTION
+
+        # --------------------------------------------------------
+
+        target_rr = self._adaptive_risk_reward(
+
+            confluence=confluence,
+
+            confidence=confidence,
+
+        )
+
+        # --------------------------------------------------------
+
+        # STOP LOSS
+
+        # --------------------------------------------------------
+
         if direction == AIDirection.BUY:
 
-            stop_loss = (
+            stop_loss = entry - context.atr14
 
-                entry - context.atr14
+        elif direction == AIDirection.SELL:
+
+            stop_loss = entry + context.atr14
+
+        else:
+
+            return (
+
+                None,
+
+                "WAIT: no trade direction available.",
 
             )
+
+        # --------------------------------------------------------
+
+        # TAKE PROFIT
+
+        # --------------------------------------------------------
+
+        if direction == AIDirection.BUY:
 
             take_profit = (
 
@@ -1502,19 +1726,13 @@ class AITradingDecisionEngine:
 
                     context.atr14
 
-                    * self.config.minimum_risk_reward
+                    * target_rr
 
                 )
 
             )
 
         elif direction == AIDirection.SELL:
-
-            stop_loss = (
-
-                entry + context.atr14
-
-            )
 
             take_profit = (
 
@@ -1524,7 +1742,7 @@ class AITradingDecisionEngine:
 
                     context.atr14
 
-                    * self.config.minimum_risk_reward
+                    * target_rr
 
                 )
 
@@ -1540,6 +1758,12 @@ class AITradingDecisionEngine:
 
             )
 
+        # --------------------------------------------------------
+
+        # STOP VALIDATION
+
+        # --------------------------------------------------------
+
         if self.config.require_stop_loss:
 
             if stop_loss <= 0:
@@ -1552,7 +1776,11 @@ class AITradingDecisionEngine:
 
                 )
 
-        # Hard geometric validation.
+        # --------------------------------------------------------
+
+        # HARD GEOMETRIC VALIDATION
+
+        # --------------------------------------------------------
 
         if direction == AIDirection.BUY:
 
@@ -1572,7 +1800,7 @@ class AITradingDecisionEngine:
 
                 )
 
-        if direction == AIDirection.SELL:
+        elif direction == AIDirection.SELL:
 
             if not (
 
@@ -1589,6 +1817,12 @@ class AITradingDecisionEngine:
                     "is invalid.",
 
                 )
+
+        # --------------------------------------------------------
+
+        # ACTUAL R:R VALIDATION
+
+        # --------------------------------------------------------
 
         try:
 
@@ -1614,6 +1848,12 @@ class AITradingDecisionEngine:
 
             )
 
+        # --------------------------------------------------------
+
+        # MINIMUM R:R SAFETY FLOOR
+
+        # --------------------------------------------------------
+
         if (
 
             risk_reward
@@ -1631,6 +1871,18 @@ class AITradingDecisionEngine:
                 "is below the minimum.",
 
             )
+
+        # --------------------------------------------------------
+
+        # TARGET DESCRIPTION
+
+        # --------------------------------------------------------
+
+        target_text = (
+
+            f"; adaptive target={risk_reward:.2f}R"
+
+        )
 
         pressure_text = ""
 
@@ -1651,6 +1903,12 @@ class AITradingDecisionEngine:
                 f" ({context.market_pressure_score})"
 
             )
+
+        # --------------------------------------------------------
+
+        # PAPER PROPOSAL
+
+        # --------------------------------------------------------
 
         proposal = AITradeProposal(
 
@@ -1674,9 +1932,13 @@ class AITradingDecisionEngine:
 
                 f"technical confluence"
 
-                f"{pressure_text}."
+                f"{pressure_text}"
+
+                f"{target_text}."
 
             ),
+
+            # HARD PAPER-ONLY SETTINGS
 
             execution_type="paper",
 
@@ -1688,7 +1950,11 @@ class AITradingDecisionEngine:
 
         )
 
-        # Final immutable safety assertions.
+        # --------------------------------------------------------
+
+        # FINAL IMMUTABLE SAFETY ASSERTIONS
+
+        # --------------------------------------------------------
 
         if proposal.execution_type != "paper":
 
@@ -1760,7 +2026,11 @@ class AITradingDecisionEngine:
 
         )
 
-        confluence = self._confluence_score(context)
+        confluence = self._confluence_score(
+
+            context
+
+        )
 
         confidence = self._base_confidence(
 
@@ -1796,7 +2066,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        # WAIT: direction not confirmed
+        # WAIT: DIRECTION NOT CONFIRMED
 
         # --------------------------------------------------------
 
@@ -1854,7 +2124,7 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        # WAIT: confidence too low
+        # WAIT: CONFIDENCE TOO LOW
 
         # --------------------------------------------------------
 
@@ -1922,7 +2192,13 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        if confluence < self.config.minimum_confluence:
+        if (
+
+            confluence
+
+            < self.config.minimum_confluence
+
+        ):
 
             return AIDecision(
 
@@ -1987,6 +2263,8 @@ class AITradingDecisionEngine:
             direction,
 
             confidence,
+
+            confluence,
 
         )
 
@@ -2062,7 +2340,13 @@ class AITradingDecisionEngine:
 
             f"setup={setup}; "
 
-            f"confluence={confluence}/100."
+            f"confluence={confluence}/100; "
+
+            f"confidence={confidence:.1f}%; "
+
+            f"adaptive_rr="
+
+            f"{proposal.risk_reward:.2f}R."
 
         )
 
@@ -2170,9 +2454,13 @@ def ai_decision_to_dict(
 
         "reasoning": decision.reasoning,
 
-        "execution_type": decision.execution_type,
+        "execution_type":
 
-        "read_only": decision.read_only,
+            decision.execution_type,
+
+        "read_only":
+
+            decision.read_only,
 
         "broker_order_required":
 
