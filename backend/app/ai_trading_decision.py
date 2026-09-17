@@ -44,6 +44,12 @@ The AI only produces a recommendation.
 
 Execution remains paper-only.
 
+FAIL-CLOSED RULE:
+
+If required market information is missing, inconsistent,
+
+invalid, weak, or unsafe, the result is WAIT.
+
 """
 
 from __future__ import annotations
@@ -204,27 +210,7 @@ class TechnicalContext:
 
     previous_close: Optional[float] = None
 
-    # ------------------------------------------------------------
-
-    # MARKET PRESSURE
-
-    # ------------------------------------------------------------
-
-    #
-
-    # Score:
-
-    #   +100 = strongest observed buy-side pressure
-
-    #   -100 = strongest observed sell-side pressure
-
-    #
-
-    # This is advisory/confluence information.
-
-    # It does NOT replace the established signal/trend/score logic.
-
-    #
+    # Market pressure is advisory only.
 
     market_pressure_score: Optional[int] = None
 
@@ -234,11 +220,11 @@ class TechnicalContext:
 
     def validate(self) -> None:
 
-        if not self.symbol.strip():
+        if not isinstance(self.symbol, str) or not self.symbol.strip():
 
             raise AIDecisionError("symbol is required")
 
-        if not self.timeframe.strip():
+        if not isinstance(self.timeframe, str) or not self.timeframe.strip():
 
             raise AIDecisionError("timeframe is required")
 
@@ -299,6 +285,8 @@ class TechnicalContext:
             )
 
         numeric_fields = {
+
+            "close": self.close,
 
             "ema20": self.ema20,
 
@@ -382,19 +370,15 @@ class TechnicalContext:
 
         # --------------------------------------------------------
 
-        if (
+        if self.market_pressure_score is not None:
 
-            self.market_pressure_score is not None
+            if not -100 <= self.market_pressure_score <= 100:
 
-            and not -100 <= self.market_pressure_score <= 100
+                raise AIDecisionError(
 
-        ):
+                    "market_pressure_score must be between -100 and 100"
 
-            raise AIDecisionError(
-
-                "market_pressure_score must be between -100 and 100"
-
-            )
+                )
 
         if self.market_pressure_label not in {
 
@@ -413,6 +397,82 @@ class TechnicalContext:
                 "Invalid market_pressure_label"
 
             )
+
+        # Available pressure must have a valid score.
+
+        if self.market_pressure_available:
+
+            if self.market_pressure_score is None:
+
+                raise AIDecisionError(
+
+                    "available market pressure requires a score"
+
+                )
+
+            if self.market_pressure_label == "UNAVAILABLE":
+
+                raise AIDecisionError(
+
+                    "available market pressure cannot be UNAVAILABLE"
+
+                )
+
+        # Unavailable pressure must not contain a directional label.
+
+        if not self.market_pressure_available:
+
+            if self.market_pressure_label != "UNAVAILABLE":
+
+                raise AIDecisionError(
+
+                    "unavailable market pressure must use "
+
+                    "the UNAVAILABLE label"
+
+                )
+
+            if self.market_pressure_score is not None:
+
+                raise AIDecisionError(
+
+                    "unavailable market pressure cannot contain a score"
+
+                )
+
+        # Directional pressure labels must agree with score sign.
+
+        if self.market_pressure_label == "BUY_PRESSURE":
+
+            if (
+
+                self.market_pressure_score is None
+
+                or self.market_pressure_score <= 0
+
+            ):
+
+                raise AIDecisionError(
+
+                    "BUY_PRESSURE requires a positive pressure score"
+
+                )
+
+        if self.market_pressure_label == "SELL_PRESSURE":
+
+            if (
+
+                self.market_pressure_score is None
+
+                or self.market_pressure_score >= 0
+
+            ):
+
+                raise AIDecisionError(
+
+                    "SELL_PRESSURE requires a negative pressure score"
+
+                )
 
 @dataclass(frozen=True)
 
@@ -482,8 +542,6 @@ class AIDecision:
 
     confluence_score: int = 0
 
-    # Market-pressure output
-
     market_pressure_score: Optional[int] = None
 
     market_pressure_label: str = "UNAVAILABLE"
@@ -492,7 +550,19 @@ class AIDecision:
 
 class AITradingDecisionEngine:
 
-    """Conservative multi-layer paper-only AI decision engine."""
+    """
+
+    Conservative multi-layer paper-only AI decision engine.
+
+    Directional authority remains with Raymond's technical signal,
+
+    trend and score.
+
+    Market pressure is advisory only.
+
+    The AI cannot authorize live execution.
+
+    """
 
     def __init__(
 
@@ -525,6 +595,122 @@ class AITradingDecisionEngine:
             min(maximum, value),
 
         )
+
+    @staticmethod
+
+    def _required_indicators_available(
+
+        context: TechnicalContext,
+
+    ) -> bool:
+
+        """
+
+        BUY/SELL requires all core indicators.
+
+        Missing EMA, RSI, MACD or ATR means the AI cannot
+
+        safely construct a complete decision.
+
+        """
+
+        required = (
+
+            context.ema20,
+
+            context.ema50,
+
+            context.rsi14,
+
+            context.atr14,
+
+            context.macd,
+
+            context.macd_signal,
+
+            context.macd_histogram,
+
+        )
+
+        return all(value is not None for value in required)
+
+    @staticmethod
+
+    def _indicators_are_directionally_aligned(
+
+        context: TechnicalContext,
+
+        direction: AIDirection,
+
+    ) -> bool:
+
+        """
+
+        Require the core indicators to agree with the direction.
+
+        This prevents a strong score from overriding contradictory
+
+        EMA/MACD/trend information.
+
+        """
+
+        if not AITradingDecisionEngine._required_indicators_available(
+
+            context
+
+        ):
+
+            return False
+
+        assert context.ema20 is not None
+
+        assert context.ema50 is not None
+
+        assert context.rsi14 is not None
+
+        assert context.macd is not None
+
+        assert context.macd_signal is not None
+
+        assert context.macd_histogram is not None
+
+        if direction == AIDirection.BUY:
+
+            return (
+
+                context.trend == "Bullish"
+
+                and context.signal == "BUY"
+
+                and context.ema20 > context.ema50
+
+                and context.macd > context.macd_signal
+
+                and context.macd_histogram > 0
+
+                and 0 < context.rsi14 <= 70
+
+            )
+
+        if direction == AIDirection.SELL:
+
+            return (
+
+                context.trend == "Bearish"
+
+                and context.signal == "SELL"
+
+                and context.ema20 < context.ema50
+
+                and context.macd < context.macd_signal
+
+                and context.macd_histogram < 0
+
+                and 30 <= context.rsi14 < 100
+
+            )
+
+        return False
 
     @staticmethod
 
@@ -704,9 +890,7 @@ class AITradingDecisionEngine:
 
         - Additional advisory weight: 10
 
-        Market pressure NEVER replaces the established
-
-        directional signal.
+        Missing indicators do not receive artificial points.
 
         """
 
@@ -866,22 +1050,6 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        #
-
-        # This is deliberately added after the existing strategy.
-
-        #
-
-        # Positive pressure supports BUY.
-
-        # Negative pressure supports SELL.
-
-        #
-
-        # It does NOT independently create a BUY or SELL.
-
-        # --------------------------------------------------------
-
         if (
 
             context.market_pressure_available
@@ -952,15 +1120,23 @@ class AITradingDecisionEngine:
 
         """
 
-        Determine BUY, SELL, or WAIT.
+        Determine BUY, SELL or WAIT.
 
-        Existing Raymond signal/trend/score logic remains
+        Direction requires:
 
-        the primary directional authority.
+        - valid technical signal
 
-        Market pressure is advisory only.
+        - matching trend
 
-        Risk Engine and safety controls remain mandatory.
+        - score threshold
+
+        - complete core indicators
+
+        - directional indicator agreement
+
+        - minimum confluence
+
+        Market pressure cannot create a trade direction.
 
         """
 
@@ -968,33 +1144,53 @@ class AITradingDecisionEngine:
 
             return AIDirection.WAIT
 
-        if (
+        if confluence < self.config.minimum_confluence:
 
-            context.signal == "BUY"
+            return AIDirection.WAIT
 
-            and context.trend == "Bullish"
+        if context.signal == "BUY":
 
-            and context.score
+            if (
 
-            >= self.config.buy_score_threshold
+                context.trend == "Bullish"
 
-        ):
+                and context.score
 
-            return AIDirection.BUY
+                >= self.config.buy_score_threshold
 
-        if (
+                and self._indicators_are_directionally_aligned(
 
-            context.signal == "SELL"
+                    context,
 
-            and context.trend == "Bearish"
+                    AIDirection.BUY,
 
-            and context.score
+                )
 
-            <= self.config.sell_score_threshold
+            ):
 
-        ):
+                return AIDirection.BUY
 
-            return AIDirection.SELL
+        if context.signal == "SELL":
+
+            if (
+
+                context.trend == "Bearish"
+
+                and context.score
+
+                <= self.config.sell_score_threshold
+
+                and self._indicators_are_directionally_aligned(
+
+                    context,
+
+                    AIDirection.SELL,
+
+                )
+
+            ):
+
+                return AIDirection.SELL
 
         return AIDirection.WAIT
 
@@ -1128,6 +1324,44 @@ class AITradingDecisionEngine:
 
             )
 
+        if not self._required_indicators_available(context):
+
+            reasons.append(
+
+                "one or more required core indicators "
+
+                "are unavailable"
+
+            )
+
+        if (
+
+            context.signal in {"BUY", "SELL"}
+
+            and not self._indicators_are_directionally_aligned(
+
+                context,
+
+                (
+
+                    AIDirection.BUY
+
+                    if context.signal == "BUY"
+
+                    else AIDirection.SELL
+
+                ),
+
+            )
+
+        ):
+
+            reasons.append(
+
+                "core indicators are not directionally aligned"
+
+            )
+
         if confidence < self.config.minimum_confidence:
 
             reasons.append(
@@ -1204,11 +1438,21 @@ class AITradingDecisionEngine:
 
         Build a paper-only proposal.
 
-        ATR is used for the initial stop distance.
+        ATR supplies the initial stop distance.
 
         Minimum RR determines the target distance.
 
         """
+
+        if direction == AIDirection.WAIT:
+
+            return (
+
+                None,
+
+                "WAIT: no trade direction available.",
+
+            )
 
         if context.atr14 is None:
 
@@ -1232,13 +1476,21 @@ class AITradingDecisionEngine:
 
         entry = context.close
 
+        if entry <= 0:
+
+            return (
+
+                None,
+
+                "WAIT: entry price must be greater than zero.",
+
+            )
+
         if direction == AIDirection.BUY:
 
             stop_loss = (
 
-                entry
-
-                - context.atr14
+                entry - context.atr14
 
             )
 
@@ -1260,9 +1512,7 @@ class AITradingDecisionEngine:
 
             stop_loss = (
 
-                entry
-
-                + context.atr14
+                entry + context.atr14
 
             )
 
@@ -1299,6 +1549,44 @@ class AITradingDecisionEngine:
                     None,
 
                     "WAIT: calculated stop-loss is invalid.",
+
+                )
+
+        # Hard geometric validation.
+
+        if direction == AIDirection.BUY:
+
+            if not (
+
+                stop_loss < entry < take_profit
+
+            ):
+
+                return (
+
+                    None,
+
+                    "WAIT: BUY stop-loss/take-profit geometry "
+
+                    "is invalid.",
+
+                )
+
+        if direction == AIDirection.SELL:
+
+            if not (
+
+                take_profit < entry < stop_loss
+
+            ):
+
+                return (
+
+                    None,
+
+                    "WAIT: SELL stop-loss/take-profit geometry "
+
+                    "is invalid.",
 
                 )
 
@@ -1350,9 +1638,7 @@ class AITradingDecisionEngine:
 
             context.market_pressure_available
 
-            and context.market_pressure_score
-
-            is not None
+            and context.market_pressure_score is not None
 
         ):
 
@@ -1402,6 +1688,48 @@ class AITradingDecisionEngine:
 
         )
 
+        # Final immutable safety assertions.
+
+        if proposal.execution_type != "paper":
+
+            return (
+
+                None,
+
+                "WAIT: non-paper execution is prohibited.",
+
+            )
+
+        if not proposal.read_only:
+
+            return (
+
+                None,
+
+                "WAIT: AI proposal must remain read-only.",
+
+            )
+
+        if proposal.broker_order_required:
+
+            return (
+
+                None,
+
+                "WAIT: broker orders are prohibited.",
+
+            )
+
+        if not proposal.risk_engine_required:
+
+            return (
+
+                None,
+
+                "WAIT: Risk Engine is mandatory.",
+
+            )
+
         return proposal, None
 
     def evaluate(
@@ -1412,15 +1740,17 @@ class AITradingDecisionEngine:
 
     ) -> AIDecision:
 
-        """Evaluate the technical context."""
+        """Evaluate the technical context safely."""
+
+        # --------------------------------------------------------
+
+        # INPUT VALIDATION
+
+        # --------------------------------------------------------
 
         context.validate()
 
-        regime = self._market_regime(
-
-            context
-
-        )
+        regime = self._market_regime(context)
 
         setup = self._setup_type(
 
@@ -1430,11 +1760,7 @@ class AITradingDecisionEngine:
 
         )
 
-        confluence = self._confluence_score(
-
-            context
-
-        )
+        confluence = self._confluence_score(context)
 
         confidence = self._base_confidence(
 
@@ -1508,6 +1834,14 @@ class AITradingDecisionEngine:
 
                 ),
 
+                execution_type="paper",
+
+                read_only=True,
+
+                broker_order_required=False,
+
+                risk_engine_required=True,
+
                 market_regime=regime,
 
                 setup=setup,
@@ -1564,6 +1898,72 @@ class AITradingDecisionEngine:
 
                 ),
 
+                execution_type="paper",
+
+                read_only=True,
+
+                broker_order_required=False,
+
+                risk_engine_required=True,
+
+                market_regime=regime,
+
+                setup=setup,
+
+                confluence_score=confluence,
+
+                **pressure_fields,
+
+            )
+
+        # --------------------------------------------------------
+
+        # HARD CONFLUENCE CHECK
+
+        # --------------------------------------------------------
+
+        if confluence < self.config.minimum_confluence:
+
+            return AIDecision(
+
+                direction=AIDirection.WAIT,
+
+                symbol=context.symbol,
+
+                timeframe=context.timeframe,
+
+                confidence=confidence,
+
+                technical_score=context.score,
+
+                trend=context.trend,
+
+                signal=context.signal,
+
+                proposal=None,
+
+                reasoning=self._wait_reason(
+
+                    context,
+
+                    regime,
+
+                    setup,
+
+                    confluence,
+
+                    confidence,
+
+                ),
+
+                execution_type="paper",
+
+                read_only=True,
+
+                broker_order_required=False,
+
+                risk_engine_required=True,
+
                 market_regime=regime,
 
                 setup=setup,
@@ -1580,17 +1980,13 @@ class AITradingDecisionEngine:
 
         # --------------------------------------------------------
 
-        proposal, proposal_error = (
+        proposal, proposal_error = self._build_proposal(
 
-            self._build_proposal(
+            context,
 
-                context,
+            direction,
 
-                direction,
-
-                confidence,
-
-            )
+            confidence,
 
         )
 
@@ -1633,6 +2029,14 @@ class AITradingDecisionEngine:
                     )
 
                 ),
+
+                execution_type="paper",
+
+                read_only=True,
+
+                broker_order_required=False,
+
+                risk_engine_required=True,
 
                 market_regime=regime,
 
@@ -1789,12 +2193,6 @@ def ai_decision_to_dict(
         "confluence_score":
 
             decision.confluence_score,
-
-        # --------------------------------------------------------
-
-        # MARKET PRESSURE OUTPUT
-
-        # --------------------------------------------------------
 
         "market_pressure_score":
 
