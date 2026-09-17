@@ -26,9 +26,23 @@ from app.market_pressure import (
 
 )
 
-from app.risk_engine import RiskDecision, RiskEngine, SymbolSpecification
+from app.risk_engine import (
 
-from app.step14_pipeline import Step14Pipeline, Step14Result
+    RiskDecision,
+
+    RiskEngine,
+
+    SymbolSpecification,
+
+)
+
+from app.step14_pipeline import (
+
+    Step14Pipeline,
+
+    Step14Result,
+
+)
 
 from app.technical_indicators import (
 
@@ -58,11 +72,41 @@ class PaperRiskState:
 
 class TradingPipelineService:
 
-    """Application-level composition of Raymond's controlled trading layers.
+    """
+
+    Application-level composition of Raymond's controlled trading layers.
+
+    Pipeline:
+
+        LIVE CANDLES
+
+            ↓
+
+        TECHNICAL INDICATORS
+
+            ↓
+
+        MARKET PRESSURE
+
+            ↓
+
+        STEP 13 AI DECISION
+
+            ↓
+
+        STEP 14 RISK ENGINE
+
+            ↓
+
+        PAPER EXECUTION
 
     Market pressure is an advisory confluence layer and does not replace
 
-    the established technical strategy.
+    Raymond's established technical strategy.
+
+    This service is deliberately paper-only. It does not enable or perform
+
+    live broker execution.
 
     """
 
@@ -88,7 +132,11 @@ class TradingPipelineService:
 
             execution_gateway
 
-            or PaperExecutionGateway(live_trading_enabled=False)
+            or PaperExecutionGateway(
+
+                live_trading_enabled=False,
+
+            )
 
         )
 
@@ -114,21 +162,39 @@ class TradingPipelineService:
 
     ) -> TechnicalContext:
 
-        """Convert indicator output into the Step 13 technical context.
+        """
 
-        Market pressure is advisory only.
+        Convert indicator output into the Step 13 technical context.
 
-        IMPORTANT:
+        Market pressure has three valid states:
 
-        When pressure is unavailable, the hardened AI layer must receive:
+        1. Available:
 
-            market_pressure_score=None
+           - available=True
 
-            market_pressure_label="UNAVAILABLE"
+           - score is numeric
 
-            market_pressure_available=False
+           - label is directional/neutral
 
-        It must NOT receive a fabricated numeric score such as 0.
+        2. Unavailable:
+
+           - available=False
+
+           - score=None
+
+           - label="UNAVAILABLE"
+
+        3. No pressure object:
+
+           - available=False
+
+           - score=None
+
+           - label="UNAVAILABLE"
+
+        The unavailable representation is important because a numeric zero
+
+        must not be confused with an actual neutral pressure measurement.
 
         """
 
@@ -204,9 +270,19 @@ class TradingPipelineService:
 
     ) -> TechnicalContext:
 
-        """Build technical context while treating pressure as advisory."""
+        """
 
-        if not isinstance(symbol, str) or not symbol.strip():
+        Build technical context while treating market pressure as advisory.
+
+        Failure to calculate market pressure must not disable Raymond's
+
+        established technical strategy. In that situation pressure is marked
+
+        explicitly as unavailable.
+
+        """
+
+        if not symbol.strip():
 
             raise TradingPipelineServiceError(
 
@@ -214,7 +290,7 @@ class TradingPipelineService:
 
             )
 
-        if not isinstance(timeframe, str) or not timeframe.strip():
+        if not timeframe.strip():
 
             raise TradingPipelineServiceError(
 
@@ -242,7 +318,13 @@ class TradingPipelineService:
 
             )
 
-        except (TechnicalIndicatorError, ValueError) as exc:
+        except (
+
+            TechnicalIndicatorError,
+
+            ValueError,
+
+        ) as exc:
 
             raise TradingPipelineServiceError(
 
@@ -254,17 +336,29 @@ class TradingPipelineService:
 
         try:
 
-            market_pressure = calculate_market_pressure(candles)
+            market_pressure = calculate_market_pressure(
 
-        except (MarketPressureError, ValueError):
+                candles
+
+            )
+
+        except (
+
+            MarketPressureError,
+
+            ValueError,
+
+        ):
 
             # Market pressure is advisory only.
 
             #
 
-            # A pressure calculation failure must never disable
+            # If it cannot be calculated, Raymond continues using the
 
-            # Raymond's established technical strategy.
+            # established technical strategy. The context conversion above
+
+            # will represent pressure as unavailable.
 
             market_pressure = None
 
@@ -290,7 +384,19 @@ class TradingPipelineService:
 
     ) -> AIDecision:
 
-        """Run indicators -> pressure -> Step 13 AI.
+        """
+
+        Run:
+
+            indicators
+
+                →
+
+            market pressure
+
+                →
+
+            Step 13 AI
 
         No execution occurs in this method.
 
@@ -338,11 +444,25 @@ class TradingPipelineService:
 
     ) -> Step14Result:
 
-        """Run indicators -> pressure -> Step 13 -> Step 14.
+        """
 
-        This method evaluates the controlled pipeline but does not execute
+        Run:
 
-        a broker order.
+            indicators
+
+                →
+
+            market pressure
+
+                →
+
+            Step 13 AI
+
+                →
+
+            Step 14 Risk Engine
+
+        No execution occurs in this method.
 
         """
 
@@ -402,9 +522,29 @@ class TradingPipelineService:
 
     ) -> Step14Result:
 
-        """Run the complete paper-only pipeline.
+        """
 
-        Live execution remains disabled.
+        Run the complete paper-only pipeline.
+
+            indicators
+
+                →
+
+            market pressure
+
+                →
+
+            Step 13 AI
+
+                →
+
+            Step 14 Risk Engine
+
+                →
+
+            Paper Execution Gateway
+
+        Live broker execution is not permitted here.
 
         """
 
@@ -452,7 +592,11 @@ class TradingPipelineService:
 
     ) -> dict:
 
-        """Convert an AIDecision into a stable API response."""
+        """
+
+        Convert an AIDecision into a stable API response.
+
+        """
 
         proposal = decision.proposal
 
@@ -528,12 +672,6 @@ class TradingPipelineService:
 
         }
 
-        # Preserve market-pressure fields when they are exposed by the
-
-        # AIDecision model. This keeps the API compatible with both the
-
-        # pressure-aware and legacy decision models.
-
         for field in (
 
             "market_pressure_score",
@@ -546,7 +684,13 @@ class TradingPipelineService:
 
             if hasattr(decision, field):
 
-                payload[field] = getattr(decision, field)
+                payload[field] = getattr(
+
+                    decision,
+
+                    field,
+
+                )
 
         return payload
 
@@ -558,7 +702,11 @@ class TradingPipelineService:
 
     ) -> Optional[dict]:
 
-        """Convert a risk decision into a stable API response."""
+        """
+
+        Convert a RiskDecision into a stable API response.
+
+        """
 
         if risk_decision is None:
 
@@ -580,7 +728,11 @@ class TradingPipelineService:
 
             ),
 
-            "proposed_exposure": risk_decision.proposed_exposure,
+            "proposed_exposure": (
+
+                risk_decision.proposed_exposure
+
+            ),
 
             "open_positions": risk_decision.open_positions,
 
@@ -594,7 +746,11 @@ class TradingPipelineService:
 
     ) -> Optional[dict]:
 
-        """Convert an execution result into a stable API response."""
+        """
+
+        Convert an execution result into a stable API response.
+
+        """
 
         if execution_result is None:
 
@@ -642,7 +798,11 @@ class TradingPipelineService:
 
     ) -> dict:
 
-        """Convert the complete Step 14 result into an API response."""
+        """
+
+        Convert the complete Step 14 result into an API response.
+
+        """
 
         return {
 
