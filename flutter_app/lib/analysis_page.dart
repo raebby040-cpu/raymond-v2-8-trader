@@ -21,7 +21,11 @@ class _AnalysisPageState extends State<AnalysisPage> {
   String timeframe = 'H1';
 
   Map<String, dynamic> analysis = <String, dynamic>{};
-  Map<String, dynamic>? openPosition;
+
+  // IMPORTANT:
+  // Keep ALL open positions, not only positions.first.
+  List<Map<String, dynamic>> openPositions =
+      <Map<String, dynamic>>[];
 
   @override
   void initState() {
@@ -29,9 +33,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
     _loadEverything();
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // LOAD
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Future<void> _loadEverything() async {
     if (!mounted) return;
@@ -66,42 +70,36 @@ class _AnalysisPageState extends State<AnalysisPage> {
       final advisoryData =
           Map<String, dynamic>.from(advisoryRaw);
 
-      Map<String, dynamic> positionsData =
-          <String, dynamic>{};
-
-      final positionsRaw = results[1];
-
-      if (positionsRaw is Map) {
-        positionsData =
-            Map<String, dynamic>.from(positionsRaw);
-      }
-
-      Map<String, dynamic>? position;
+      final positionsData =
+          results[1] is Map
+              ? Map<String, dynamic>.from(results[1])
+              : <String, dynamic>{};
 
       final positions =
           positionsData['positions'];
 
-      if (positions is List &&
-          positions.isNotEmpty) {
-        final first = positions.first;
+      final allPositions =
+          <Map<String, dynamic>>[];
 
-        if (first is Map) {
-          position =
-              Map<String, dynamic>.from(first);
+      if (positions is List) {
+        for (final item in positions) {
+          if (item is Map) {
+            allPositions.add(
+              Map<String, dynamic>.from(item),
+            );
+          }
         }
       }
 
       final market =
           _map(advisoryData['market']);
 
-      final responseSymbol =
-          _string(
+      final responseSymbol = _string(
         market['symbol'],
         fallback: symbol,
       );
 
-      final responseTimeframe =
-          _string(
+      final responseTimeframe = _string(
         market['timeframe'],
         fallback: timeframe,
       );
@@ -110,7 +108,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
       setState(() {
         analysis = advisoryData;
-        openPosition = position;
+        openPositions = allPositions;
         symbol = responseSymbol;
         timeframe = responseTimeframe;
         loading = false;
@@ -127,9 +125,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
     }
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // SAFE DATA HELPERS
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Map<String, dynamic> _map(dynamic value) {
     if (value is Map) {
@@ -155,8 +153,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
       return fallback;
     }
 
-    final result =
-        value.toString().trim();
+    final result = value.toString().trim();
 
     if (result.isEmpty) {
       return fallback;
@@ -181,8 +178,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
     dynamic value, {
     double fallback = 0.0,
   }) {
-    return _numberNullable(value) ??
-        fallback;
+    return _numberNullable(value) ?? fallback;
   }
 
   int _int(
@@ -194,8 +190,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
     }
 
     if (value is String) {
-      return int.tryParse(value) ??
-          fallback;
+      return int.tryParse(value) ?? fallback;
     }
 
     return fallback;
@@ -241,8 +236,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
       return fallback;
     }
 
-    final text =
-        value.toString().trim();
+    final text = value.toString().trim();
 
     if (text.isEmpty) {
       return fallback;
@@ -256,33 +250,17 @@ class _AnalysisPageState extends State<AnalysisPage> {
     int decimals = 2,
     String fallback = '--',
   }) {
-    final number =
-        _numberNullable(value);
+    final number = _numberNullable(value);
 
     if (number == null) {
       return fallback;
     }
 
-    return number.toStringAsFixed(
-      decimals,
-    );
-  }
-
-  String _formatNullable(
-    dynamic value, {
-    int decimals = 2,
-    String fallback = '--',
-  }) {
-    return _format(
-      value,
-      decimals: decimals,
-      fallback: fallback,
-    );
+    return number.toStringAsFixed(decimals);
   }
 
   String _percent(dynamic value) {
-    final number =
-        _numberNullable(value);
+    final number = _numberNullable(value);
 
     if (number == null) {
       return '--';
@@ -291,9 +269,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
     return '${number.toStringAsFixed(1)}%';
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // COLORS
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Color _signalColor(String value) {
     switch (value.toUpperCase()) {
@@ -311,10 +289,6 @@ class _AnalysisPageState extends State<AnalysisPage> {
       default:
         return Colors.grey;
     }
-  }
-
-  Color _directionColor(String value) {
-    return _signalColor(value);
   }
 
   Color _statusColor(String value) {
@@ -344,9 +318,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
     return Colors.grey;
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // BUILD
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   @override
   Widget build(BuildContext context) {
@@ -360,9 +334,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
             tooltip: 'Refresh',
             onPressed:
                 loading ? null : _loadEverything,
-            icon: const Icon(
-              Icons.refresh,
-            ),
+            icon: const Icon(Icons.refresh),
           ),
         ],
       ),
@@ -371,8 +343,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
         child: ListView(
           physics:
               const AlwaysScrollableScrollPhysics(),
-          padding:
-              const EdgeInsets.all(14),
+          padding: const EdgeInsets.all(14),
           children: [
             _terminalHeader(),
 
@@ -399,7 +370,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
               const SizedBox(height: 12),
 
-              _openTradeSection(),
+              _openTradesSection(),
 
               const SizedBox(height: 12),
 
@@ -425,15 +396,14 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // HEADER
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Widget _terminalHeader() {
     return Card(
       child: Padding(
-        padding:
-            const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(14),
         child: Row(
           children: [
             Container(
@@ -473,10 +443,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
             Text(
               '$symbol\n$timeframe',
-              textAlign:
-                  TextAlign.right,
-              style:
-                  const TextStyle(
+              textAlign: TextAlign.right,
+              style: const TextStyle(
                 fontWeight:
                     FontWeight.bold,
               ),
@@ -490,8 +458,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
   Widget _loadingCard() {
     return Card(
       child: Padding(
-        padding:
-            const EdgeInsets.all(30),
+        padding: const EdgeInsets.all(30),
         child: Column(
           children: const [
             CircularProgressIndicator(),
@@ -500,8 +467,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
             Text(
               'RAYMOND is analysing the market...',
-              textAlign:
-                  TextAlign.center,
+              textAlign: TextAlign.center,
             ),
 
             SizedBox(height: 8),
@@ -509,8 +475,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
             Text(
               'Loading market data, indicators, '
               '8 brains and paper-trade state.',
-              textAlign:
-                  TextAlign.center,
+              textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 12,
               ),
@@ -524,8 +489,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
   Widget _errorCard() {
     return Card(
       child: Padding(
-        padding:
-            const EdgeInsets.all(18),
+        padding: const EdgeInsets.all(18),
         child: Column(
           children: [
             const Icon(
@@ -536,17 +500,14 @@ class _AnalysisPageState extends State<AnalysisPage> {
             const SizedBox(height: 10),
 
             Text(
-              error ??
-                  'Unknown error',
-              textAlign:
-                  TextAlign.center,
+              error ?? 'Unknown error',
+              textAlign: TextAlign.center,
             ),
 
             const SizedBox(height: 14),
 
             FilledButton.icon(
-              onPressed:
-                  _loadEverything,
+              onPressed: _loadEverything,
               icon: const Icon(
                 Icons.refresh,
               ),
@@ -559,9 +520,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // SECTION CARD
-  // -------------------------------------------------------------------------
+  // ===========================================================================
+  // SECTION
+  // ===========================================================================
 
   Widget _section({
     required String title,
@@ -570,8 +531,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
     bool initiallyExpanded = true,
   }) {
     return Card(
-      clipBehavior:
-          Clip.antiAlias,
+      clipBehavior: Clip.antiAlias,
       child: ExpansionTile(
         initiallyExpanded:
             initiallyExpanded,
@@ -579,8 +539,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
         title: Text(
           title,
           style: const TextStyle(
-            fontWeight:
-                FontWeight.bold,
+            fontWeight: FontWeight.bold,
           ),
         ),
         childrenPadding:
@@ -595,9 +554,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // MARKET
-  // -------------------------------------------------------------------------
+  // ===========================================================================
+  // LIVE MARKET
+  // ===========================================================================
 
   Widget _marketSection() {
     final market =
@@ -608,15 +567,12 @@ class _AnalysisPageState extends State<AnalysisPage> {
       market['price'],
     );
 
-    final source =
-        _string(
+    final source = _string(
       analysis['source'],
-      fallback:
-          'Online market feed',
+      fallback: 'Online market feed',
     );
 
-    final sourceType =
-        _string(
+    final sourceType = _string(
       analysis['source_type'],
       fallback:
           'public_reference_feed',
@@ -649,12 +605,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
           width: double.infinity,
           padding:
               const EdgeInsets.all(18),
-          decoration:
-              BoxDecoration(
+          decoration: BoxDecoration(
             borderRadius:
-                BorderRadius.circular(
-              14,
-            ),
+                BorderRadius.circular(14),
             border: Border.all(
               color:
                   Theme.of(context)
@@ -677,12 +630,10 @@ class _AnalysisPageState extends State<AnalysisPage> {
               Text(
                 price == null
                     ? '--'
-                    : price
-                        .toStringAsFixed(
+                    : price.toStringAsFixed(
                         2,
                       ),
-                style:
-                    const TextStyle(
+                style: const TextStyle(
                   fontSize: 34,
                   fontWeight:
                       FontWeight.w900,
@@ -714,28 +665,25 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // RAYMOND
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Widget _raymondSection() {
     final raymond =
         _map(analysis['raymond']);
 
-    final signal =
-        _string(
+    final signal = _string(
       raymond['signal'],
       fallback: 'WAIT',
     ).toUpperCase();
 
-    final direction =
-        _string(
+    final direction = _string(
       raymond['direction'],
       fallback: 'wait',
     ).toUpperCase();
 
-    final trend =
-        _string(
+    final trend = _string(
       raymond['trend'],
       fallback: 'Unavailable',
     );
@@ -750,14 +698,12 @@ class _AnalysisPageState extends State<AnalysisPage> {
       raymond['technical_score'],
     );
 
-    final regime =
-        _string(
+    final regime = _string(
       raymond['market_regime'],
       fallback: 'Unavailable',
     );
 
-    final setup =
-        _string(
+    final setup = _string(
       raymond['setup'],
       fallback: 'Unavailable',
     );
@@ -767,14 +713,13 @@ class _AnalysisPageState extends State<AnalysisPage> {
       raymond['confluence_score'],
     );
 
-    final reasoning =
-        _string(
+    final reasoning = _string(
       raymond['reasoning'],
       fallback:
           'No Raymond reasoning available.',
     );
 
-    final signalColor =
+    final color =
         _signalColor(signal);
 
     return _section(
@@ -785,15 +730,11 @@ class _AnalysisPageState extends State<AnalysisPage> {
           width: double.infinity,
           padding:
               const EdgeInsets.all(18),
-          decoration:
-              BoxDecoration(
+          decoration: BoxDecoration(
             borderRadius:
-                BorderRadius.circular(
-              14,
-            ),
+                BorderRadius.circular(14),
             border: Border.all(
-              color:
-                  signalColor.withValues(
+              color: color.withValues(
                 alpha: 0.55,
               ),
             ),
@@ -817,8 +758,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                   fontSize: 34,
                   fontWeight:
                       FontWeight.w900,
-                  color:
-                      signalColor,
+                  color: color,
                 ),
               ),
 
@@ -826,8 +766,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
               Text(
                 direction,
-                style:
-                    const TextStyle(
+                style: const TextStyle(
                   fontWeight:
                       FontWeight.bold,
                 ),
@@ -854,9 +793,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 technicalScore == null
                     ? '--'
                     : technicalScore
-                        .toStringAsFixed(
-                        0,
-                      ),
+                        .toStringAsFixed(0),
               ),
             ),
             Expanded(
@@ -865,9 +802,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 confluence == null
                     ? '--'
                     : confluence
-                        .toStringAsFixed(
-                        0,
-                      ),
+                        .toStringAsFixed(0),
               ),
             ),
           ],
@@ -894,19 +829,18 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
         _subCard(
           title: 'Raymond reasoning',
-          child: Text(
-            reasoning,
-          ),
+          child: Text(reasoning),
         ),
       ],
     );
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // 8 BRAINS
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
-  List<Map<String, dynamic>> _extractBrains(
+  List<Map<String, dynamic>>
+      _extractBrains(
     Map<String, dynamic> comparison,
   ) {
     final raw =
@@ -922,9 +856,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
     for (final item in raw) {
       if (item is Map) {
         result.add(
-          Map<String, dynamic>.from(
-            item,
-          ),
+          Map<String, dynamic>.from(item),
         );
       }
     }
@@ -939,19 +871,13 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
 
     final brains =
-        _extractBrains(
-      comparison,
-    );
+        _extractBrains(comparison);
 
     final advisory =
-        _map(
-          comparison['advisory'],
-        );
+        _map(comparison['advisory']);
 
     final comparisonResult =
-        _map(
-          comparison['comparison'],
-        );
+        _map(comparison['comparison']);
 
     final advisoryDirection =
         _string(
@@ -980,29 +906,23 @@ class _AnalysisPageState extends State<AnalysisPage> {
           advisory['score'],
         );
 
-    final buyVotes =
-        _int(
-          comparison['buy_votes'],
-          fallback: _int(
-            advisory['buy_votes'],
-          ),
-        );
+    final buyVotes = _int(
+      comparison['buy_votes'],
+      fallback:
+          _int(advisory['buy_votes']),
+    );
 
-    final sellVotes =
-        _int(
-          comparison['sell_votes'],
-          fallback: _int(
-            advisory['sell_votes'],
-          ),
-        );
+    final sellVotes = _int(
+      comparison['sell_votes'],
+      fallback:
+          _int(advisory['sell_votes']),
+    );
 
-    final waitVotes =
-        _int(
-          comparison['wait_votes'],
-          fallback: _int(
-            advisory['wait_votes'],
-          ),
-        );
+    final waitVotes = _int(
+      comparison['wait_votes'],
+      fallback:
+          _int(advisory['wait_votes']),
+    );
 
     final agreement =
         _numberNullable(
@@ -1015,44 +935,40 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
     final entryQuality =
         _string(
-          comparison[
-              'entry_quality'],
-          fallback: _string(
-            advisory['entry_quality'],
-            fallback: 'UNKNOWN',
-          ),
-        );
+      comparison['entry_quality'],
+      fallback: _string(
+        advisory['entry_quality'],
+        fallback: 'UNKNOWN',
+      ),
+    );
 
-    final status =
-        _string(
-          comparison['status'],
-          fallback: _string(
-            comparisonResult['status'],
-            fallback: 'UNKNOWN',
-          ),
-        );
+    final status = _string(
+      comparison['status'],
+      fallback: _string(
+        comparisonResult['status'],
+        fallback: 'UNKNOWN',
+      ),
+    );
 
-    final summary =
-        _string(
-          comparison['summary'],
-          fallback: _string(
-            comparisonResult['summary'],
-            fallback:
-                'No advisory comparison summary available.',
-          ),
-        );
+    final summary = _string(
+      comparison['summary'],
+      fallback: _string(
+        comparisonResult['summary'],
+        fallback:
+            'No advisory comparison summary available.',
+      ),
+    );
 
-    final warning =
-        _string(
-          comparison['warning'],
-          fallback: _string(
-            comparisonResult['warning'],
-            fallback: '',
-          ),
-        );
+    final warning = _string(
+      comparison['warning'],
+      fallback: _string(
+        comparisonResult['warning'],
+        fallback: '',
+      ),
+    );
 
     return _section(
-      title: '🧠 8 BRAINS — LIVE BREAKDOWN',
+      title: '8 BRAINS — LIVE BREAKDOWN',
       icon: Icons.hub,
       children: [
         _subCard(
@@ -1070,7 +986,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                         fontWeight:
                             FontWeight.w900,
                         color:
-                            _directionColor(
+                            _signalColor(
                           advisoryDirection,
                         ),
                       ),
@@ -1099,13 +1015,10 @@ class _AnalysisPageState extends State<AnalysisPage> {
                   Expanded(
                     child: _metric(
                       'Score',
-                      advisoryScore ==
-                              null
+                      advisoryScore == null
                           ? '--'
                           : advisoryScore
-                              .toStringAsFixed(
-                              1,
-                            ),
+                              .toStringAsFixed(1),
                     ),
                   ),
                   Expanded(
@@ -1143,13 +1056,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
               const SizedBox(height: 8),
 
-              Text(
-                summary,
-                style:
-                    const TextStyle(
-                  fontSize: 13,
-                ),
-              ),
+              Text(summary),
 
               if (warning.isNotEmpty) ...[
                 const SizedBox(height: 10),
@@ -1167,24 +1074,16 @@ class _AnalysisPageState extends State<AnalysisPage> {
           )
         else
           ...brains.asMap().entries.map(
-            (entry) {
-              final index =
-                  entry.key + 1;
-              final brain =
-                  entry.value;
-
-              return Padding(
-                padding:
-                    const EdgeInsets.only(
-                  bottom: 10,
-                ),
-                child:
-                    _brainCard(
-                  index,
-                  brain,
-                ),
-              );
-            },
+            (entry) => Padding(
+              padding:
+                  const EdgeInsets.only(
+                bottom: 10,
+              ),
+              child: _brainCard(
+                entry.key + 1,
+                entry.value,
+              ),
+            ),
           ),
       ],
     );
@@ -1194,15 +1093,12 @@ class _AnalysisPageState extends State<AnalysisPage> {
     int index,
     Map<String, dynamic> brain,
   ) {
-    final name =
-        _string(
+    final name = _string(
       brain['name'],
-      fallback:
-          'Brain $index',
+      fallback: 'Brain $index',
     );
 
-    final direction =
-        _string(
+    final direction = _string(
       brain['direction'],
       fallback: 'WAIT',
     );
@@ -1217,36 +1113,26 @@ class _AnalysisPageState extends State<AnalysisPage> {
       brain['score'],
     );
 
-    final summary =
-        _string(
+    final summary = _string(
       brain['summary'],
       fallback:
           'No evidence summary available.',
     );
 
     final evidence =
-        _list(
-      brain['evidence'],
-    );
+        _list(brain['evidence']);
 
     final color =
-        _directionColor(
-      direction,
-    );
+        _signalColor(direction);
 
     return Container(
       width: double.infinity,
-      padding:
-          const EdgeInsets.all(13),
-      decoration:
-          BoxDecoration(
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
         borderRadius:
-            BorderRadius.circular(
-          12,
-        ),
+            BorderRadius.circular(12),
         border: Border.all(
-          color:
-              color.withValues(
+          color: color.withValues(
             alpha: 0.35,
           ),
         ),
@@ -1261,8 +1147,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 radius: 15,
                 child: Text(
                   index.toString(),
-                  style:
-                      const TextStyle(
+                  style: const TextStyle(
                     fontSize: 12,
                     fontWeight:
                         FontWeight.bold,
@@ -1284,8 +1169,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
               ),
 
               Text(
-                direction
-                    .toUpperCase(),
+                direction.toUpperCase(),
                 style: TextStyle(
                   fontWeight:
                       FontWeight.w900,
@@ -1312,8 +1196,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                   'Score',
                   score == null
                       ? '--'
-                      : score
-                          .toStringAsFixed(
+                      : score.toStringAsFixed(
                           1,
                         ),
                 ),
@@ -1336,8 +1219,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
             const Text(
               'Evidence',
-              style:
-                  TextStyle(
+              style: TextStyle(
                 fontWeight:
                     FontWeight.bold,
                 fontSize: 12,
@@ -1376,28 +1258,28 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // TRADE PLAN
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Widget _tradePlanSection() {
     final raymond =
         _map(analysis['raymond']);
 
     final proposal =
-        _map(
-      raymond['proposal'],
-    );
+        _map(raymond['proposal']);
 
     final hasProposal =
         proposal.isNotEmpty;
 
-    final direction =
-        _string(
-          proposal['direction'],
-          fallback:
-              raymond['direction'],
-        ).toUpperCase();
+    final direction = _string(
+      proposal['direction'],
+      fallback:
+          _string(
+        raymond['direction'],
+        fallback: 'WAIT',
+      ),
+    ).toUpperCase();
 
     final entry =
         proposal['entry'] ??
@@ -1435,90 +1317,68 @@ class _AnalysisPageState extends State<AnalysisPage> {
         proposal['risk_approved'];
 
     return _section(
-      title: '📋 TRADE PLAN',
+      title: 'TRADE PLAN',
       icon: Icons.assignment,
       children: [
         if (!hasProposal)
           _warningBox(
             'No executable trade proposal is currently available. '
-            'RAYMOND is protecting the account and remains in '
-            '${_string(raymond['direction'], fallback: 'WAIT').toUpperCase()} '
-            'state.',
+            'RAYMOND remains in ${_string(raymond['direction'], fallback: 'WAIT').toUpperCase()} state.',
           ),
 
         _infoRow(
           'Direction',
           direction,
           valueColor:
-              _directionColor(
-            direction,
-          ),
+              _signalColor(direction),
         ),
 
         _infoRow(
           'Entry',
-          _formatNullable(
-            entry,
-          ),
+          _format(entry),
         ),
 
         _infoRow(
           'Stop Loss',
-          _formatNullable(
-            stopLoss,
-          ),
+          _format(stopLoss),
         ),
 
         _infoRow(
           'TP1',
-          _formatNullable(
-            tp1,
-          ),
+          _format(tp1),
         ),
 
         _infoRow(
           'TP2',
-          _formatNullable(
-            tp2,
-          ),
+          _format(tp2),
         ),
 
         _infoRow(
           'Risk : Reward',
-          _display(
-            riskReward,
-          ),
+          _display(riskReward),
         ),
 
         _infoRow(
           'Position size',
-          _display(
-            quantity,
-          ),
+          _display(quantity),
         ),
 
         _infoRow(
           'Risk amount',
-          _display(
-            riskAmount,
-          ),
+          _display(riskAmount),
         ),
 
         _infoRow(
           'Risk approved',
           riskApproved == null
               ? '--'
-              : _bool(
-                  riskApproved,
-                )
+              : _bool(riskApproved)
                   ? 'YES'
                   : 'NO',
           valueColor:
               riskApproved == null
                   ? null
-                  : _bool(
-                      riskApproved,
-                    )
+                  : _bool(riskApproved)
                       ? Colors.green
                       : Colors.red,
         ),
@@ -1538,186 +1398,366 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // OPEN PAPER TRADE
-  // -------------------------------------------------------------------------
+  // ===========================================================================
+  // ALL OPEN PAPER TRADES
+  // ===========================================================================
 
-  Widget _openTradeSection() {
-    final position =
-        openPosition;
-
-    if (position == null) {
+  Widget _openTradesSection() {
+    if (openPositions.isEmpty) {
       return _section(
-        title: '📈 OPEN PAPER TRADE',
+        title: 'OPEN PAPER TRADES',
         icon: Icons.candlestick_chart,
         children: [
           _emptyState(
             Icons.pause_circle_outline,
-            'NO OPEN PAPER TRADE',
-            'RAYMOND currently has no open paper position.',
+            'NO OPEN PAPER TRADES',
+            'RAYMOND currently has no open paper positions.',
           ),
         ],
       );
     }
 
-    final direction =
-        _string(
+    return _section(
+      title:
+          'OPEN PAPER TRADES (${openPositions.length})',
+      icon: Icons.candlestick_chart,
+      children: [
+        Container(
+          width: double.infinity,
+          padding:
+              const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius:
+                BorderRadius.circular(10),
+            border: Border.all(
+              color: Colors.green
+                  .withValues(alpha: 0.35),
+            ),
+          ),
+          child: Text(
+            '${openPositions.length} open paper '
+            '${openPositions.length == 1 ? 'position' : 'positions'} '
+            'currently tracked by RAYMOND.',
+            style: const TextStyle(
+              fontWeight:
+                  FontWeight.bold,
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 12),
+
+        // IMPORTANT:
+        // Every position is rendered independently.
+        ...openPositions.asMap().entries.map(
+          (entry) {
+            return Padding(
+              padding:
+                  const EdgeInsets.only(
+                bottom: 12,
+              ),
+              child: _openTradeCard(
+                entry.key + 1,
+                entry.value,
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _openTradeCard(
+    int index,
+    Map<String, dynamic> position,
+  ) {
+    final direction = _string(
       position['direction'],
       fallback: 'WAIT',
     ).toUpperCase();
 
-    final status =
-        _string(
+    final status = _string(
       position['status'],
       fallback: 'OPEN',
     ).toUpperCase();
 
+    final tradeId = _string(
+      position['trade_id'],
+      fallback: _string(
+        position['position_id'],
+        fallback: 'Position $index',
+      ),
+    );
+
     final entry =
-        position['entry'] ??
-        position['entry_price'];
+        position['entry_price'] ??
+        position['entry'];
 
     final currentPrice =
         position['current_price'] ??
         position['price'];
 
     final pnl =
-        position['pnl'];
+        position['pnl'] ??
+        position['profit_loss'];
 
     final pnlPercent =
-        position['pnl_percent'];
+        position['pnl_percent'] ??
+        position['profit_loss_percent'];
 
     final currentR =
-        position['current_r'];
+        position['current_r'] ??
+        position['r_multiple'];
 
     final stopLoss =
+        position['current_stop_loss'] ??
         position['current_sl'] ??
         position['stop_loss'] ??
         position['sl'];
 
-    final takeProfit =
+    final takeProfit1 =
+        position['take_profit_1'] ??
         position['take_profit'] ??
         position['tp'];
 
-    final quantity =
-        position['remaining_qty'] ??
-        position['qty'] ??
-        position['quantity'];
+    final takeProfit2 =
+        position['take_profit_2'];
 
-    final thesis =
-        _string(
-      position['thesis'],
-      fallback:
-          'No thesis recorded.',
+    final quantity =
+        position['remaining_quantity'] ??
+        position['remaining_qty'] ??
+        position['quantity'] ??
+        position['qty'];
+
+    final originalQuantity =
+        position['original_quantity'] ??
+        position['quantity'] ??
+        quantity;
+
+    final regime = _string(
+      position['market_regime'],
+      fallback: _string(
+        position['regime'],
+        fallback: '--',
+      ),
     );
 
-    return _section(
-      title: '📈 OPEN PAPER TRADE',
-      icon: Icons.candlestick_chart,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: _metric(
-                'Status',
-                status,
+    final setup = _string(
+      position['setup'],
+      fallback: '--',
+    );
+
+    final technicalScore =
+        position['technical_score'];
+
+    final confluence =
+        position['confluence_score'];
+
+    final confidence =
+        position['confidence'];
+
+    final thesis = _string(
+      position['trade_thesis'],
+      fallback: _string(
+        position['thesis'],
+        fallback: 'No thesis recorded.',
+      ),
+    );
+
+    final directionColor =
+        _signalColor(direction);
+
+    final pnlNumber =
+        _numberNullable(pnl);
+
+    return Container(
+      width: double.infinity,
+      padding:
+          const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius:
+            BorderRadius.circular(14),
+        border: Border.all(
+          color:
+              directionColor.withValues(
+            alpha: 0.45,
+          ),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              CircleAvatar(
+                radius: 16,
+                child: Text(
+                  index.toString(),
+                  style:
+                      const TextStyle(
+                    fontSize: 12,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
               ),
-            ),
-            Expanded(
-              child: _metric(
-                'Direction',
+
+              const SizedBox(width: 10),
+
+              Expanded(
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'PAPER POSITION $index',
+                      style:
+                          const TextStyle(
+                        fontWeight:
+                            FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      tradeId,
+                      style:
+                          const TextStyle(
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              _statusChip(
                 direction,
+                directionColor,
               ),
-            ),
-          ],
-        ),
-
-        const SizedBox(height: 12),
-
-        _infoRow(
-          'Entry',
-          _formatNullable(
-            entry,
+            ],
           ),
-        ),
 
-        _infoRow(
-          'Current price',
-          _formatNullable(
-            currentPrice,
+          const SizedBox(height: 12),
+
+          Row(
+            children: [
+              Expanded(
+                child: _metric(
+                  'Status',
+                  status,
+                ),
+              ),
+              Expanded(
+                child: _metric(
+                  'Direction',
+                  direction,
+                ),
+              ),
+            ],
           ),
-        ),
 
-        _infoRow(
-          'P&L',
-          _display(
-            pnl,
+          const SizedBox(height: 10),
+
+          _infoRow(
+            'Entry',
+            _format(entry),
           ),
-          valueColor:
-              _numberNullable(pnl) == null
-                  ? null
-                  : _number(pnl) >= 0
-                      ? Colors.green
-                      : Colors.red,
-        ),
 
-        _infoRow(
-          'P&L %',
-          _display(
-            pnlPercent,
+          _infoRow(
+            'Current price',
+            _format(currentPrice),
           ),
-        ),
 
-        _infoRow(
-          'R',
-          _display(
-            currentR,
+          _infoRow(
+            'Position size',
+            _display(quantity),
           ),
-        ),
 
-        _infoRow(
-          'Stop Loss',
-          _display(
-            stopLoss,
+          _infoRow(
+            'Original size',
+            _display(originalQuantity),
           ),
-        ),
 
-        _infoRow(
-          'Take Profit',
-          _display(
-            takeProfit,
+          _infoRow(
+            'Stop Loss',
+            _format(stopLoss),
           ),
-        ),
 
-        _infoRow(
-          'Position size',
-          _display(
-            quantity,
+          _infoRow(
+            'Take Profit 1',
+            _format(takeProfit1),
           ),
-        ),
 
-        const SizedBox(height: 8),
-
-        _subCard(
-          title: 'Trade thesis',
-          child: Text(
-            thesis,
+          _infoRow(
+            'Take Profit 2',
+            _format(takeProfit2),
           ),
-        ),
-      ],
+
+          _infoRow(
+            'P&L',
+            _display(pnl),
+            valueColor:
+                pnlNumber == null
+                    ? null
+                    : pnlNumber >= 0
+                        ? Colors.green
+                        : Colors.red,
+          ),
+
+          _infoRow(
+            'P&L %',
+            _display(pnlPercent),
+          ),
+
+          _infoRow(
+            'Current R',
+            _display(currentR),
+          ),
+
+          _infoRow(
+            'Regime',
+            regime,
+          ),
+
+          _infoRow(
+            'Setup',
+            setup,
+          ),
+
+          _infoRow(
+            'Technical score',
+            _display(technicalScore),
+          ),
+
+          _infoRow(
+            'Confluence',
+            _display(confluence),
+          ),
+
+          _infoRow(
+            'Confidence',
+            _display(confidence),
+          ),
+
+          const SizedBox(height: 8),
+
+          _subCard(
+            title: 'Trade thesis',
+            child: Text(thesis),
+          ),
+        ],
+      ),
     );
   }
 
-  // -------------------------------------------------------------------------
-  // MANAGEMENT
-  // -------------------------------------------------------------------------
+  // ===========================================================================
+  // MANAGEMENT FOR ALL POSITIONS
+  // ===========================================================================
 
   Widget _managementSection() {
-    final position =
-        openPosition;
-
-    if (position == null) {
+    if (openPositions.isEmpty) {
       return _section(
-        title: '🛡️ TRADE MANAGEMENT',
+        title: 'TRADE MANAGEMENT',
         icon: Icons.shield,
         children: [
           _emptyState(
@@ -1729,92 +1769,27 @@ class _AnalysisPageState extends State<AnalysisPage> {
       );
     }
 
-    final breakEven =
-        _bool(
-      position['break_even_applied'],
-    );
-
-    final partial =
-        _bool(
-      position['partial_close_applied'],
-    );
-
-    final trailing =
-        _bool(
-      position['trailing_active'],
-    );
-
-    final managementStatus =
-        _string(
-      position['management_status'],
-      fallback: 'ACTIVE',
-    );
-
-    final lastAction =
-        _string(
-      position['last_management_action'],
-      fallback: 'None',
-    );
-
-    final lastActionTime =
-        _string(
-      position['last_management_time'],
-      fallback: '--',
-    );
-
     return _section(
-      title: '🛡️ TRADE MANAGEMENT',
+      title: 'TRADE MANAGEMENT',
       icon: Icons.shield,
       children: [
-        _infoRow(
-          'Management state',
-          managementStatus,
+        ...openPositions.asMap().entries.map(
+          (entry) {
+            return Padding(
+              padding:
+                  const EdgeInsets.only(
+                bottom: 12,
+              ),
+              child:
+                  _managementCard(
+                entry.key + 1,
+                entry.value,
+              ),
+            );
+          },
         ),
 
-        _infoRow(
-          'Break-even',
-          breakEven
-              ? 'APPLIED'
-              : 'NOT APPLIED',
-          valueColor:
-              breakEven
-                  ? Colors.green
-                  : null,
-        ),
-
-        _infoRow(
-          'Partial profit',
-          partial
-              ? 'APPLIED'
-              : 'NOT APPLIED',
-          valueColor:
-              partial
-                  ? Colors.green
-                  : null,
-        ),
-
-        _infoRow(
-          'Trailing protection',
-          trailing
-              ? 'ACTIVE'
-              : 'INACTIVE',
-          valueColor:
-              trailing
-                  ? Colors.green
-                  : null,
-        ),
-
-        _infoRow(
-          'Last action',
-          lastAction,
-        ),
-
-        _infoRow(
-          'Last action time',
-          lastActionTime,
-        ),
-
-        const SizedBox(height: 10),
+        const SizedBox(height: 4),
 
         const Text(
           'Paper-trade management is displayed from '
@@ -1828,16 +1803,149 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
+  Widget _managementCard(
+    int index,
+    Map<String, dynamic> position,
+  ) {
+    final tradeId = _string(
+      position['trade_id'],
+      fallback: _string(
+        position['position_id'],
+        fallback:
+            'Position $index',
+      ),
+    );
+
+    final breakEven = _bool(
+      position['break_even_applied'],
+    );
+
+    final partial = _bool(
+      position['partial_close_applied'],
+    );
+
+    final trailing = _bool(
+      position['trailing_active'],
+    );
+
+    final managementStatus =
+        _string(
+      position['management_status'],
+      fallback: 'ACTIVE',
+    );
+
+    final lastAction = _string(
+      position['last_management_action'],
+      fallback: 'None',
+    );
+
+    final lastActionTime =
+        _string(
+      position['last_management_time'],
+      fallback: '--',
+    );
+
+    return Container(
+      width: double.infinity,
+      padding:
+          const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        borderRadius:
+            BorderRadius.circular(12),
+        border: Border.all(
+          color: Theme.of(context)
+              .dividerColor,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'POSITION $index',
+                  style:
+                      const TextStyle(
+                    fontWeight:
+                        FontWeight.w900,
+                  ),
+                ),
+              ),
+              Text(
+                tradeId,
+                style:
+                    const TextStyle(
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          _infoRow(
+            'Management state',
+            managementStatus,
+          ),
+
+          _infoRow(
+            'Break-even',
+            breakEven
+                ? 'APPLIED'
+                : 'NOT APPLIED',
+            valueColor:
+                breakEven
+                    ? Colors.green
+                    : null,
+          ),
+
+          _infoRow(
+            'Partial profit',
+            partial
+                ? 'APPLIED'
+                : 'NOT APPLIED',
+            valueColor:
+                partial
+                    ? Colors.green
+                    : null,
+          ),
+
+          _infoRow(
+            'Trailing protection',
+            trailing
+                ? 'ACTIVE'
+                : 'INACTIVE',
+            valueColor:
+                trailing
+                    ? Colors.green
+                    : null,
+          ),
+
+          _infoRow(
+            'Last action',
+            lastAction,
+          ),
+
+          _infoRow(
+            'Last action time',
+            lastActionTime,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ===========================================================================
   // REASONING
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Widget _reasoningSection() {
     final raymond =
         _map(analysis['raymond']);
 
-    final reasoning =
-        _string(
+    final reasoning = _string(
       raymond['reasoning'],
       fallback:
           'No Raymond reasoning is available.',
@@ -1845,51 +1953,46 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
     final comparison =
         _map(
-      analysis['advisory_comparison'],
+      analysis[
+          'advisory_comparison'],
     );
 
     final comparisonMap =
         _map(
-          comparison['comparison'],
-        );
+      comparison['comparison'],
+    );
 
-    final summary =
-        _string(
-          comparison['summary'],
-          fallback: _string(
-            comparisonMap['summary'],
-            fallback:
-                'No comparison summary available.',
-          ),
-        );
+    final summary = _string(
+      comparison['summary'],
+      fallback: _string(
+        comparisonMap['summary'],
+        fallback:
+            'No comparison summary available.',
+      ),
+    );
 
-    final warning =
-        _string(
-          comparison['warning'],
-          fallback: _string(
-            comparisonMap['warning'],
-            fallback: '',
-          ),
-        );
+    final warning = _string(
+      comparison['warning'],
+      fallback: _string(
+        comparisonMap['warning'],
+        fallback: '',
+      ),
+    );
 
     return _section(
-      title: '🧩 DECISION REASONING',
+      title: 'DECISION REASONING',
       icon: Icons.lightbulb_outline,
       children: [
         _subCard(
           title: 'Raymond',
-          child: Text(
-            reasoning,
-          ),
+          child: Text(reasoning),
         ),
 
         const SizedBox(height: 10),
 
         _subCard(
           title: 'Advisory comparison',
-          child: Text(
-            summary,
-          ),
+          child: Text(summary),
         ),
 
         if (warning.isNotEmpty) ...[
@@ -1900,57 +2003,52 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // TECHNICAL INDICATORS
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Widget _technicalIndicatorsSection() {
     final indicators =
         _map(
-          analysis['indicators'],
-        );
+      analysis['indicators'],
+    );
 
     final values =
         _map(
-          indicators['indicators'],
-        );
+      indicators['indicators'],
+    );
 
-    final trend =
-        _string(
-          _map(
-            indicators['analysis'],
-          )['trend'],
-          fallback:
-              _string(
-            indicators['trend'],
-            fallback: '--',
-          ),
-        );
+    final technicalAnalysis =
+        _map(
+      indicators['analysis'],
+    );
 
-    final signal =
-        _string(
-          _map(
-            indicators['analysis'],
-          )['signal'],
-          fallback:
-              _string(
-            indicators['signal'],
-            fallback: '--',
-          ),
-        );
+    final trend = _string(
+      technicalAnalysis['trend'],
+      fallback: _string(
+        indicators['trend'],
+        fallback: '--',
+      ),
+    );
+
+    final signal = _string(
+      technicalAnalysis['signal'],
+      fallback: _string(
+        indicators['signal'],
+        fallback: '--',
+      ),
+    );
 
     final score =
         _numberNullable(
-          _map(
-            indicators['analysis'],
-          )['score'],
+          technicalAnalysis['score'],
         ) ??
         _numberNullable(
           indicators['score'],
         );
 
     return _section(
-      title: '📊 TECHNICAL INDICATORS',
+      title: 'TECHNICAL INDICATORS',
       icon: Icons.analytics,
       children: [
         _infoRow(
@@ -2020,69 +2118,66 @@ class _AnalysisPageState extends State<AnalysisPage> {
           'Technical score',
           score == null
               ? '--'
-              : score.toStringAsFixed(
-                  0,
-                ),
+              : score.toStringAsFixed(0),
         ),
 
         _infoRow(
           'Candles used',
           _display(
-            indicators['candles_used'],
+            indicators[
+                'candles_used'],
           ),
         ),
       ],
     );
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // SAFETY
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Widget _safetySection() {
     final safety =
-        _map(
-          analysis['safety'],
-        );
+        _map(analysis['safety']);
 
-    final paper =
-        _bool(
-          safety['paper_trading_enabled'],
-          fallback: true,
-        );
+    final paper = _bool(
+      safety[
+          'paper_trading_enabled'],
+      fallback: true,
+    );
 
-    final live =
-        _bool(
-          safety['live_trading_enabled'],
-          fallback: false,
-        );
+    final live = _bool(
+      safety[
+          'live_trading_enabled'],
+      fallback: false,
+    );
 
-    final execution =
-        _bool(
-          safety['execution_authorized'],
-          fallback: false,
-        );
+    final execution = _bool(
+      safety[
+          'execution_authorized'],
+      fallback: false,
+    );
 
-    final broker =
-        _bool(
-          safety['broker_orders_allowed'],
-          fallback: false,
-        );
+    final broker = _bool(
+      safety[
+          'broker_orders_allowed'],
+      fallback: false,
+    );
 
-    final riskBypass =
-        _bool(
-          safety['risk_engine_bypass'],
-          fallback: false,
-        );
+    final riskBypass = _bool(
+      safety[
+          'risk_engine_bypass'],
+      fallback: false,
+    );
 
-    final step13Replaced =
-        _bool(
-          safety['step13_replaced'],
-          fallback: false,
-        );
+    final step13Replaced = _bool(
+      safety[
+          'step13_replaced'],
+      fallback: false,
+    );
 
     return _section(
-      title: '🛡️ SAFETY PANEL',
+      title: 'SAFETY PANEL',
       icon: Icons.security,
       children: [
         _safetyRow(
@@ -2127,17 +2222,12 @@ class _AnalysisPageState extends State<AnalysisPage> {
           width: double.infinity,
           padding:
               const EdgeInsets.all(13),
-          decoration:
-              BoxDecoration(
+          decoration: BoxDecoration(
             borderRadius:
-                BorderRadius.circular(
-              12,
-            ),
+                BorderRadius.circular(12),
             border: Border.all(
               color: Colors.green
-                  .withValues(
-                alpha: 0.5,
-              ),
+                  .withValues(alpha: 0.5),
             ),
           ),
           child: const Column(
@@ -2145,17 +2235,19 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 CrossAxisAlignment.start,
             children: [
               Text(
-                'READ-ONLY ADVISORY MODE',
+                'READ-ONLY / PAPER MODE',
                 style: TextStyle(
                   fontWeight:
                       FontWeight.w900,
                 ),
               ),
+
               SizedBox(height: 5),
+
               Text(
-                'The terminal can analyse markets and '
-                'display paper-trading state, but it does '
-                'not authorize live broker execution.',
+                'The terminal analyses markets and '
+                'displays paper-trading state. '
+                'Live broker execution remains disabled.',
                 style: TextStyle(
                   fontSize: 12,
                 ),
@@ -2167,9 +2259,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
     );
   }
 
-  // -------------------------------------------------------------------------
+  // ===========================================================================
   // UI HELPERS
-  // -------------------------------------------------------------------------
+  // ===========================================================================
 
   Widget _metric(
     String label,
@@ -2186,8 +2278,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
         children: [
           Text(
             label,
-            style:
-                const TextStyle(
+            style: const TextStyle(
               fontSize: 11,
               color: Colors.grey,
             ),
@@ -2197,43 +2288,13 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
           Text(
             value,
-            style:
-                const TextStyle(
+            style: const TextStyle(
               fontWeight:
                   FontWeight.bold,
             ),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _largeMetric(
-    String label,
-    String value,
-  ) {
-    return Column(
-      children: [
-        Text(
-          label,
-          style:
-              const TextStyle(
-            fontSize: 11,
-            fontWeight:
-                FontWeight.bold,
-          ),
-        ),
-        const SizedBox(height: 5),
-        Text(
-          value,
-          style:
-              const TextStyle(
-            fontSize: 30,
-            fontWeight:
-                FontWeight.w900,
-          ),
-        ),
-      ],
     );
   }
 
@@ -2272,8 +2333,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
                 fontSize: 13,
                 fontWeight:
                     FontWeight.bold,
-                color:
-                    valueColor,
+                color: valueColor,
               ),
             ),
           ),
@@ -2292,15 +2352,11 @@ class _AnalysisPageState extends State<AnalysisPage> {
         horizontal: 9,
         vertical: 5,
       ),
-      decoration:
-          BoxDecoration(
+      decoration: BoxDecoration(
         borderRadius:
-            BorderRadius.circular(
-          20,
-        ),
+            BorderRadius.circular(20),
         border: Border.all(
-          color:
-              color.withValues(
+          color: color.withValues(
             alpha: 0.5,
           ),
         ),
@@ -2325,12 +2381,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
       width: double.infinity,
       padding:
           const EdgeInsets.all(13),
-      decoration:
-          BoxDecoration(
+      decoration: BoxDecoration(
         borderRadius:
-            BorderRadius.circular(
-          12,
-        ),
+            BorderRadius.circular(12),
         border: Border.all(
           color:
               Theme.of(context)
@@ -2343,8 +2396,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
         children: [
           Text(
             title,
-            style:
-                const TextStyle(
+            style: const TextStyle(
               fontWeight:
                   FontWeight.bold,
               fontSize: 12,
@@ -2366,17 +2418,12 @@ class _AnalysisPageState extends State<AnalysisPage> {
       width: double.infinity,
       padding:
           const EdgeInsets.all(12),
-      decoration:
-          BoxDecoration(
+      decoration: BoxDecoration(
         borderRadius:
-            BorderRadius.circular(
-          10,
-        ),
+            BorderRadius.circular(10),
         border: Border.all(
-          color:
-              Colors.orange.withValues(
-            alpha: 0.5,
-          ),
+          color: Colors.orange
+              .withValues(alpha: 0.5),
         ),
       ),
       child: Row(
@@ -2456,9 +2503,6 @@ class _AnalysisPageState extends State<AnalysisPage> {
     final correct =
         enabled == safeExpected;
 
-    final display =
-        enabled ? 'ON' : 'OFF';
-
     return Padding(
       padding:
           const EdgeInsets.symmetric(
@@ -2489,7 +2533,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
           ),
 
           Text(
-            display,
+            enabled ? 'ON' : 'OFF',
             style: TextStyle(
               fontWeight:
                   FontWeight.bold,
