@@ -27,9 +27,9 @@ Flow:
             ↓
     Fresh public XAUUSD candles
             ↓
-    Existing indicator engine
+    Existing indicator + AI decision pipeline
             ↓
-    Existing AI decision engine
+    AutomaticTradeManagerAdapter
             ↓
     AutomaticTradeManager
             ↓
@@ -40,8 +40,7 @@ Flow:
 IMPORTANT:
 
 CLOSE decisions are reported but are NOT executed by this
-service yet. Existing lifecycle closure remains authoritative
-until the dedicated CLOSE integration stage is added.
+service yet. Existing lifecycle closure remains authoritative.
 """
 
 from __future__ import annotations
@@ -56,7 +55,6 @@ try:
     from .online_market_api import _fetch_chart
     from .trading_pipeline_service import TradingPipelineService
     from .automatic_trade_manager_adapter import (
-        AutomaticManagementInput,
         AutomaticTradeManagerAdapter,
     )
     from .automatic_trade_management_persistence import (
@@ -67,7 +65,6 @@ except ImportError:
     from online_market_api import _fetch_chart
     from trading_pipeline_service import TradingPipelineService
     from automatic_trade_manager_adapter import (
-        AutomaticManagementInput,
         AutomaticTradeManagerAdapter,
     )
     from automatic_trade_management_persistence import (
@@ -78,15 +75,12 @@ except ImportError:
 @dataclass(frozen=True)
 class AutomaticTradeManagementServiceConfig:
     """
-    Configuration for the automatic management service.
+    Configuration for Stage 17.5 automatic management.
     """
 
     symbol: str = "XAUUSD"
-
     timeframe: str = "M15"
-
     candle_limit: int = 100
-
     enabled: bool = True
 
     def validate(self) -> None:
@@ -109,29 +103,19 @@ class AutomaticTradeManagementServiceConfig:
 @dataclass(frozen=True)
 class AutomaticTradeManagementResult:
     """
-    Result for one management evaluation.
+    Result for one automatic management evaluation.
     """
 
     position_id: str
-
     trade_id: Optional[str]
-
     symbol: str
-
     action: str
-
     current_price: float
-
     new_stop_loss: Optional[float]
-
     new_take_profit: Optional[float]
-
     profit_r: float
-
     reason: str
-
     persisted: bool
-
     error: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -154,11 +138,9 @@ class AutomaticTradeManagementService:
     """
     Orchestrates Stage 17.5 automatic management.
 
-    This class is intentionally separate from the existing
-    30-second paper-position lifecycle loop.
+    This service manages EXISTING persistent paper positions.
 
-    It can therefore be connected to the online worker without
-    rewriting the existing lifecycle or advanced management code.
+    It does not create trades or place broker orders.
     """
 
     def __init__(
@@ -204,9 +186,7 @@ class AutomaticTradeManagementService:
 
     def get_open_positions(self) -> list[Position]:
         """
-        Return all currently open persistent positions.
-
-        Only open positions are eligible for automatic management.
+        Return all currently open persistent paper positions.
         """
 
         return (
@@ -218,7 +198,7 @@ class AutomaticTradeManagementService:
         )
 
     # ============================================================
-    # CURRENT PRICE
+    # CURRENT MARKET PRICE
     # ============================================================
 
     @staticmethod
@@ -226,7 +206,7 @@ class AutomaticTradeManagementService:
         market_data: dict[str, Any],
     ) -> float:
         """
-        Extract the latest public-feed price.
+        Extract and validate the latest public-feed price.
         """
 
         price = market_data.get("price")
@@ -246,21 +226,21 @@ class AutomaticTradeManagementService:
         return value
 
     # ============================================================
-    # MARKET ANALYSIS
+    # FRESH MARKET ANALYSIS
     # ============================================================
 
     async def _fresh_analysis(
         self,
     ) -> tuple[float, Any]:
         """
-        Fetch fresh public candles and run the EXISTING
-        indicator + AI decision pipeline.
+        Fetch fresh public XAUUSD candles and run the EXISTING
+        RAYMOND indicator + AI decision pipeline.
 
-        This is decision-only.
+        Decision-only.
 
-        No Risk Engine execution occurs.
-        No paper order occurs.
-        No broker order occurs.
+        No Risk Engine execution occurs here.
+        No paper order occurs here.
+        No broker order occurs here.
         """
 
         chart = await _fetch_chart(
@@ -289,29 +269,17 @@ class AutomaticTradeManagementService:
         return current_price, decision
 
     # ============================================================
-    # POSITION → MANAGEMENT INPUT
+    # POSITION IDENTIFIERS
     # ============================================================
-
-    @staticmethod
-    def _direction(
-        position: Position,
-    ) -> str:
-        """
-        Normalize the SQLAlchemy TradeDirection enum.
-        """
-
-        value = getattr(
-            position.direction,
-            "value",
-            position.direction,
-        )
-
-        return str(value).lower()
 
     @staticmethod
     def _position_id(
         position: Position,
     ) -> str:
+        """
+        Safely obtain the persistent position ID.
+        """
+
         value = getattr(
             position,
             "position_id",
@@ -329,6 +297,10 @@ class AutomaticTradeManagementService:
     def _trade_id(
         position: Position,
     ) -> Optional[str]:
+        """
+        Safely obtain the associated paper trade ID.
+        """
+
         value = getattr(
             position,
             "trade_id",
@@ -339,101 +311,6 @@ class AutomaticTradeManagementService:
             return None
 
         return str(value)
-
-    @staticmethod
-    def _float_or_none(
-        value: Any,
-    ) -> Optional[float]:
-        if value is None:
-            return None
-
-        return float(value)
-
-    def _build_management_input(
-        self,
-        *,
-        position: Position,
-        current_price: float,
-        decision: Any,
-    ) -> AutomaticManagementInput:
-        """
-        Build the Stage 17.5 adapter input from the persistent
-        position plus the fresh existing AI decision.
-        """
-
-        return AutomaticManagementInput(
-            trade_id=(
-                self._trade_id(position)
-                or self._position_id(position)
-            ),
-            direction=self._direction(position),
-            entry_price=float(
-                position.entry_price
-            ),
-            current_price=float(
-                current_price
-            ),
-            stop_loss=(
-                self._float_or_none(
-                    getattr(
-                        position,
-                        "current_stop_loss",
-                        None,
-                    )
-                )
-                or self._float_or_none(
-                    getattr(
-                        position,
-                        "stop_loss",
-                        None,
-                    )
-                )
-            ),
-            take_profit=(
-                self._float_or_none(
-                    getattr(
-                        position,
-                        "take_profit_1",
-                        None,
-                    )
-                )
-                or self._float_or_none(
-                    getattr(
-                        position,
-                        "take_profit",
-                        None,
-                    )
-                )
-            ),
-            initial_stop_loss=(
-                self._float_or_none(
-                    getattr(
-                        position,
-                        "initial_stop_loss",
-                        None,
-                    )
-                )
-            ),
-            risk_1r=(
-                self._float_or_none(
-                    getattr(
-                        position,
-                        "risk_1r",
-                        None,
-                    )
-                )
-            ),
-            market_strength=(
-                self.adapter.market_strength_from_decision(
-                    decision
-                )
-            ),
-            thesis_invalidated=(
-                self.adapter.thesis_invalidated_from_decision(
-                    decision
-                )
-            ),
-        )
 
     # ============================================================
     # ONE POSITION
@@ -447,10 +324,20 @@ class AutomaticTradeManagementService:
         decision: Any = None,
     ) -> AutomaticTradeManagementResult:
         """
-        Evaluate one open position.
+        Evaluate one existing open paper position.
 
-        If current_price and decision are not supplied, fresh
-        public market analysis is performed.
+        If market price and decision are not supplied, this
+        method obtains fresh public market analysis.
+
+        IMPORTANT:
+
+        The AutomaticTradeManagerAdapter is called with the
+        actual Position object.
+
+        The adapter then builds AutomaticManagementInput itself.
+
+        This is required because the adapter's thesis validation
+        function requires BOTH the decision and the position.
         """
 
         position_id = self._position_id(
@@ -462,23 +349,48 @@ class AutomaticTradeManagementService:
         )
 
         try:
-            if current_price is None or decision is None:
+
+            # ----------------------------------------------------
+            # FRESH ANALYSIS
+            # ----------------------------------------------------
+
+            if (
+                current_price is None
+                or decision is None
+            ):
                 (
                     current_price,
                     decision,
                 ) = await self._fresh_analysis()
 
-            management_input = (
-                self._build_management_input(
-                    position=position,
-                    current_price=current_price,
-                    decision=decision,
-                )
-            )
+            # ----------------------------------------------------
+            # CRITICAL ADAPTER INTEGRATION
+            # ----------------------------------------------------
+            #
+            # DO NOT pass AutomaticManagementInput here.
+            #
+            # The current adapter expects:
+            #
+            #   position=
+            #   decision=
+            #   current_price=
+            #
+            # The adapter itself then:
+            #
+            #   1. reads the persistent position
+            #   2. calculates market strength
+            #   3. checks thesis invalidation
+            #   4. builds AutomaticManagementInput
+            #   5. calls AutomaticTradeManager
+            #
+            # This preserves the existing management architecture.
+            # ----------------------------------------------------
 
             management_decision = (
                 self.adapter.evaluate(
-                    management_input
+                    position=position,
+                    decision=decision,
+                    current_price=current_price,
                 )
             )
 
@@ -494,7 +406,13 @@ class AutomaticTradeManagementService:
                 management_decision.new_take_profit
             )
 
-            persisted = False
+            profit_r = float(
+                management_decision.profit_r
+            )
+
+            reason = (
+                management_decision.reason
+            )
 
             # ----------------------------------------------------
             # HOLD
@@ -503,6 +421,7 @@ class AutomaticTradeManagementService:
             if self.adapter.is_actionable(
                 management_decision
             ) is False:
+
                 return AutomaticTradeManagementResult(
                     position_id=position_id,
                     trade_id=trade_id,
@@ -513,15 +432,13 @@ class AutomaticTradeManagementService:
                     ),
                     new_stop_loss=new_stop_loss,
                     new_take_profit=new_take_profit,
-                    profit_r=float(
-                        management_decision.profit_r
-                    ),
-                    reason=management_decision.reason,
+                    profit_r=profit_r,
+                    reason=reason,
                     persisted=False,
                 )
 
             # ----------------------------------------------------
-            # SL / TP MODIFICATIONS
+            # STOP LOSS / TAKE PROFIT MODIFICATION
             # ----------------------------------------------------
 
             if (
@@ -532,6 +449,7 @@ class AutomaticTradeManagementService:
                     management_decision
                 )
             ):
+
                 updated = (
                     AutomaticTradeManagementPersistence
                     .persist_decision(
@@ -547,20 +465,36 @@ class AutomaticTradeManagementService:
                     updated is not None
                 )
 
+                return AutomaticTradeManagementResult(
+                    position_id=position_id,
+                    trade_id=trade_id,
+                    symbol=self.config.symbol,
+                    action=action,
+                    current_price=float(
+                        current_price
+                    ),
+                    new_stop_loss=new_stop_loss,
+                    new_take_profit=new_take_profit,
+                    profit_r=profit_r,
+                    reason=reason,
+                    persisted=persisted,
+                )
+
             # ----------------------------------------------------
             # CLOSE
             # ----------------------------------------------------
             #
-            # CLOSE is deliberately NOT executed here yet.
+            # The automatic manager can generate a CLOSE decision.
             #
-            # The existing lifecycle/persistence closure path
-            # remains authoritative until the dedicated CLOSE
-            # integration stage is added.
+            # Stage 17.5 deliberately does NOT execute CLOSE.
+            #
+            # Existing lifecycle SL/TP closure remains authoritative.
             # ----------------------------------------------------
 
-            elif self.adapter.is_close(
+            if self.adapter.is_close(
                 management_decision
             ):
+
                 return AutomaticTradeManagementResult(
                     position_id=position_id,
                     trade_id=trade_id,
@@ -571,9 +505,7 @@ class AutomaticTradeManagementService:
                     ),
                     new_stop_loss=None,
                     new_take_profit=None,
-                    profit_r=float(
-                        management_decision.profit_r
-                    ),
+                    profit_r=profit_r,
                     reason=(
                         "CLOSE decision generated by "
                         "automatic trade manager; "
@@ -582,6 +514,10 @@ class AutomaticTradeManagementService:
                     ),
                     persisted=False,
                 )
+
+            # ----------------------------------------------------
+            # FALLBACK
+            # ----------------------------------------------------
 
             return AutomaticTradeManagementResult(
                 position_id=position_id,
@@ -593,14 +529,14 @@ class AutomaticTradeManagementService:
                 ),
                 new_stop_loss=new_stop_loss,
                 new_take_profit=new_take_profit,
-                profit_r=float(
-                    management_decision.profit_r
-                ),
-                reason=management_decision.reason,
-                persisted=persisted,
+                profit_r=profit_r,
+                reason=reason,
+                persisted=False,
             )
 
         except Exception as exc:
+
+            # Never leave a failed management transaction open.
             self.db.rollback()
 
             return AutomaticTradeManagementResult(
@@ -632,13 +568,12 @@ class AutomaticTradeManagementService:
         self,
     ) -> list[AutomaticTradeManagementResult]:
         """
-        Evaluate every open paper position.
+        Evaluate every open persistent paper position.
 
-        One fresh market analysis is performed for the cycle,
-        then that analysis is applied to each open position.
+        One fresh market analysis is performed for the cycle and
+        applied independently to each open position.
 
-        This avoids making a separate public-feed request for
-        every position.
+        No new positions are created.
         """
 
         if not self.config.enabled:
@@ -649,13 +584,19 @@ class AutomaticTradeManagementService:
         if not positions:
             return []
 
+        # --------------------------------------------------------
+        # ONE MARKET ANALYSIS FOR THE WHOLE MANAGEMENT CYCLE
+        # --------------------------------------------------------
+
         try:
+
             (
                 current_price,
                 decision,
             ) = await self._fresh_analysis()
 
         except Exception as exc:
+
             return [
                 AutomaticTradeManagementResult(
                     position_id=self._position_id(
@@ -680,11 +621,16 @@ class AutomaticTradeManagementService:
                 for position in positions
             ]
 
+        # --------------------------------------------------------
+        # APPLY THE DECISION TO EVERY OPEN POSITION
+        # --------------------------------------------------------
+
         results: list[
             AutomaticTradeManagementResult
         ] = []
 
         for position in positions:
+
             result = await self.evaluate_position(
                 position,
                 current_price=current_price,
@@ -696,14 +642,14 @@ class AutomaticTradeManagementService:
         return results
 
     # ============================================================
-    # SERIALIZATION
+    # DICTIONARY API
     # ============================================================
 
     async def evaluate_open_positions_dict(
         self,
     ) -> list[dict[str, Any]]:
         """
-        Convenience API for worker/API integration.
+        Convenience API for workers and API integrations.
         """
 
         results = (
