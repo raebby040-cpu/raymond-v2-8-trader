@@ -187,6 +187,33 @@ class AutomaticEntryWorker:
 
         return default
 
+    @staticmethod
+    def _normalize_enum_value(
+        value: Any,
+    ) -> str:
+        """
+        Normalize ordinary strings and Enum-like values.
+
+        Example:
+            ExecutionStatus.ACCEPTED
+        becomes:
+            "accepted"
+
+        This prevents persistence from rejecting a valid paper
+        execution simply because the gateway returns an Enum.
+        """
+
+        if value is None:
+            return ""
+
+        raw = getattr(
+            value,
+            "value",
+            value,
+        )
+
+        return str(raw).strip().lower()
+
     @classmethod
     def _decision_action(
         cls,
@@ -282,21 +309,27 @@ class AutomaticEntryWorker:
         if execution_result is None:
             return False, None
 
-        execution_type = str(
+        # IMPORTANT:
+        # The execution gateway may return Enum values such as:
+        #
+        #     ExecutionStatus.ACCEPTED
+        #
+        # Therefore normalize the Enum's .value before comparing it.
+        execution_type = self._normalize_enum_value(
             self._get_value(
                 execution_result,
                 "execution_type",
                 default="",
             )
-        ).strip().lower()
+        )
 
-        status = str(
+        status = self._normalize_enum_value(
             self._get_value(
                 execution_result,
                 "status",
                 default="",
             )
-        ).strip().lower()
+        )
 
         # Absolute safety gate:
         # only paper executions may reach persistence.
