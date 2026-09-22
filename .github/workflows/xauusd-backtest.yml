@@ -22,17 +22,17 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install RAYMOND Python dependencies
+      - name: Install RAYMOND dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
 
-      - name: Verify RAYMOND backtest runner
+      - name: Verify RAYMOND backtest files
         run: |
           test -f scripts/run_xauusd_backtest.py
           test -f backend/app/backtest_engine.py
-          echo "RAYMOND backtest runner found."
-          echo "RAYMOND backtest engine found."
+          echo "Backtest runner: OK"
+          echo "Backtest engine: OK"
 
       - name: Download XAUUSD H1 historical data
         run: |
@@ -47,19 +47,24 @@ jobs:
             -f csv \
             -dir data/historical
 
-      - name: Locate downloaded XAUUSD file
+      - name: Locate historical CSV
         run: |
-          echo "===== Downloaded files ====="
-          find data/historical -maxdepth 2 -type f -printf '%p %s bytes\n'
+          echo "===== DOWNLOADED FILES ====="
+          find data/historical -type f -printf '%p %s bytes\n'
 
-          FILE="$(find data/historical -maxdepth 1 -type f -iname '*xauusd*h1*.csv' | head -n 1)"
+          FILE="$(find data/historical \
+            -type f \
+            -iname '*xauusd*h1*.csv' \
+            | head -n 1)"
 
           if [ -z "$FILE" ]; then
-            echo "ERROR: Could not locate downloaded XAUUSD H1 CSV."
+            echo "ERROR: XAUUSD H1 CSV was not found."
             exit 1
           fi
 
-          echo "Found: $FILE"
+          echo "Historical file found:"
+          echo "$FILE"
+
           echo "XAUUSD_RAW_FILE=$FILE" >> "$GITHUB_ENV"
 
       - name: Verify raw historical dataset
@@ -70,17 +75,14 @@ jobs:
 
           path = os.environ["XAUUSD_RAW_FILE"]
 
-          print("Reading:", path)
-
           df = pd.read_csv(path)
 
+          print("===== RAW DATASET =====")
           print("Rows:", len(df))
           print("Columns:", list(df.columns))
           print()
-          print("First rows:")
           print(df.head())
           print()
-          print("Last rows:")
           print(df.tail())
 
           required = {
@@ -89,26 +91,26 @@ jobs:
               "high",
               "low",
               "close",
-              "volume",
           }
 
-          if not required.issubset(df.columns):
+          missing = required - set(df.columns)
+
+          if missing:
               raise SystemExit(
-                  "ERROR: Unexpected Dukascopy CSV format.\n"
-                  f"Required: {sorted(required)}\n"
-                  f"Found: {list(df.columns)}"
+                  "ERROR: Missing required columns: "
+                  f"{sorted(missing)}"
               )
 
           if len(df) < 10000:
               raise SystemExit(
-                  f"ERROR: Dataset unexpectedly small: {len(df)} rows"
+                  f"ERROR: Dataset too small: {len(df)} rows"
               )
 
           print()
-          print("Raw dataset verification PASSED.")
+          print("Raw historical dataset verification PASSED.")
           PY
 
-      - name: Normalize XAUUSD H1 dataset
+      - name: Normalize historical dataset
         run: |
           python - <<'PY'
           import os
@@ -116,6 +118,7 @@ jobs:
           import pandas as pd
 
           source = Path(os.environ["XAUUSD_RAW_FILE"])
+
           target = Path(
               "data/historical/"
               "xauusd_h1_2003_2025_normalized.csv"
@@ -129,7 +132,6 @@ jobs:
               "high",
               "low",
               "close",
-              "volume",
           }
 
           missing = required - set(df.columns)
@@ -138,6 +140,17 @@ jobs:
               raise SystemExit(
                   f"ERROR: Missing columns: {sorted(missing)}"
               )
+
+          # Dukascopy's XAUUSD export used here does not
+          # provide volume. RAYMOND's candle interface
+          # requires the field, so use zero rather than
+          # inventing volume data.
+          if "volume" not in df.columns:
+              print(
+                  "Volume column not supplied by source. "
+                  "Setting volume to 0.0."
+              )
+              df["volume"] = 0.0
 
           df["timestamp"] = pd.to_datetime(
               df["timestamp"],
@@ -167,7 +180,25 @@ jobs:
               ]
           )
 
+          # Exact historical test period.
+          df = df[
+              (df["timestamp"] >= pd.Timestamp(
+                  "2003-05-05",
+                  tz="UTC",
+              ))
+              &
+              (df["timestamp"] < pd.Timestamp(
+                  "2026-01-01",
+                  tz="UTC",
+              ))
+          ]
+
           df = df.sort_values("timestamp")
+
+          duplicate_count = int(
+              df["timestamp"].duplicated().sum()
+          )
+
           df = df.drop_duplicates(
               subset=["timestamp"],
               keep="first",
@@ -192,6 +223,11 @@ jobs:
                   f"ERROR: Invalid OHLC rows: {invalid_count}"
               )
 
+          if len(df) < 10000:
+              raise SystemExit(
+                  f"ERROR: Normalized dataset too small: {len(df)}"
+              )
+
           target.parent.mkdir(
               parents=True,
               exist_ok=True,
@@ -211,21 +247,39 @@ jobs:
               index=False,
           )
 
+          print()
           print("===== NORMALIZED DATASET =====")
           print("Rows:", len(df))
-          print("First candle:", df["timestamp"].iloc[0])
-          print("Last candle:", df["timestamp"].iloc[-1])
           print(
-              "Duplicate timestamps:",
+              "First candle:",
+              df["timestamp"].iloc[0],
+          )
+          print(
+              "Last candle:",
+              df["timestamp"].iloc[-1],
+          )
+          print(
+              "Duplicate timestamps before cleanup:",
+              duplicate_count,
+          )
+          print(
+              "Duplicate timestamps after cleanup:",
               int(df["timestamp"].duplicated().sum()),
           )
-          print("Invalid OHLC rows:", invalid_count)
+          print(
+              "Invalid OHLC rows:",
+              invalid_count,
+          )
+          print(
+              "Volume values:",
+              df["volume"].unique()[:10],
+          )
 
           print()
           print("Normalization PASSED.")
           PY
 
-      - name: Run RAYMOND H1 backtest with realistic costs
+      - name: Run RAYMOND H1 backtest
         env:
           PYTHONPATH: backend
         run: |
@@ -239,31 +293,39 @@ jobs:
             --slippage 0.05 \
             --commission 0.0
 
-      - name: Verify RAYMOND backtest result
+      - name: Verify backtest results
         run: |
           if [ ! -f backtest_results/result.json ]; then
-            echo "ERROR: RAYMOND did not produce result.json."
+            echo "ERROR: result.json was not created."
             exit 1
           fi
 
           if [ ! -f backtest_results/trades.csv ]; then
-            echo "ERROR: RAYMOND did not produce trades.csv."
+            echo "ERROR: trades.csv was not created."
             exit 1
           fi
 
-          echo "===== RAYMOND BACKTEST RESULT ====="
+          echo "===== RAYMOND RESULT ====="
           cat backtest_results/result.json
 
-      - name: Produce concise backtest summary
+      - name: Print key metrics
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-          path = Path("backtest_results/result.json")
-          result = json.loads(path.read_text())
+          result = json.loads(
+              Path(
+                  "backtest_results/result.json"
+              ).read_text()
+          )
 
-          keys = [
+          print()
+          print("========================================")
+          print(" RAYMOND v2.8 XAUUSD H1 BACKTEST")
+          print("========================================")
+
+          metrics = [
               "status",
               "start_time",
               "end_time",
@@ -289,18 +351,15 @@ jobs:
               "warmup_candles",
           ]
 
-          print()
-          print("========================================")
-          print(" RAYMOND v2.8 XAUUSD H1 BACKTEST")
-          print("========================================")
-
-          for key in keys:
-              print(f"{key}: {result.get(key)}")
+          for key in metrics:
+              print(
+                  f"{key}: {result.get(key)}"
+              )
 
           print("========================================")
           PY
 
-      - name: Upload complete backtest results
+      - name: Upload backtest results
         uses: actions/upload-artifact@v4
         with:
           name: raymond-xauusd-h1-backtest-results
