@@ -1,0 +1,179 @@
+name: XAUUSD H1 Backtest
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout RAYMOND
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy dukascopy-python
+
+      - name: Download XAUUSD H1 historical data
+        run: |
+          mkdir -p data/historical
+
+          python - <<'PY'
+          from dukascopy import Dukascopy
+
+          client = Dukascopy()
+
+          client.download(
+              instrument="XAUUSD",
+              timeframe="h1",
+              start="2003-05-05",
+              end="2025-12-31",
+              output="data/historical/xauusd_h1_2003_2025.csv"
+          )
+          PY
+
+      - name: Verify downloaded data
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          path = Path("data/historical/xauusd_h1_2003_2025.csv")
+
+          if not path.exists():
+              raise SystemExit("ERROR: Historical XAUUSD H1 file was not created.")
+
+          df = pd.read_csv(path)
+
+          print("Rows:", len(df))
+          print("Columns:", list(df.columns))
+          print(df.head())
+          print(df.tail())
+
+          required = {"Date", "Open", "High", "Low", "Close", "Volume"}
+
+          if not required.issubset(df.columns):
+              raise SystemExit(
+                  f"ERROR: Missing required columns. Found: {list(df.columns)}"
+              )
+
+          if len(df) < 10000:
+              raise SystemExit(
+                  f"ERROR: Dataset is unexpectedly small: {len(df)} rows"
+              )
+
+          print("Historical dataset verification PASSED.")
+          PY
+
+      - name: Normalize historical data
+        run: |
+          python - <<'PY'
+          import pandas as pd
+
+          source = "data/historical/xauusd_h1_2003_2025.csv"
+          target = "data/historical/xauusd_h1_2003_2025_normalized.csv"
+
+          df = pd.read_csv(source)
+
+          df = df.rename(columns={
+              "Date": "timestamp",
+              "Open": "open",
+              "High": "high",
+              "Low": "low",
+              "Close": "close",
+              "Volume": "volume",
+          })
+
+          df["timestamp"] = pd.to_datetime(
+              df["timestamp"],
+              utc=True,
+              errors="coerce"
+          )
+
+          for column in ["open", "high", "low", "close", "volume"]:
+              df[column] = pd.to_numeric(
+                  df[column],
+                  errors="coerce"
+              )
+
+          df = df.dropna(
+              subset=[
+                  "timestamp",
+                  "open",
+                  "high",
+                  "low",
+                  "close"
+              ]
+          )
+
+          df = df.sort_values("timestamp")
+          df = df.drop_duplicates(
+              subset=["timestamp"],
+              keep="first"
+          )
+
+          invalid = (
+              (df["open"] <= 0)
+              | (df["high"] <= 0)
+              | (df["low"] <= 0)
+              | (df["close"] <= 0)
+              | (df["high"] < df["low"])
+          )
+
+          if invalid.any():
+              raise SystemExit(
+                  f"ERROR: Invalid OHLC rows found: {int(invalid.sum())}"
+              )
+
+          df.to_csv(
+              target,
+              index=False
+          )
+
+          print("Normalized rows:", len(df))
+          print("First candle:", df["timestamp"].iloc[0])
+          print("Last candle:", df["timestamp"].iloc[-1])
+          print("Duplicates:", df["timestamp"].duplicated().sum())
+
+          if len(df) < 10000:
+              raise SystemExit("ERROR: Normalized dataset is too small.")
+
+          print("Normalization PASSED.")
+          PY
+
+      - name: Run RAYMOND historical backtest
+        run: |
+          python scripts/run_xauusd_backtest.py \
+            --input data/historical/xauusd_h1_2003_2025_normalized.csv \
+            --output-dir backtest_results \
+            --spread 0.30 \
+            --slippage 0.05 \
+            --commission 0.0
+
+      - name: Display backtest result
+        run: |
+          echo "===== RAYMOND BACKTEST RESULT ====="
+
+          if [ -f backtest_results/result.json ]; then
+            cat backtest_results/result.json
+          else
+            echo "ERROR: result.json was not produced."
+            exit 1
+          fi
+
+      - name: Upload backtest results
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-xauusd-h1-backtest-results
+          path: |
+            backtest_results/
+            data/historical/xauusd_h1_2003_2025_normalized.csv
+          retention-days: 7
