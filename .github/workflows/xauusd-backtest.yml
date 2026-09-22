@@ -6,7 +6,7 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout RAYMOND
@@ -17,91 +17,144 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install RAYMOND Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy dukascopy-python
+          pip install -r backend/requirements.txt
+
+      - name: Verify RAYMOND backtest runner
+        run: |
+          test -f scripts/run_xauusd_backtest.py
+          test -f backend/app/backtest_engine.py
+          echo "RAYMOND backtest runner found."
+          echo "RAYMOND backtest engine found."
 
       - name: Download XAUUSD H1 historical data
         run: |
+          rm -rf data/historical
           mkdir -p data/historical
 
-          python - <<'PY'
-          from dukascopy import Dukascopy
+          npx --yes dukascopy-node \
+            -i xauusd \
+            -from 2003-05-05 \
+            -to 2026-01-01 \
+            -t h1 \
+            -f csv \
+            -dir data/historical
 
-          client = Dukascopy()
+      - name: Locate downloaded XAUUSD file
+        run: |
+          echo "===== Downloaded files ====="
+          find data/historical -maxdepth 2 -type f -printf '%p %s bytes\n'
 
-          client.download(
-              instrument="XAUUSD",
-              timeframe="h1",
-              start="2003-05-05",
-              end="2025-12-31",
-              output="data/historical/xauusd_h1_2003_2025.csv"
-          )
-          PY
+          FILE="$(find data/historical -maxdepth 1 -type f -iname '*xauusd*h1*.csv' | head -n 1)"
 
-      - name: Verify downloaded data
+          if [ -z "$FILE" ]; then
+            echo "ERROR: Could not locate downloaded XAUUSD H1 CSV."
+            exit 1
+          fi
+
+          echo "Found: $FILE"
+          echo "XAUUSD_RAW_FILE=$FILE" >> "$GITHUB_ENV"
+
+      - name: Verify raw historical dataset
         run: |
           python - <<'PY'
+          import os
           import pandas as pd
-          from pathlib import Path
 
-          path = Path("data/historical/xauusd_h1_2003_2025.csv")
+          path = os.environ["XAUUSD_RAW_FILE"]
 
-          if not path.exists():
-              raise SystemExit("ERROR: Historical XAUUSD H1 file was not created.")
+          print("Reading:", path)
 
           df = pd.read_csv(path)
 
           print("Rows:", len(df))
           print("Columns:", list(df.columns))
+          print()
+          print("First rows:")
           print(df.head())
+          print()
+          print("Last rows:")
           print(df.tail())
 
-          required = {"Date", "Open", "High", "Low", "Close", "Volume"}
+          required = {
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+              "volume",
+          }
 
           if not required.issubset(df.columns):
               raise SystemExit(
-                  f"ERROR: Missing required columns. Found: {list(df.columns)}"
+                  "ERROR: Unexpected Dukascopy CSV format.\n"
+                  f"Required: {sorted(required)}\n"
+                  f"Found: {list(df.columns)}"
               )
 
           if len(df) < 10000:
               raise SystemExit(
-                  f"ERROR: Dataset is unexpectedly small: {len(df)} rows"
+                  f"ERROR: Dataset unexpectedly small: {len(df)} rows"
               )
 
-          print("Historical dataset verification PASSED.")
+          print()
+          print("Raw dataset verification PASSED.")
           PY
 
-      - name: Normalize historical data
+      - name: Normalize XAUUSD H1 dataset
         run: |
           python - <<'PY'
+          import os
+          from pathlib import Path
           import pandas as pd
 
-          source = "data/historical/xauusd_h1_2003_2025.csv"
-          target = "data/historical/xauusd_h1_2003_2025_normalized.csv"
+          source = Path(os.environ["XAUUSD_RAW_FILE"])
+          target = Path(
+              "data/historical/"
+              "xauusd_h1_2003_2025_normalized.csv"
+          )
 
           df = pd.read_csv(source)
 
-          df = df.rename(columns={
-              "Date": "timestamp",
-              "Open": "open",
-              "High": "high",
-              "Low": "low",
-              "Close": "close",
-              "Volume": "volume",
-          })
+          required = {
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+              "volume",
+          }
+
+          missing = required - set(df.columns)
+
+          if missing:
+              raise SystemExit(
+                  f"ERROR: Missing columns: {sorted(missing)}"
+              )
 
           df["timestamp"] = pd.to_datetime(
               df["timestamp"],
               utc=True,
-              errors="coerce"
+              errors="coerce",
           )
 
-          for column in ["open", "high", "low", "close", "volume"]:
+          for column in [
+              "open",
+              "high",
+              "low",
+              "close",
+              "volume",
+          ]:
               df[column] = pd.to_numeric(
                   df[column],
-                  errors="coerce"
+                  errors="coerce",
               )
 
           df = df.dropna(
@@ -110,14 +163,14 @@ jobs:
                   "open",
                   "high",
                   "low",
-                  "close"
+                  "close",
               ]
           )
 
           df = df.sort_values("timestamp")
           df = df.drop_duplicates(
               subset=["timestamp"],
-              keep="first"
+              keep="first",
           )
 
           invalid = (
@@ -126,50 +179,128 @@ jobs:
               | (df["low"] <= 0)
               | (df["close"] <= 0)
               | (df["high"] < df["low"])
+              | (df["high"] < df["open"])
+              | (df["high"] < df["close"])
+              | (df["low"] > df["open"])
+              | (df["low"] > df["close"])
           )
 
-          if invalid.any():
+          invalid_count = int(invalid.sum())
+
+          if invalid_count:
               raise SystemExit(
-                  f"ERROR: Invalid OHLC rows found: {int(invalid.sum())}"
+                  f"ERROR: Invalid OHLC rows: {invalid_count}"
               )
 
-          df.to_csv(
-              target,
-              index=False
+          target.parent.mkdir(
+              parents=True,
+              exist_ok=True,
           )
 
-          print("Normalized rows:", len(df))
+          df[
+              [
+                  "timestamp",
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+                  "volume",
+              ]
+          ].to_csv(
+              target,
+              index=False,
+          )
+
+          print("===== NORMALIZED DATASET =====")
+          print("Rows:", len(df))
           print("First candle:", df["timestamp"].iloc[0])
           print("Last candle:", df["timestamp"].iloc[-1])
-          print("Duplicates:", df["timestamp"].duplicated().sum())
+          print(
+              "Duplicate timestamps:",
+              int(df["timestamp"].duplicated().sum()),
+          )
+          print("Invalid OHLC rows:", invalid_count)
 
-          if len(df) < 10000:
-              raise SystemExit("ERROR: Normalized dataset is too small.")
-
+          print()
           print("Normalization PASSED.")
           PY
 
-      - name: Run RAYMOND historical backtest
+      - name: Run RAYMOND H1 backtest with realistic costs
+        env:
+          PYTHONPATH: backend
         run: |
+          rm -rf backtest_results
+
           python scripts/run_xauusd_backtest.py \
-            --input data/historical/xauusd_h1_2003_2025_normalized.csv \
-            --output-dir backtest_results \
+            --data data/historical/xauusd_h1_2003_2025_normalized.csv \
+            --out backtest_results \
+            --starting-balance 10000 \
             --spread 0.30 \
             --slippage 0.05 \
             --commission 0.0
 
-      - name: Display backtest result
+      - name: Verify RAYMOND backtest result
         run: |
-          echo "===== RAYMOND BACKTEST RESULT ====="
-
-          if [ -f backtest_results/result.json ]; then
-            cat backtest_results/result.json
-          else
-            echo "ERROR: result.json was not produced."
+          if [ ! -f backtest_results/result.json ]; then
+            echo "ERROR: RAYMOND did not produce result.json."
             exit 1
           fi
 
-      - name: Upload backtest results
+          if [ ! -f backtest_results/trades.csv ]; then
+            echo "ERROR: RAYMOND did not produce trades.csv."
+            exit 1
+          fi
+
+          echo "===== RAYMOND BACKTEST RESULT ====="
+          cat backtest_results/result.json
+
+      - name: Produce concise backtest summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("backtest_results/result.json")
+          result = json.loads(path.read_text())
+
+          keys = [
+              "status",
+              "start_time",
+              "end_time",
+              "starting_balance",
+              "ending_balance",
+              "net_profit",
+              "net_profit_percent",
+              "total_trades",
+              "winning_trades",
+              "losing_trades",
+              "breakeven_trades",
+              "win_rate_percent",
+              "gross_profit",
+              "gross_loss",
+              "profit_factor",
+              "total_execution_cost",
+              "max_drawdown",
+              "max_drawdown_percent",
+              "average_trade",
+              "average_win",
+              "average_loss",
+              "bars_processed",
+              "warmup_candles",
+          ]
+
+          print()
+          print("========================================")
+          print(" RAYMOND v2.8 XAUUSD H1 BACKTEST")
+          print("========================================")
+
+          for key in keys:
+              print(f"{key}: {result.get(key)}")
+
+          print("========================================")
+          PY
+
+      - name: Upload complete backtest results
         uses: actions/upload-artifact@v4
         with:
           name: raymond-xauusd-h1-backtest-results
