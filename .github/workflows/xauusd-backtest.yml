@@ -31,6 +31,7 @@ jobs:
         run: |
           test -f scripts/run_xauusd_backtest.py
           test -f backend/app/backtest_engine.py
+
           echo "Backtest runner: OK"
           echo "Backtest engine: OK"
 
@@ -50,7 +51,10 @@ jobs:
       - name: Locate historical CSV
         run: |
           echo "===== DOWNLOADED FILES ====="
-          find data/historical -type f -printf '%p %s bytes\n'
+
+          find data/historical \
+            -type f \
+            -printf '%p %s bytes\n'
 
           FILE="$(find data/historical \
             -type f \
@@ -115,6 +119,7 @@ jobs:
           python - <<'PY'
           import os
           from pathlib import Path
+
           import pandas as pd
 
           source = Path(os.environ["XAUUSD_RAW_FILE"])
@@ -141,22 +146,73 @@ jobs:
                   f"ERROR: Missing columns: {sorted(missing)}"
               )
 
-          # Dukascopy's XAUUSD export used here does not
-          # provide volume. RAYMOND's candle interface
-          # requires the field, so use zero rather than
-          # inventing volume data.
+          # Dukascopy XAUUSD export may not contain volume.
+          # RAYMOND requires the field, but does not use
+          # volume as an execution input in this backtest.
           if "volume" not in df.columns:
               print(
-                  "Volume column not supplied by source. "
+                  "Volume column not supplied by source."
+              )
+              print(
                   "Setting volume to 0.0."
               )
               df["volume"] = 0.0
 
-          df["timestamp"] = pd.to_datetime(
-              df["timestamp"],
-              utc=True,
+          # -------------------------------------------------
+          # TIMESTAMP FIX
+          #
+          # Dukascopy can return timestamps such as:
+          #
+          # 1767200400000
+          #
+          # These are Unix timestamps in MILLISECONDS.
+          #
+          # Detect numeric millisecond timestamps and parse
+          # them explicitly as milliseconds.
+          # -------------------------------------------------
+
+          raw_timestamp = df["timestamp"]
+
+          numeric_timestamp = pd.to_numeric(
+              raw_timestamp,
               errors="coerce",
           )
+
+          numeric_ratio = (
+              numeric_timestamp.notna().mean()
+          )
+
+          if numeric_ratio > 0.95:
+              print(
+                  "Detected numeric timestamp format."
+              )
+              print(
+                  "Parsing timestamps as Unix milliseconds."
+              )
+
+              df["timestamp"] = pd.to_datetime(
+                  numeric_timestamp,
+                  unit="ms",
+                  utc=True,
+                  errors="coerce",
+              )
+          else:
+              print(
+                  "Detected non-numeric timestamp format."
+              )
+              print(
+                  "Parsing timestamps as ISO/datetime values."
+              )
+
+              df["timestamp"] = pd.to_datetime(
+                  raw_timestamp,
+                  utc=True,
+                  errors="coerce",
+              )
+
+          # -------------------------------------------------
+          # Numeric OHLC fields
+          # -------------------------------------------------
 
           for column in [
               "open",
@@ -170,6 +226,7 @@ jobs:
                   errors="coerce",
               )
 
+          # Remove rows with unusable timestamp/OHLC data.
           df = df.dropna(
               subset=[
                   "timestamp",
@@ -180,18 +237,51 @@ jobs:
               ]
           )
 
-          # Exact historical test period.
+          # -------------------------------------------------
+          # Historical test period
+          # -------------------------------------------------
+
+          start_date = pd.Timestamp(
+              "2003-05-05",
+              tz="UTC",
+          )
+
+          end_date = pd.Timestamp(
+              "2026-01-01",
+              tz="UTC",
+          )
+
+          print()
+          print("Before date filtering:", len(df))
+          print(
+              "Detected first timestamp:",
+              df["timestamp"].min(),
+          )
+          print(
+              "Detected last timestamp:",
+              df["timestamp"].max(),
+          )
+
           df = df[
-              (df["timestamp"] >= pd.Timestamp(
-                  "2003-05-05",
-                  tz="UTC",
-              ))
+              (df["timestamp"] >= start_date)
               &
-              (df["timestamp"] < pd.Timestamp(
-                  "2026-01-01",
-                  tz="UTC",
-              ))
+              (df["timestamp"] < end_date)
           ]
+
+          print(
+              "After date filtering:",
+              len(df),
+          )
+
+          if len(df) == 0:
+              raise SystemExit(
+                  "ERROR: Date filtering produced 0 candles. "
+                  "Timestamp parsing is still incorrect."
+              )
+
+          # -------------------------------------------------
+          # Sort and remove duplicate candles
+          # -------------------------------------------------
 
           df = df.sort_values("timestamp")
 
@@ -203,6 +293,10 @@ jobs:
               subset=["timestamp"],
               keep="first",
           )
+
+          # -------------------------------------------------
+          # OHLC validation
+          # -------------------------------------------------
 
           invalid = (
               (df["open"] <= 0)
@@ -216,17 +310,25 @@ jobs:
               | (df["low"] > df["close"])
           )
 
-          invalid_count = int(invalid.sum())
+          invalid_count = int(
+              invalid.sum()
+          )
 
           if invalid_count:
               raise SystemExit(
-                  f"ERROR: Invalid OHLC rows: {invalid_count}"
+                  f"ERROR: Invalid OHLC rows: "
+                  f"{invalid_count}"
               )
 
           if len(df) < 10000:
               raise SystemExit(
-                  f"ERROR: Normalized dataset too small: {len(df)}"
+                  "ERROR: Normalized dataset is too small: "
+                  f"{len(df)}"
               )
+
+          # -------------------------------------------------
+          # Save normalized dataset
+          # -------------------------------------------------
 
           target.parent.mkdir(
               parents=True,
@@ -248,7 +350,9 @@ jobs:
           )
 
           print()
-          print("===== NORMALIZED DATASET =====")
+          print("========================================")
+          print(" NORMALIZED XAUUSD H1 DATASET")
+          print("========================================")
           print("Rows:", len(df))
           print(
               "First candle:",
@@ -259,22 +363,26 @@ jobs:
               df["timestamp"].iloc[-1],
           )
           print(
-              "Duplicate timestamps before cleanup:",
+              "Duplicates before cleanup:",
               duplicate_count,
           )
           print(
-              "Duplicate timestamps after cleanup:",
-              int(df["timestamp"].duplicated().sum()),
+              "Duplicates after cleanup:",
+              int(
+                  df["timestamp"]
+                  .duplicated()
+                  .sum()
+              ),
           )
           print(
               "Invalid OHLC rows:",
               invalid_count,
           )
           print(
-              "Volume values:",
+              "Volume sample:",
               df["volume"].unique()[:10],
           )
-
+          print("========================================")
           print()
           print("Normalization PASSED.")
           PY
@@ -306,6 +414,7 @@ jobs:
           fi
 
           echo "===== RAYMOND RESULT ====="
+
           cat backtest_results/result.json
 
       - name: Print key metrics
