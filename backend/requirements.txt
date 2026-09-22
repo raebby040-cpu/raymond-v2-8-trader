@@ -7,6 +7,7 @@ pydantic-settings==2.1.0
 # Database & ORM
 sqlalchemy==2.0.23
 alembic==1.13.0
+psycopg2-binary==2.9.9
 
 # Data Processing & Technical Analysis
 numpy==1.26.2
@@ -27,5 +28,5 @@ pytest-cov==4.1.0
 python-json-logger==2.0.7
 
 # Optional: Broker SDKs (uncomment when available)
-# metatrader5==5.0.45  # MT5 SDK - requires separate installation
-# exness-api==1.0.0   # Exness SDK - requires separate installation
+# metatrader5==5.0.45
+# exness-api==1.0.0
