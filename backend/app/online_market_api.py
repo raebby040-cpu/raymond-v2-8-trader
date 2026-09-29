@@ -13,6 +13,7 @@ READ-ONLY ONLY:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
@@ -61,6 +62,12 @@ _ai = AITradingDecisionEngine()
 
 _BIQUOTE_BASE = "https://biquote.io/api"
 
+# Bounded retries for transient hosted-network failures.
+# This never fabricates or reuses market data.
+_MARKET_REQUEST_TIMEOUT = 6.0
+_MARKET_REQUEST_ATTEMPTS = 3
+_MARKET_RETRY_DELAYS = (0.35, 0.75)
+
 _INTERVALS = {
     "M1": "1m",
     "M5": "5m",
@@ -100,6 +107,41 @@ def _ticker(symbol: str) -> str:
     )
 
 
+async def _get_json(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+) -> Any:
+    """Fetch JSON with bounded retries for transient request failures."""
+
+    for attempt in range(_MARKET_REQUEST_ATTEMPTS):
+        try:
+            response = await client.get(
+                url,
+                params=params,
+            )
+
+            response.raise_for_status()
+
+            return response.json()
+
+        except httpx.RequestError:
+            if attempt >= _MARKET_REQUEST_ATTEMPTS - 1:
+                raise
+
+            await asyncio.sleep(
+                _MARKET_RETRY_DELAYS[attempt]
+            )
+
+        except ValueError:
+            raise
+
+    raise RuntimeError(
+        "Unreachable market request state"
+    )
+
+
 def _bar_timestamp(value: Any) -> int:
     """Convert an ISO timestamp into Unix seconds."""
     if isinstance(value, (int, float)):
@@ -116,7 +158,9 @@ def _bar_timestamp(value: Any) -> int:
     parsed = datetime.fromisoformat(normalized)
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(
+            tzinfo=timezone.utc
+        )
 
     return int(parsed.timestamp())
 
@@ -128,18 +172,16 @@ async def _fetch_price(symbol: str) -> dict[str, Any]:
 
     try:
         async with httpx.AsyncClient(
-            timeout=10.0,
+            timeout=_MARKET_REQUEST_TIMEOUT,
             headers={
                 "User-Agent": "RAYMOND-v2.8/online-market",
                 "Accept": "application/json",
             },
         ) as client:
-            response = await client.get(
+            payload = await _get_json(
+                client,
                 f"{_BIQUOTE_BASE}/{ticker}",
             )
-
-            response.raise_for_status()
-            payload = response.json()
 
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(
@@ -208,20 +250,18 @@ async def _fetch_chart(
 
     try:
         async with httpx.AsyncClient(
-            timeout=10.0,
+            timeout=_MARKET_REQUEST_TIMEOUT,
             headers={
                 "User-Agent": "RAYMOND-v2.8/online-market",
                 "Accept": "application/json",
             },
         ) as client:
 
-            response = await client.get(
+            payload = await _get_json(
+                client,
                 f"{_BIQUOTE_BASE}/{ticker}/ohlc",
                 params=params,
             )
-
-            response.raise_for_status()
-            payload = response.json()
 
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(
@@ -289,7 +329,9 @@ async def _fetch_chart(
 
     # BiQuote returns newest-first.
     # Raymond's indicator engine expects chronological order.
-    candles.sort(key=lambda candle: candle["time"])
+    candles.sort(
+        key=lambda candle: candle["time"]
+    )
 
     candles = candles[-limit:]
 
@@ -379,11 +421,7 @@ def _decision_payload(decision) -> dict[str, Any]:
             decision.risk_engine_required
         ),
 
-        # ---------------------------------------------------------------
-        # RAYMOND TERMINAL DATA
-        # These fields are already produced by AIDecision but were not
-        # being exposed by this online API serializer.
-        # ---------------------------------------------------------------
+        # Raymond terminal data.
         "market_regime": decision.market_regime,
         "setup": decision.setup,
         "confluence_score": decision.confluence_score,
@@ -414,9 +452,7 @@ async def online_status():
         "paper_trading_enabled": True,
         "demo_trading_enabled": True,
 
-        # ---------------------------------------------------------------
-        # SAFETY LOCK — LIVE TRADING IS PERMANENTLY DISABLED HERE.
-        # ---------------------------------------------------------------
+        # SAFETY LOCK — LIVE TRADING IS PERMANENTLY DISABLED.
         "live_trading_enabled": False,
         "execution_authorized": False,
         "broker_orders_allowed": False,
