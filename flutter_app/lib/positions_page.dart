@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'api_service.dart';
@@ -25,20 +27,44 @@ class _PositionsPageState extends State<PositionsPage> {
   static const muted = Color(0xFF8EA4B8);
 
   bool loading = true;
+  bool _requestInFlight = false;
   String error = '';
   List<Map<String, dynamic>> positions = [];
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
+
     _loadPositions();
+
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) {
+        if (!mounted || _requestInFlight) return;
+        _loadPositions();
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    super.dispose();
   }
 
   Future<void> _loadPositions() async {
-    setState(() {
-      loading = true;
-      error = '';
-    });
+    if (_requestInFlight) return;
+
+    _requestInFlight = true;
+
+    if (mounted) {
+      setState(() {
+        loading = positions.isEmpty;
+        error = '';
+      });
+    }
 
     try {
       final response = await widget.api.paperPositions(
@@ -62,6 +88,7 @@ class _PositionsPageState extends State<PositionsPage> {
       setState(() {
         positions = parsed;
         loading = false;
+        error = '';
       });
     } catch (_) {
       if (!mounted) return;
@@ -70,6 +97,8 @@ class _PositionsPageState extends State<PositionsPage> {
         loading = false;
         error = 'Unable to load RAYMOND paper positions.';
       });
+    } finally {
+      _requestInFlight = false;
     }
   }
 
@@ -193,7 +222,8 @@ class _PositionsPageState extends State<PositionsPage> {
                   ),
                 ),
                 IconButton(
-                  onPressed: loading ? null : _loadPositions,
+                  onPressed:
+                      _requestInFlight ? null : _loadPositions,
                   icon: const Icon(Icons.refresh),
                   tooltip: 'Refresh positions',
                 ),
@@ -203,6 +233,16 @@ class _PositionsPageState extends State<PositionsPage> {
               'Authoritative RAYMOND persistent trade state',
               style: TextStyle(
                 color: muted,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _requestInFlight
+                  ? 'Updating positions...'
+                  : 'Auto-refresh: every 30 seconds',
+              style: const TextStyle(
+                color: muted,
+                fontSize: 11,
               ),
             ),
             const SizedBox(height: 16),
@@ -245,7 +285,8 @@ class _PositionsPageState extends State<PositionsPage> {
           SizedBox(width: 12),
           Expanded(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
                 Text(
                   'PAPER MODE • READ ONLY',
