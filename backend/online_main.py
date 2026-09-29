@@ -4,6 +4,7 @@ Stages started here:
 - 17.4.3 lifecycle-aware paper-position market loop
 - 17.5 automatic paper trade management
 - 17.6 automatic paper entry worker
+- 17.6 automatic-entry read-only telemetry
 
 SAFETY:
 - Paper trading only.
@@ -12,6 +13,7 @@ SAFETY:
 - No live trading.
 - Stage 17.6 delegates risk, sizing, execution and persistence to the
   existing TradingPipelineService / Step 14 path.
+- Telemetry is read-only and cannot execute trades.
 """
 
 from datetime import datetime, timezone
@@ -44,8 +46,11 @@ from app.automatic_trade_management_service import (
     AutomaticTradeManagementServiceConfig,
 )
 from app.automatic_entry_worker import (
-    AutomaticEntryWorker,
     AutomaticEntryWorkerConfig,
+)
+from app.automatic_entry_telemetry import (
+    TelemetryAutomaticEntryWorker,
+    router as automatic_entry_telemetry_router,
 )
 from app.database import SessionLocal
 
@@ -57,15 +62,11 @@ from app.database import SessionLocal
 app.include_router(online_market_router)
 app.include_router(advisory_analysis_router)
 app.include_router(paper_position_management_router)
+app.include_router(automatic_entry_telemetry_router)
 
 
 # ---------------------------------------------------------------------------
 # XAUUSD PAPER SYMBOL SPECIFICATION
-# ---------------------------------------------------------------------------
-#
-# Stage 17.6 requires the same SymbolSpecification shape used by the existing
-# Step 14 risk/execution pipeline. These values match the repository's tested
-# XAUUSD paper specification.
 # ---------------------------------------------------------------------------
 
 _XAUUSD_SPECIFICATION = build_symbol_specification(
@@ -193,8 +194,8 @@ async def _automatic_trade_management_worker():
 #        -> existing PaperExecutionGateway
 #        -> existing persistence path
 #
-# This worker deliberately does NOT create positions directly and does NOT
-# duplicate the risk engine.
+# Telemetry wraps this worker only to observe its runtime state.
+# It does not alter the decision or execution pipeline.
 # ---------------------------------------------------------------------------
 
 _automatic_entry_worker = None
@@ -216,7 +217,7 @@ async def _automatic_entry_worker_task():
     db = SessionLocal()
 
     try:
-        _automatic_entry_worker = AutomaticEntryWorker(
+        _automatic_entry_worker = TelemetryAutomaticEntryWorker(
             db=db,
             specification=_XAUUSD_SPECIFICATION,
             account_equity_provider=get_paper_equity,
@@ -449,6 +450,12 @@ async def health():
             "timeframe": "M15",
             "interval_seconds": 30.0,
             "paper_only": True,
+        },
+
+        "automatic_entry_telemetry": {
+            "enabled": True,
+            "endpoint": "/api/online/automatic-entry-status",
+            "read_only": True,
         },
 
         "safety": {
