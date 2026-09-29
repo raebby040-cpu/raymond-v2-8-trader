@@ -4,10 +4,8 @@ services:
     runtime: docker
     plan: free
     region: singapore
-
     dockerfilePath: ./Dockerfile
     dockerContext: .
-
     healthCheckPath: /health
 
     envVars:
@@ -18,7 +16,16 @@ services:
         value: production
 
       - key: DATABASE_URL
-        value: sqlite:///./raymond.db
+        fromDatabase:
+          name: raymond-v2-8-db
+          property: connectionString
 
       - key: LOG_LEVEL
         value: INFO
+
+databases:
+  - name: raymond-v2-8-db
+    plan: free
+    region: singapore
+    databaseName: raymond_v2_8_db
+    user: raymond_v2_8_db_user
