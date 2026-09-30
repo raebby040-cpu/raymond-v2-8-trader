@@ -3,19 +3,8 @@ RAYMOND v2.8 - Production Backtest Engine
 
 Historical simulation for the canonical RAYMOND trading pipeline.
 
-Architecture:
-
-    Historical OHLC
-        ->
-    Technical Indicators
-        ->
-    Step 13 AI Decision
-        ->
-    Step 14-compatible Risk Engine sizing/checks
-        ->
-    Deterministic simulated execution
-        ->
-    Trade ledger + equity curve + performance metrics
+This version adds diagnostic instrumentation to determine why historical
+candles do or do not become executable trades.
 
 IMPORTANT SAFETY RULES
 ----------------------
@@ -29,12 +18,28 @@ IMPORTANT SAFETY RULES
 - Historical candles are processed sequentially.
 - Future candles are never supplied to the decision engine.
 - If both SL and TP are touched inside one candle, SL is assumed first.
-  This is intentionally conservative because OHLC data cannot prove
-  intrabar ordering.
 - Historical execution costs are explicit and deterministic.
 - Historical daily-loss limits reset at trading-day boundaries.
 - Price gaps through protective levels are executed at the achievable
   candle open rather than at an unavailable historical stop/target price.
+
+DIAGNOSTICS
+-----------
+The engine records:
+- candles evaluated
+- BUY decisions
+- SELL decisions
+- WAIT decisions
+- confidence observations
+- confluence observations
+- decisions with proposals
+- decisions without proposals
+- zero/invalid position-size occurrences
+- Risk Engine rejections
+- accepted trade entries
+- exception/rejection examples
+
+The diagnostics do NOT change strategy thresholds or trading behaviour.
 """
 
 from __future__ import annotations
@@ -83,14 +88,6 @@ class BacktestConfig:
 
     close_open_position_at_end: bool = True
 
-    # Historical execution-cost model.
-    #
-    # spread and slippage are expressed in price units.
-    #
-    # commission_per_unit is charged once on entry and once on exit,
-    # in account-currency units per position-size unit.
-    #
-    # Defaults are zero so existing deterministic tests remain unchanged.
     spread: float = 0.0
     slippage: float = 0.0
     commission_per_unit: float = 0.0
@@ -180,6 +177,366 @@ class BacktestEquityPoint:
     drawdown_percent: float
 
 
+@dataclass
+class BacktestDiagnostics:
+    """
+    Diagnostic counters for understanding the strategy's historical
+    decision flow.
+
+    These values are observational only. They do not alter strategy
+    decisions.
+    """
+
+    candles_evaluated: int = 0
+
+    wait_decisions: int = 0
+    buy_decisions: int = 0
+    sell_decisions: int = 0
+
+    decisions_with_proposal: int = 0
+    decisions_without_proposal: int = 0
+
+    missing_stop_loss: int = 0
+    missing_take_profit: int = 0
+
+    zero_position_size: int = 0
+
+    risk_checks: int = 0
+    risk_rejections: int = 0
+
+    accepted_entries: int = 0
+
+    confidence_observations: int = 0
+    confluence_observations: int = 0
+
+    minimum_confidence_observed: Optional[float] = None
+    maximum_confidence_observed: Optional[float] = None
+
+    minimum_confluence_observed: Optional[float] = None
+    maximum_confluence_observed: Optional[float] = None
+
+    wait_reason_counts: dict[str, int] = None
+    risk_rejection_reason_counts: dict[str, int] = None
+
+    examples: list[dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        if self.wait_reason_counts is None:
+            self.wait_reason_counts = {}
+
+        if self.risk_rejection_reason_counts is None:
+            self.risk_rejection_reason_counts = {}
+
+        if self.examples is None:
+            self.examples = []
+
+    def record_wait(
+        self,
+        *,
+        decision: Any,
+        timestamp: Optional[str],
+    ) -> None:
+        self.wait_decisions += 1
+
+        reason = self._extract_reason(decision)
+
+        self.wait_reason_counts[reason] = (
+            self.wait_reason_counts.get(reason, 0) + 1
+        )
+
+        self._record_decision_metrics(decision)
+
+        self._add_example(
+            {
+                "type": "WAIT",
+                "timestamp": timestamp,
+                "reason": reason,
+                "confidence": self._extract_numeric(
+                    decision,
+                    (
+                        "confidence",
+                        "confidence_score",
+                    ),
+                ),
+                "confluence": self._extract_numeric(
+                    decision,
+                    (
+                        "confluence",
+                        "confluence_score",
+                    ),
+                ),
+            }
+        )
+
+    def record_direction(
+        self,
+        *,
+        decision: Any,
+        timestamp: Optional[str],
+    ) -> None:
+        direction = getattr(
+            decision,
+            "direction",
+            None,
+        )
+
+        if direction is AIDirection.BUY:
+            self.buy_decisions += 1
+
+        elif direction is AIDirection.SELL:
+            self.sell_decisions += 1
+
+        self._record_decision_metrics(decision)
+
+    def record_risk_rejection(
+        self,
+        *,
+        decision: Any,
+        timestamp: Optional[str],
+        risk_decision: Any,
+    ) -> None:
+        self.risk_rejections += 1
+
+        reason = self._extract_reason(
+            risk_decision
+        )
+
+        self.risk_rejection_reason_counts[reason] = (
+            self.risk_rejection_reason_counts.get(reason, 0)
+            + 1
+        )
+
+        self._add_example(
+            {
+                "type": "RISK_REJECTION",
+                "timestamp": timestamp,
+                "reason": reason,
+                "direction": self._safe_value(
+                    getattr(
+                        decision,
+                        "direction",
+                        None,
+                    )
+                ),
+                "confidence": self._extract_numeric(
+                    decision,
+                    (
+                        "confidence",
+                        "confidence_score",
+                    ),
+                ),
+                "confluence": self._extract_numeric(
+                    decision,
+                    (
+                        "confluence",
+                        "confluence_score",
+                    ),
+                ),
+            }
+        )
+
+    def record_missing_proposal(
+        self,
+        *,
+        decision: Any,
+        timestamp: Optional[str],
+    ) -> None:
+        self.decisions_without_proposal += 1
+
+        self._add_example(
+            {
+                "type": "MISSING_PROPOSAL",
+                "timestamp": timestamp,
+                "direction": self._safe_value(
+                    getattr(
+                        decision,
+                        "direction",
+                        None,
+                    )
+                ),
+            }
+        )
+
+    def record_zero_position_size(
+        self,
+        *,
+        decision: Any,
+        timestamp: Optional[str],
+    ) -> None:
+        self.zero_position_size += 1
+
+        self._add_example(
+            {
+                "type": "ZERO_POSITION_SIZE",
+                "timestamp": timestamp,
+                "direction": self._safe_value(
+                    getattr(
+                        decision,
+                        "direction",
+                        None,
+                    )
+                ),
+            }
+        )
+
+    def record_exception(
+        self,
+        *,
+        timestamp: Optional[str],
+        error: Exception,
+    ) -> None:
+        self._add_example(
+            {
+                "type": "ERROR",
+                "timestamp": timestamp,
+                "error_type": type(error).__name__,
+                "error": str(error),
+            }
+        )
+
+    def _record_decision_metrics(
+        self,
+        decision: Any,
+    ) -> None:
+        confidence = self._extract_numeric(
+            decision,
+            (
+                "confidence",
+                "confidence_score",
+            ),
+        )
+
+        if confidence is not None:
+            self.confidence_observations += 1
+
+            if (
+                self.minimum_confidence_observed is None
+                or confidence
+                < self.minimum_confidence_observed
+            ):
+                self.minimum_confidence_observed = confidence
+
+            if (
+                self.maximum_confidence_observed is None
+                or confidence
+                > self.maximum_confidence_observed
+            ):
+                self.maximum_confidence_observed = confidence
+
+        confluence = self._extract_numeric(
+            decision,
+            (
+                "confluence",
+                "confluence_score",
+                "confluence_strength",
+            ),
+        )
+
+        if confluence is not None:
+            self.confluence_observations += 1
+
+            if (
+                self.minimum_confluence_observed is None
+                or confluence
+                < self.minimum_confluence_observed
+            ):
+                self.minimum_confluence_observed = confluence
+
+            if (
+                self.maximum_confluence_observed is None
+                or confluence
+                > self.maximum_confluence_observed
+            ):
+                self.maximum_confluence_observed = confluence
+
+    def _add_example(
+        self,
+        example: dict[str, Any],
+    ) -> None:
+        # Keep the diagnostic artifact bounded.
+        if len(self.examples) < 25:
+            self.examples.append(example)
+
+    @staticmethod
+    def _extract_numeric(
+        obj: Any,
+        names: Sequence[str],
+    ) -> Optional[float]:
+        for name in names:
+            try:
+                value = getattr(
+                    obj,
+                    name,
+                    None,
+                )
+
+                if value is None:
+                    continue
+
+                numeric = float(value)
+
+                if isfinite(numeric):
+                    return numeric
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+        return None
+
+    @staticmethod
+    def _extract_reason(
+        obj: Any,
+    ) -> str:
+        reason_names = (
+            "reason",
+            "decision_reason",
+            "rejection_reason",
+            "message",
+            "explanation",
+        )
+
+        for name in reason_names:
+            try:
+                value = getattr(
+                    obj,
+                    name,
+                    None,
+                )
+
+                if value is not None:
+                    text = str(value).strip()
+
+                    if text:
+                        return text[:300]
+
+            except Exception:
+                continue
+
+        return "UNSPECIFIED"
+
+    @staticmethod
+    def _safe_value(
+        value: Any,
+    ) -> Optional[str]:
+        if value is None:
+            return None
+
+        try:
+            if hasattr(value, "value"):
+                return str(value.value)
+
+            return str(value)
+
+        except Exception:
+            return None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass(frozen=True)
 class BacktestResult:
     """Complete deterministic backtest result."""
@@ -223,6 +580,8 @@ class BacktestResult:
     trades: list[dict[str, Any]]
     equity_curve: list[dict[str, Any]]
 
+    diagnostics: dict[str, Any]
+
 
 @dataclass
 class _OpenPosition:
@@ -249,8 +608,6 @@ class BacktestEngine:
     Deterministic historical simulator.
 
     The engine deliberately does not execute through PaperExecutionGateway.
-    Backtesting has its own simulation layer so historical results cannot
-    accidentally become paper/live execution requests.
     """
 
     def __init__(
@@ -285,19 +642,6 @@ class BacktestEngine:
         candles: Sequence[Mapping[str, Any]],
         specification: SymbolSpecification,
     ) -> BacktestResult:
-        """
-        Execute one deterministic backtest.
-
-        Decisions are calculated using candles available only up to
-        the current signal candle.
-
-        Entry occurs on the next candle open when configured.
-
-        Existing open positions are checked against each candle's
-        OHLC range before a new signal is considered.
-
-        Daily loss resets when the historical trading date changes.
-        """
 
         self.config.validate()
 
@@ -324,6 +668,7 @@ class BacktestEngine:
 
         balance = self.config.starting_balance
         peak_equity = balance
+
         max_drawdown = 0.0
         max_drawdown_percent = 0.0
 
@@ -334,6 +679,8 @@ class BacktestEngine:
 
         daily_loss = 0.0
         current_trading_day: Optional[date] = None
+
+        diagnostics = BacktestDiagnostics()
 
         for index in range(
             self.config.warmup_candles,
@@ -420,6 +767,8 @@ class BacktestEngine:
             if open_position is not None:
                 continue
 
+            diagnostics.candles_evaluated += 1
+
             history = normalized[: index + 1]
 
             try:
@@ -430,17 +779,33 @@ class BacktestEngine:
                         candles=history,
                     )
                 )
+
             except (
                 TradingPipelineServiceError,
                 TechnicalIndicatorError,
                 ValueError,
             ) as exc:
+
+                diagnostics.record_exception(
+                    timestamp=self._timestamp(candle),
+                    error=exc,
+                )
+
                 raise BacktestEngineError(
                     "Strategy evaluation failed at historical "
                     f"index {index}: {exc}"
                 ) from exc
 
+            diagnostics.record_direction(
+                decision=decision,
+                timestamp=self._timestamp(candle),
+            )
+
             if decision.direction is AIDirection.WAIT:
+                diagnostics.record_wait(
+                    decision=decision,
+                    timestamp=self._timestamp(candle),
+                )
                 continue
 
             if decision.symbol.upper() != self.config.symbol.upper():
@@ -451,16 +816,27 @@ class BacktestEngine:
             proposal = decision.proposal
 
             if proposal is None:
+                diagnostics.record_missing_proposal(
+                    decision=decision,
+                    timestamp=self._timestamp(candle),
+                )
+
                 raise BacktestEngineError(
                     "AI returned BUY/SELL without a proposal."
                 )
 
+            diagnostics.decisions_with_proposal += 1
+
             if proposal.stop_loss is None:
+                diagnostics.missing_stop_loss += 1
+
                 raise BacktestEngineError(
                     "Trade proposal has no stop loss."
                 )
 
             if proposal.take_profit is None:
+                diagnostics.missing_take_profit += 1
+
                 raise BacktestEngineError(
                     "Trade proposal has no take profit."
                 )
@@ -531,6 +907,10 @@ class BacktestEngine:
                 )
 
                 if position_size <= 0:
+                    diagnostics.record_zero_position_size(
+                        decision=decision,
+                        timestamp=self._timestamp(candle),
+                    )
                     continue
 
                 proposed_exposure = abs(
@@ -538,6 +918,8 @@ class BacktestEngine:
                     * entry_price
                     * specification.contract_size
                 )
+
+                diagnostics.risk_checks += 1
 
                 risk_decision = (
                     self.risk_engine.pre_trade_check(
@@ -556,13 +938,26 @@ class BacktestEngine:
                 )
 
             except RiskEngineError as exc:
+
+                diagnostics.record_exception(
+                    timestamp=self._timestamp(candle),
+                    error=exc,
+                )
+
                 raise BacktestEngineError(
                     "Risk Engine failed at historical "
                     f"index {index}: {exc}"
                 ) from exc
 
             if not risk_decision.allowed:
+                diagnostics.record_risk_rejection(
+                    decision=decision,
+                    timestamp=self._timestamp(candle),
+                    risk_decision=risk_decision,
+                )
                 continue
+
+            diagnostics.accepted_entries += 1
 
             open_position = _OpenPosition(
                 trade_id=self._new_trade_id(),
@@ -652,19 +1047,28 @@ class BacktestEngine:
                     )
                 )
 
-        return self._build_result(
+        result = self._build_result(
             normalized=normalized,
             balance=balance,
             trades=trades,
             equity_curve=equity_curve,
             max_drawdown=max_drawdown,
             max_drawdown_percent=max_drawdown_percent,
+            diagnostics=diagnostics,
         )
+
+        self._print_diagnostics(
+            diagnostics=diagnostics,
+            result=result,
+        )
+
+        return result
 
     @staticmethod
     def _validate_and_normalize_candles(
         candles: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
+
         if not candles:
             raise BacktestEngineError(
                 "At least one historical candle is required."
@@ -675,6 +1079,7 @@ class BacktestEngine:
         previous_timestamp: Optional[str] = None
 
         for index, raw in enumerate(candles):
+
             if not isinstance(raw, Mapping):
                 raise BacktestEngineError(
                     f"Candle {index} is not an object."
@@ -698,10 +1103,12 @@ class BacktestEngine:
                 high = float(raw["high"])
                 low = float(raw["low"])
                 close = float(raw["close"])
+
             except (
                 TypeError,
                 ValueError,
             ) as exc:
+
                 raise BacktestEngineError(
                     f"Candle {index} contains a non-numeric OHLC value."
                 ) from exc
@@ -763,6 +1170,7 @@ class BacktestEngine:
                 timestamp = item.get("datetime")
 
             if timestamp is not None:
+
                 timestamp_text = str(timestamp)
 
                 if (
@@ -786,16 +1194,18 @@ class BacktestEngine:
         position: _OpenPosition,
         candle: Mapping[str, Any],
     ) -> Optional[BacktestTrade]:
+
         open_price = float(candle["open"])
         high = float(candle["high"])
         low = float(candle["low"])
 
         if position.direction is AIDirection.BUY:
+
             hit_stop = low <= position.stop_loss
             hit_target = high >= position.take_profit
 
-            # Gap through SL: execute at the candle open.
             if open_price <= position.stop_loss:
+
                 exit_price = self._apply_exit_costs(
                     direction=position.direction,
                     raw_price=open_price,
@@ -808,8 +1218,8 @@ class BacktestEngine:
                     exit_reason="stop_loss_gap",
                 )
 
-            # Gap through TP: execute at the candle open.
             if open_price >= position.take_profit:
+
                 exit_price = self._apply_exit_costs(
                     direction=position.direction,
                     raw_price=open_price,
@@ -822,8 +1232,8 @@ class BacktestEngine:
                     exit_reason="take_profit_gap",
                 )
 
-            # If both are touched during the candle, SL wins.
             if hit_stop:
+
                 exit_price = self._apply_exit_costs(
                     direction=position.direction,
                     raw_price=position.stop_loss,
@@ -837,6 +1247,7 @@ class BacktestEngine:
                 )
 
             if hit_target:
+
                 exit_price = self._apply_exit_costs(
                     direction=position.direction,
                     raw_price=position.take_profit,
@@ -850,11 +1261,12 @@ class BacktestEngine:
                 )
 
         elif position.direction is AIDirection.SELL:
+
             hit_stop = high >= position.stop_loss
             hit_target = low <= position.take_profit
 
-            # Gap through SL: execute at the candle open.
             if open_price >= position.stop_loss:
+
                 exit_price = self._apply_exit_costs(
                     direction=position.direction,
                     raw_price=open_price,
@@ -867,8 +1279,8 @@ class BacktestEngine:
                     exit_reason="stop_loss_gap",
                 )
 
-            # Gap through TP: execute at the candle open.
             if open_price <= position.take_profit:
+
                 exit_price = self._apply_exit_costs(
                     direction=position.direction,
                     raw_price=open_price,
@@ -881,8 +1293,8 @@ class BacktestEngine:
                     exit_reason="take_profit_gap",
                 )
 
-            # If both are touched during the candle, SL wins.
             if hit_stop:
+
                 exit_price = self._apply_exit_costs(
                     direction=position.direction,
                     raw_price=position.stop_loss,
@@ -896,6 +1308,7 @@ class BacktestEngine:
                 )
 
             if hit_target:
+
                 exit_price = self._apply_exit_costs(
                     direction=position.direction,
                     raw_price=position.take_profit,
@@ -918,13 +1331,16 @@ class BacktestEngine:
         exit_time: Optional[str],
         exit_reason: str,
     ) -> BacktestTrade:
+
         if position.direction is AIDirection.BUY:
+
             gross_pnl = (
                 exit_price
                 - position.entry_price
             ) * position.position_size
 
         elif position.direction is AIDirection.SELL:
+
             gross_pnl = (
                 position.entry_price
                 - exit_price
@@ -954,8 +1370,8 @@ class BacktestEngine:
             else 0.0
         )
 
-        execution_cost = (
-            abs(gross_pnl - pnl)
+        execution_cost = abs(
+            gross_pnl - pnl
         )
 
         return BacktestTrade(
@@ -1009,6 +1425,7 @@ class BacktestEngine:
         position: _OpenPosition,
         mark_price: float,
     ) -> float:
+
         if position.direction is AIDirection.BUY:
             return (
                 mark_price
@@ -1031,9 +1448,11 @@ class BacktestEngine:
         direction: AIDirection,
         raw_price: float,
     ) -> float:
+
         half_spread = self.config.spread / 2.0
 
         if direction is AIDirection.BUY:
+
             adjusted = (
                 raw_price
                 + half_spread
@@ -1041,6 +1460,7 @@ class BacktestEngine:
             )
 
         elif direction is AIDirection.SELL:
+
             adjusted = (
                 raw_price
                 - half_spread
@@ -1065,9 +1485,11 @@ class BacktestEngine:
         direction: AIDirection,
         raw_price: float,
     ) -> float:
+
         half_spread = self.config.spread / 2.0
 
         if direction is AIDirection.BUY:
+
             adjusted = (
                 raw_price
                 - half_spread
@@ -1075,6 +1497,7 @@ class BacktestEngine:
             )
 
         elif direction is AIDirection.SELL:
+
             adjusted = (
                 raw_price
                 + half_spread
@@ -1102,12 +1525,6 @@ class BacktestEngine:
         stop_loss: float,
         take_profit: float,
     ) -> tuple[float, float]:
-        """
-        Move SL/TP by the same entry-price delta.
-
-        This avoids silently changing the intended risk/reward geometry
-        when the next candle opens away from the signal close.
-        """
 
         if not all(
             isfinite(value)
@@ -1128,11 +1545,13 @@ class BacktestEngine:
         )
 
         rebased_stop = stop_loss + delta
+
         rebased_take_profit = (
             take_profit + delta
         )
 
         if direction is AIDirection.BUY:
+
             if not (
                 rebased_stop
                 < actual_entry
@@ -1144,6 +1563,7 @@ class BacktestEngine:
                 )
 
         elif direction is AIDirection.SELL:
+
             if not (
                 rebased_take_profit
                 < actual_entry
@@ -1168,6 +1588,7 @@ class BacktestEngine:
     def _trading_day(
         candle: Mapping[str, Any],
     ) -> Optional[date]:
+
         value = candle.get("timestamp")
 
         if value is None:
@@ -1180,6 +1601,7 @@ class BacktestEngine:
             return None
 
         if isinstance(value, datetime):
+
             if value.tzinfo is not None:
                 value = value.astimezone(timezone.utc)
 
@@ -1189,6 +1611,7 @@ class BacktestEngine:
             return value
 
         if isinstance(value, (int, float)):
+
             if not isfinite(float(value)):
                 return None
 
@@ -1197,6 +1620,7 @@ class BacktestEngine:
                     float(value),
                     tz=timezone.utc,
                 ).date()
+
             except (
                 OverflowError,
                 OSError,
@@ -1210,6 +1634,7 @@ class BacktestEngine:
             return None
 
         try:
+
             parsed = datetime.fromisoformat(
                 text.replace("Z", "+00:00")
             )
@@ -1223,7 +1648,10 @@ class BacktestEngine:
             pass
 
         try:
-            return date.fromisoformat(text[:10])
+            return date.fromisoformat(
+                text[:10]
+            )
+
         except ValueError:
             return None
 
@@ -1236,7 +1664,9 @@ class BacktestEngine:
         equity_curve: Sequence[BacktestEquityPoint],
         max_drawdown: float,
         max_drawdown_percent: float,
+        diagnostics: BacktestDiagnostics,
     ) -> BacktestResult:
+
         wins = [
             trade
             for trade in trades
@@ -1322,6 +1752,7 @@ class BacktestEngine:
         serialized_trades: list[dict[str, Any]] = []
 
         for trade in trades:
+
             serialized = asdict(trade)
 
             serialized["symbol"] = (
@@ -1417,17 +1848,287 @@ class BacktestEngine:
                 8,
             ),
             bars_processed=len(normalized),
-            warmup_candles=(
-                self.config.warmup_candles
-            ),
+            warmup_candles=self.config.warmup_candles,
             trades=serialized_trades,
             equity_curve=serialized_equity,
+            diagnostics=diagnostics.to_dict(),
+        )
+
+    @staticmethod
+    def _print_diagnostics(
+        *,
+        diagnostics: BacktestDiagnostics,
+        result: BacktestResult,
+    ) -> None:
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "========================================",
+            flush=True,
+        )
+
+        print(
+            "RAYMOND v2.8 BACKTEST DIAGNOSTICS",
+            flush=True,
+        )
+
+        print(
+            "========================================",
+            flush=True,
+        )
+
+        print(
+            f"Candles evaluated: "
+            f"{diagnostics.candles_evaluated:,}",
+            flush=True,
+        )
+
+        print(
+            f"WAIT decisions: "
+            f"{diagnostics.wait_decisions:,}",
+            flush=True,
+        )
+
+        print(
+            f"BUY decisions: "
+            f"{diagnostics.buy_decisions:,}",
+            flush=True,
+        )
+
+        print(
+            f"SELL decisions: "
+            f"{diagnostics.sell_decisions:,}",
+            flush=True,
+        )
+
+        print(
+            f"Decisions with proposal: "
+            f"{diagnostics.decisions_with_proposal:,}",
+            flush=True,
+        )
+
+        print(
+            f"Decisions without proposal: "
+            f"{diagnostics.decisions_without_proposal:,}",
+            flush=True,
+        )
+
+        print(
+            f"Missing stop loss: "
+            f"{diagnostics.missing_stop_loss:,}",
+            flush=True,
+        )
+
+        print(
+            f"Missing take profit: "
+            f"{diagnostics.missing_take_profit:,}",
+            flush=True,
+        )
+
+        print(
+            f"Zero position size: "
+            f"{diagnostics.zero_position_size:,}",
+            flush=True,
+        )
+
+        print(
+            f"Risk checks: "
+            f"{diagnostics.risk_checks:,}",
+            flush=True,
+        )
+
+        print(
+            f"Risk rejections: "
+            f"{diagnostics.risk_rejections:,}",
+            flush=True,
+        )
+
+        print(
+            f"Accepted entries: "
+            f"{diagnostics.accepted_entries:,}",
+            flush=True,
+        )
+
+        print(
+            f"Actual completed trades: "
+            f"{result.total_trades:,}",
+            flush=True,
+        )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "WAIT REASONS:",
+            flush=True,
+        )
+
+        if diagnostics.wait_reason_counts:
+
+            for reason, count in sorted(
+                diagnostics.wait_reason_counts.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            ):
+                print(
+                    f"  {reason}: {count:,}",
+                    flush=True,
+                )
+
+        else:
+
+            print(
+                "  None recorded",
+                flush=True,
+            )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "RISK REJECTION REASONS:",
+            flush=True,
+        )
+
+        if diagnostics.risk_rejection_reason_counts:
+
+            for reason, count in sorted(
+                diagnostics.risk_rejection_reason_counts.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            ):
+                print(
+                    f"  {reason}: {count:,}",
+                    flush=True,
+                )
+
+        else:
+
+            print(
+                "  None recorded",
+                flush=True,
+            )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "CONFIDENCE:",
+            flush=True,
+        )
+
+        print(
+            f"  Observations: "
+            f"{diagnostics.confidence_observations:,}",
+            flush=True,
+        )
+
+        print(
+            f"  Minimum: "
+            f"{diagnostics.minimum_confidence_observed}",
+            flush=True,
+        )
+
+        print(
+            f"  Maximum: "
+            f"{diagnostics.maximum_confidence_observed}",
+            flush=True,
+        )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "CONFLUENCE:",
+            flush=True,
+        )
+
+        print(
+            f"  Observations: "
+            f"{diagnostics.confluence_observations:,}",
+            flush=True,
+        )
+
+        print(
+            f"  Minimum: "
+            f"{diagnostics.minimum_confluence_observed}",
+            flush=True,
+        )
+
+        print(
+            f"  Maximum: "
+            f"{diagnostics.maximum_confluence_observed}",
+            flush=True,
+        )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "EXAMPLES:",
+            flush=True,
+        )
+
+        if diagnostics.examples:
+
+            for example in diagnostics.examples:
+
+                print(
+                    "  "
+                    + str(example),
+                    flush=True,
+                )
+
+        else:
+
+            print(
+                "  None recorded",
+                flush=True,
+            )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "FULL DIAGNOSTICS JSON:",
+            flush=True,
+        )
+
+        print(
+            __import__("json").dumps(
+                diagnostics.to_dict(),
+                indent=2,
+                allow_nan=False,
+            ),
+            flush=True,
+        )
+
+        print(
+            "========================================",
+            flush=True,
         )
 
     @staticmethod
     def _timestamp(
         candle: Mapping[str, Any],
     ) -> Optional[str]:
+
         value = candle.get(
             "timestamp",
             candle.get(
