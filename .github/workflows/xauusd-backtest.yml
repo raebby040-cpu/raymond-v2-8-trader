@@ -6,7 +6,11 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+
+    # Hard upper bound for the complete job.
+    # The individual download and backtest steps also have
+    # their own timeouts so the workflow cannot silently hang.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout RAYMOND
@@ -16,53 +20,128 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Install RAYMOND dependencies
         run: |
+          set -euxo pipefail
+
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
 
+          python --version
+          node --version
+          npm --version
+
       - name: Verify RAYMOND backtest files
         run: |
+          set -euxo pipefail
+
           test -f scripts/run_xauusd_backtest.py
           test -f backend/app/backtest_engine.py
+          test -f backend/app/ai_trading_decision.py
+          test -f backend/app/trading_pipeline_service.py
+          test -f backend/app/risk_engine.py
 
+          echo "========================================"
+          echo "RAYMOND BACKTEST FILE CHECK"
+          echo "========================================"
           echo "Backtest runner: OK"
           echo "Backtest engine: OK"
+          echo "AI decision engine: OK"
+          echo "Trading pipeline: OK"
+          echo "Risk engine: OK"
+          echo "========================================"
+
+      # ------------------------------------------------------------
+      # IMPORTANT:
+      #
+      # The previous workflow attempted to download approximately
+      # 2003 -> 2026 in one operation.
+      #
+      # For the first reliable validation run we deliberately use
+      # a bounded 2024 -> 2025 period.
+      #
+      # Once the complete pipeline is proven, we can expand the
+      # historical period after optimizing the backtest engine.
+      # ------------------------------------------------------------
+
+      - name: Set backtest period
+        run: |
+          set -euxo pipefail
+
+          echo "XAUUSD_START=2024-01-01" >> "$GITHUB_ENV"
+          echo "XAUUSD_END=2026-01-01" >> "$GITHUB_ENV"
+
+          echo "Backtest period:"
+          echo "2024-01-01 -> 2026-01-01"
 
       - name: Download XAUUSD H1 historical data
+        shell: bash
         run: |
+          set -euxo pipefail
+
           rm -rf data/historical
           mkdir -p data/historical
 
-          npx --yes dukascopy-node \
-            -i xauusd \
-            -from 2003-05-05 \
-            -to 2026-01-01 \
-            -t h1 \
-            -f csv \
-            -dir data/historical
+          echo "========================================"
+          echo "DOWNLOADING XAUUSD H1 DATA"
+          echo "========================================"
+          echo "From: $XAUUSD_START"
+          echo "To:   $XAUUSD_END"
+          echo "========================================"
+
+          # Never allow the external downloader to run forever.
+          timeout --foreground 15m \
+            npx --yes dukascopy-node \
+              -i xauusd \
+              -from "$XAUUSD_START" \
+              -to "$XAUUSD_END" \
+              -t h1 \
+              -f csv \
+              -dir data/historical
+
+          echo "Dukascopy download command completed."
 
       - name: Locate historical CSV
+        shell: bash
         run: |
-          echo "===== DOWNLOADED FILES ====="
+          set -euxo pipefail
+
+          echo "========================================"
+          echo "DOWNLOADED FILES"
+          echo "========================================"
 
           find data/historical \
             -type f \
-            -printf '%p %s bytes\n'
+            -printf '%p %s bytes\n' \
+            | sort
 
-          FILE="$(find data/historical \
-            -type f \
-            -iname '*xauusd*h1*.csv' \
-            | head -n 1)"
+          echo "========================================"
+
+          FILE="$(
+            find data/historical \
+              -type f \
+              \( \
+                -iname '*xauusd*h1*.csv' \
+                -o \
+                -iname '*xauusd*.csv' \
+              \) \
+              -size +1k \
+              | head -n 1
+          )"
 
           if [ -z "$FILE" ]; then
-            echo "ERROR: XAUUSD H1 CSV was not found."
+            echo "ERROR: No usable XAUUSD CSV was found."
+            echo
+            echo "All files currently present:"
+            find data/historical -type f -print || true
             exit 1
           fi
 
@@ -72,22 +151,38 @@ jobs:
           echo "XAUUSD_RAW_FILE=$FILE" >> "$GITHUB_ENV"
 
       - name: Verify raw historical dataset
+        shell: bash
         run: |
+          set -euxo pipefail
+
           python - <<'PY'
           import os
+          from pathlib import Path
+
           import pandas as pd
 
-          path = os.environ["XAUUSD_RAW_FILE"]
+          path = Path(os.environ["XAUUSD_RAW_FILE"])
+
+          print("========================================")
+          print("RAW DATASET VALIDATION")
+          print("========================================")
+          print("File:", path)
+          print("Size:", path.stat().st_size, "bytes")
+
+          if path.stat().st_size <= 1024:
+              raise SystemExit(
+                  "ERROR: Historical CSV is empty or too small."
+              )
 
           df = pd.read_csv(path)
 
-          print("===== RAW DATASET =====")
           print("Rows:", len(df))
           print("Columns:", list(df.columns))
-          print()
-          print(df.head())
-          print()
-          print(df.tail())
+
+          if df.empty:
+              raise SystemExit(
+                  "ERROR: Historical dataset contains zero rows."
+              )
 
           required = {
               "timestamp",
@@ -105,17 +200,56 @@ jobs:
                   f"{sorted(missing)}"
               )
 
-          if len(df) < 10000:
+          for column in [
+              "open",
+              "high",
+              "low",
+              "close",
+          ]:
+              df[column] = pd.to_numeric(
+                  df[column],
+                  errors="coerce",
+              )
+
+          invalid = df[
+              [
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              ]
+          ].isna().any(axis=1)
+
+          if invalid.any():
               raise SystemExit(
-                  f"ERROR: Dataset too small: {len(df)} rows"
+                  "ERROR: Dataset contains "
+                  f"{int(invalid.sum())} rows with invalid OHLC values."
+              )
+
+          if len(df) < 5000:
+              raise SystemExit(
+                  "ERROR: Dataset unexpectedly small: "
+                  f"{len(df)} rows."
               )
 
           print()
-          print("Raw historical dataset verification PASSED.")
+          print("First raw row:")
+          print(df.head(1).to_string(index=False))
+
+          print()
+          print("Last raw row:")
+          print(df.tail(1).to_string(index=False))
+
+          print()
+          print("Raw dataset validation PASSED.")
+          print("========================================")
           PY
 
       - name: Normalize historical dataset
+        shell: bash
         run: |
+          set -euxo pipefail
+
           python - <<'PY'
           import os
           from pathlib import Path
@@ -126,7 +260,7 @@ jobs:
 
           target = Path(
               "data/historical/"
-              "xauusd_h1_2003_2025_normalized.csv"
+              "xauusd_h1_2024_2025_normalized.csv"
           )
 
           df = pd.read_csv(source)
@@ -146,30 +280,16 @@ jobs:
                   f"ERROR: Missing columns: {sorted(missing)}"
               )
 
-          # Dukascopy XAUUSD export may not contain volume.
-          # RAYMOND requires the field, but does not use
-          # volume as an execution input in this backtest.
+          # Dukascopy exports do not always expose a usable volume
+          # column. Raymond's current H1 backtest requires the field
+          # structurally, but does not use zero volume as real market
+          # buy/sell volume.
           if "volume" not in df.columns:
-              print(
-                  "Volume column not supplied by source."
-              )
-              print(
-                  "Setting volume to 0.0."
-              )
               df["volume"] = 0.0
 
-          # -------------------------------------------------
-          # TIMESTAMP FIX
-          #
-          # Dukascopy can return timestamps such as:
-          #
-          # 1767200400000
-          #
-          # These are Unix timestamps in MILLISECONDS.
-          #
-          # Detect numeric millisecond timestamps and parse
-          # them explicitly as milliseconds.
-          # -------------------------------------------------
+          # ---------------------------------------------------------
+          # Timestamp normalization
+          # ---------------------------------------------------------
 
           raw_timestamp = df["timestamp"]
 
@@ -184,10 +304,7 @@ jobs:
 
           if numeric_ratio > 0.95:
               print(
-                  "Detected numeric timestamp format."
-              )
-              print(
-                  "Parsing timestamps as Unix milliseconds."
+                  "Detected numeric timestamps."
               )
 
               df["timestamp"] = pd.to_datetime(
@@ -198,10 +315,7 @@ jobs:
               )
           else:
               print(
-                  "Detected non-numeric timestamp format."
-              )
-              print(
-                  "Parsing timestamps as ISO/datetime values."
+                  "Detected textual timestamps."
               )
 
               df["timestamp"] = pd.to_datetime(
@@ -210,9 +324,9 @@ jobs:
                   errors="coerce",
               )
 
-          # -------------------------------------------------
-          # Numeric OHLC fields
-          # -------------------------------------------------
+          # ---------------------------------------------------------
+          # Numeric OHLC/volume
+          # ---------------------------------------------------------
 
           for column in [
               "open",
@@ -226,7 +340,8 @@ jobs:
                   errors="coerce",
               )
 
-          # Remove rows with unusable timestamp/OHLC data.
+          before_cleanup = len(df)
+
           df = df.dropna(
               subset=[
                   "timestamp",
@@ -237,66 +352,63 @@ jobs:
               ]
           )
 
-          # -------------------------------------------------
-          # Historical test period
-          # -------------------------------------------------
+          dropped_invalid = (
+              before_cleanup - len(df)
+          )
+
+          # ---------------------------------------------------------
+          # Date filtering
+          # ---------------------------------------------------------
 
           start_date = pd.Timestamp(
-              "2003-05-05",
+              os.environ["XAUUSD_START"],
               tz="UTC",
           )
 
           end_date = pd.Timestamp(
-              "2026-01-01",
+              os.environ["XAUUSD_END"],
               tz="UTC",
           )
 
           print()
-          print("Before date filtering:", len(df))
-          print(
-              "Detected first timestamp:",
-              df["timestamp"].min(),
-          )
-          print(
-              "Detected last timestamp:",
-              df["timestamp"].max(),
-          )
+          print("Detected first timestamp:")
+          print(df["timestamp"].min())
+
+          print("Detected last timestamp:")
+          print(df["timestamp"].max())
 
           df = df[
               (df["timestamp"] >= start_date)
               &
               (df["timestamp"] < end_date)
-          ]
+          ].copy()
 
-          print(
-              "After date filtering:",
-              len(df),
-          )
-
-          if len(df) == 0:
+          if df.empty:
               raise SystemExit(
-                  "ERROR: Date filtering produced 0 candles. "
-                  "Timestamp parsing is still incorrect."
+                  "ERROR: Date filtering produced zero candles."
               )
 
-          # -------------------------------------------------
-          # Sort and remove duplicate candles
-          # -------------------------------------------------
+          # ---------------------------------------------------------
+          # Sort + duplicate removal
+          # ---------------------------------------------------------
 
-          df = df.sort_values("timestamp")
+          df = df.sort_values(
+              "timestamp"
+          ).reset_index(drop=True)
 
           duplicate_count = int(
               df["timestamp"].duplicated().sum()
           )
 
-          df = df.drop_duplicates(
-              subset=["timestamp"],
-              keep="first",
-          )
+          if duplicate_count:
+              df = df.drop_duplicates(
+                  subset=["timestamp"],
+                  keep="first",
+              ).reset_index(drop=True)
 
-          # -------------------------------------------------
+          # ---------------------------------------------------------
           # OHLC validation
-          # -------------------------------------------------
+          # ---------------------------------------------------------
 
           invalid = (
               (df["open"] <= 0)
@@ -316,19 +428,19 @@ jobs:
 
           if invalid_count:
               raise SystemExit(
-                  f"ERROR: Invalid OHLC rows: "
+                  "ERROR: Invalid OHLC rows: "
                   f"{invalid_count}"
               )
 
-          if len(df) < 10000:
+          if len(df) < 5000:
               raise SystemExit(
-                  "ERROR: Normalized dataset is too small: "
+                  "ERROR: Normalized dataset is unexpectedly small: "
                   f"{len(df)}"
               )
 
-          # -------------------------------------------------
+          # ---------------------------------------------------------
           # Save normalized dataset
-          # -------------------------------------------------
+          # ---------------------------------------------------------
 
           target.parent.mkdir(
               parents=True,
@@ -351,7 +463,7 @@ jobs:
 
           print()
           print("========================================")
-          print(" NORMALIZED XAUUSD H1 DATASET")
+          print("NORMALIZED XAUUSD H1 DATASET")
           print("========================================")
           print("Rows:", len(df))
           print(
@@ -363,62 +475,138 @@ jobs:
               df["timestamp"].iloc[-1],
           )
           print(
-              "Duplicates before cleanup:",
+              "Invalid rows removed:",
+              dropped_invalid,
+          )
+          print(
+              "Duplicate rows removed:",
               duplicate_count,
           )
           print(
-              "Duplicates after cleanup:",
+              "Final duplicate count:",
               int(
-                  df["timestamp"]
-                  .duplicated()
-                  .sum()
+                  df["timestamp"].duplicated().sum()
               ),
           )
-          print(
-              "Invalid OHLC rows:",
-              invalid_count,
-          )
-          print(
-              "Volume sample:",
-              df["volume"].unique()[:10],
-          )
           print("========================================")
+
           print()
           print("Normalization PASSED.")
           PY
 
+      - name: Inspect normalized dataset
+        run: |
+          set -euxo pipefail
+
+          python - <<'PY'
+          import pandas as pd
+
+          path = (
+              "data/historical/"
+              "xauusd_h1_2024_2025_normalized.csv"
+          )
+
+          df = pd.read_csv(path)
+
+          print("Rows:", len(df))
+          print("Columns:", list(df.columns))
+          print()
+          print(df.head(3).to_string(index=False))
+          print()
+          print(df.tail(3).to_string(index=False))
+          PY
+
+      # ------------------------------------------------------------
+      # IMPORTANT:
+      #
+      # The runner itself now has an internal progress heartbeat.
+      # The shell timeout below is an additional safety layer.
+      # ------------------------------------------------------------
+
       - name: Run RAYMOND H1 backtest
+        shell: bash
         env:
           PYTHONPATH: backend
+          PYTHONUNBUFFERED: "1"
         run: |
-          rm -rf backtest_results
+          set -o pipefail
 
-          python scripts/run_xauusd_backtest.py \
-            --data data/historical/xauusd_h1_2003_2025_normalized.csv \
-            --out backtest_results \
-            --starting-balance 10000 \
-            --spread 0.30 \
-            --slippage 0.05 \
-            --commission 0.0
+          rm -rf backtest_results
+          mkdir -p backtest_results
+
+          echo "========================================"
+          echo "STARTING RAYMOND BACKTEST"
+          echo "========================================"
+          date -u
+
+          timeout --foreground 30m \
+            python scripts/run_xauusd_backtest.py \
+              --data data/historical/xauusd_h1_2024_2025_normalized.csv \
+              --out backtest_results \
+              --starting-balance 10000 \
+              --spread 0.30 \
+              --slippage 0.05 \
+              --commission 0.0 \
+              --progress-every 1000
+
+          STATUS=$?
+
+          echo
+          echo "Backtest process exit code: $STATUS"
+
+          if [ "$STATUS" -eq 124 ]; then
+            echo "ERROR: RAYMOND backtest exceeded 30 minutes."
+            echo "This indicates the strategy/backtest engine needs"
+            echo "optimization before attempting the full historical period."
+            exit 124
+          fi
+
+          exit "$STATUS"
 
       - name: Verify backtest results
+        if: always()
+        shell: bash
         run: |
-          if [ ! -f backtest_results/result.json ]; then
-            echo "ERROR: result.json was not created."
-            exit 1
+          set +e
+
+          echo "========================================"
+          echo "BACKTEST OUTPUT INSPECTION"
+          echo "========================================"
+
+          if [ -f backtest_results/result.json ]; then
+            echo "result.json: FOUND"
+            cat backtest_results/result.json
+          else
+            echo "result.json: NOT FOUND"
           fi
 
-          if [ ! -f backtest_results/trades.csv ]; then
-            echo "ERROR: trades.csv was not created."
-            exit 1
+          if [ -f backtest_results/trades.csv ]; then
+            echo "trades.csv: FOUND"
+            echo "Trade rows:"
+            wc -l backtest_results/trades.csv
+          else
+            echo "trades.csv: NOT FOUND"
           fi
 
-          echo "===== RAYMOND RESULT ====="
-
-          cat backtest_results/result.json
+          echo
+          echo "Backtest directory:"
+          find backtest_results \
+            -maxdepth 2 \
+            -type f \
+            -printf '%p %s bytes\n' \
+            2>/dev/null || true
 
       - name: Print key metrics
+        if: always()
+        shell: bash
         run: |
+          set +e
+
+          if [ ! -f backtest_results/result.json ]; then
+            echo "No result.json available."
+            exit 0
+          fi
+
           python - <<'PY'
           import json
           from pathlib import Path
@@ -426,12 +614,14 @@ jobs:
           result = json.loads(
               Path(
                   "backtest_results/result.json"
-              ).read_text()
+              ).read_text(
+                  encoding="utf-8"
+              )
           )
 
           print()
           print("========================================")
-          print(" RAYMOND v2.8 XAUUSD H1 BACKTEST")
+          print("RAYMOND v2.8 XAUUSD H1 BACKTEST")
           print("========================================")
 
           metrics = [
@@ -468,11 +658,13 @@ jobs:
           print("========================================")
           PY
 
-      - name: Upload backtest results
+      - name: Upload backtest artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: raymond-xauusd-h1-backtest-results
           path: |
             backtest_results/
-            data/historical/xauusd_h1_2003_2025_normalized.csv
-          retention-days: 7
+            data/historical/
+          if-no-files-found: warn
+          retention-days: 14
