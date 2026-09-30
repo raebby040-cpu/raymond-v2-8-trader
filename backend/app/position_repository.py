@@ -303,14 +303,100 @@ class PositionRepository:
             direction
         )
 
-        if risk_1r is None and initial_stop_loss is not None:
+        # ----------------------------------------------------
+        # Validate immutable opening risk BEFORE persistence.
+        #
+        # This prevents new malformed paper positions from
+        # entering the database with an invalid directional SL
+        # or TP configuration.
+        # ----------------------------------------------------
+
+        entry = float(entry_price)
+        quantity = float(original_quantity)
+
+        if entry <= 0:
+            raise ValueError(
+                "entry_price must be greater than zero."
+            )
+
+        if quantity <= 0:
+            raise ValueError(
+                "original_quantity must be greater than zero."
+            )
+
+        if initial_stop_loss is None:
+            raise ValueError(
+                "initial_stop_loss is required for a persistent paper position."
+            )
+
+        initial_stop = float(initial_stop_loss)
+
+        if initial_stop <= 0:
+            raise ValueError(
+                "initial_stop_loss must be greater than zero."
+            )
+
+        if direction_enum == TradeDirection.BUY:
+            if initial_stop >= entry:
+                raise ValueError(
+                    "BUY initial_stop_loss must be below entry_price."
+                )
+
+            if (
+                take_profit_1 is not None
+                and float(take_profit_1) <= entry
+            ):
+                raise ValueError(
+                    "BUY take_profit_1 must be above entry_price."
+                )
+
+            if (
+                take_profit_2 is not None
+                and float(take_profit_2) <= entry
+            ):
+                raise ValueError(
+                    "BUY take_profit_2 must be above entry_price."
+                )
+
+        elif direction_enum == TradeDirection.SELL:
+            if initial_stop <= entry:
+                raise ValueError(
+                    "SELL initial_stop_loss must be above entry_price."
+                )
+
+            if (
+                take_profit_1 is not None
+                and float(take_profit_1) >= entry
+            ):
+                raise ValueError(
+                    "SELL take_profit_1 must be below entry_price."
+                )
+
+            if (
+                take_profit_2 is not None
+                and float(take_profit_2) >= entry
+            ):
+                raise ValueError(
+                    "SELL take_profit_2 must be below entry_price."
+                )
+
+        else:
+            raise ValueError(
+                f"Unsupported position direction: {direction_enum}"
+            )
+
+        if risk_1r is None:
             risk_1r = abs(
-                float(entry_price)
-                - float(initial_stop_loss)
+                entry - initial_stop
+            )
+
+        if float(risk_1r) <= 0:
+            raise ValueError(
+                "risk_1r must be greater than zero."
             )
 
         if current_price is None:
-            current_price = float(entry_price)
+            current_price = entry
 
         position = Position(
             position_id=position_id,
@@ -318,16 +404,12 @@ class PositionRepository:
             symbol=symbol,
             direction=direction_enum,
 
-            quantity=float(original_quantity),
+            quantity=quantity,
 
-            entry_price=float(entry_price),
-            original_quantity=float(original_quantity),
+            entry_price=entry,
+            original_quantity=quantity,
 
-            initial_stop_loss=(
-                float(initial_stop_loss)
-                if initial_stop_loss is not None
-                else None
-            ),
+            initial_stop_loss=initial_stop,
 
             take_profit_1=(
                 float(take_profit_1)
@@ -341,27 +423,15 @@ class PositionRepository:
                 else None
             ),
 
-            risk_1r=(
-                float(risk_1r)
-                if risk_1r is not None
-                else None
-            ),
+            risk_1r=float(risk_1r),
 
             current_price=float(current_price),
 
-            current_stop_loss=(
-                float(initial_stop_loss)
-                if initial_stop_loss is not None
-                else None
-            ),
+            current_stop_loss=initial_stop,
 
-            remaining_quantity=float(original_quantity),
+            remaining_quantity=quantity,
 
-            stop_loss=(
-                float(initial_stop_loss)
-                if initial_stop_loss is not None
-                else None
-            ),
+            stop_loss=initial_stop,
 
             take_profit=(
                 float(take_profit_1)
