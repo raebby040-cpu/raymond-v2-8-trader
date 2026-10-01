@@ -152,6 +152,26 @@ class BacktestConfig:
     # XAUUSD notional value into modeled exposure for RiskEngine checks.
     exposure_leverage: float = 200.0
 
+    # ---------------------------------------------------------
+    # MTF entry confirmation (backtest-only)
+    # ---------------------------------------------------------
+    # The existing primary-timeframe RAYMOND strategy remains the
+    # source of the trade direction. The lower timeframe can only
+    # confirm or reject that already-valid setup.
+    lower_timeframe: Optional[str] = None
+    require_lower_timeframe_confirmation: bool = False
+    lower_timeframe_min_confidence: float = 0.0
+    lower_timeframe_min_confluence: float = 0.0
+
+    # ---------------------------------------------------------
+    # Profit protection (backtest-only)
+    # ---------------------------------------------------------
+    # Once a position reaches this R multiple, lock a small profit.
+    # Existing +1R partial TP / break-even / trailing rules remain.
+    profit_protection_enabled: bool = True
+    profit_protection_trigger_r: float = 0.75
+    profit_protection_lock_r: float = 0.10
+
     def validate(self) -> None:
         if not isinstance(self.symbol, str) or not self.symbol.strip():
             raise BacktestEngineError("symbol is required.")
@@ -199,6 +219,37 @@ class BacktestConfig:
         if self.exposure_leverage <= 0:
             raise BacktestEngineError(
                 "exposure_leverage must be greater than zero."
+            )
+
+        if self.lower_timeframe is not None:
+            if not isinstance(self.lower_timeframe, str) or not self.lower_timeframe.strip():
+                raise BacktestEngineError(
+                    "lower_timeframe must be a non-empty string when provided."
+                )
+            if self.lower_timeframe.strip().upper() == self.timeframe.strip().upper():
+                raise BacktestEngineError(
+                    "lower_timeframe must differ from the primary timeframe."
+                )
+
+        for name, value in (
+            ("lower_timeframe_min_confidence", self.lower_timeframe_min_confidence),
+            ("lower_timeframe_min_confluence", self.lower_timeframe_min_confluence),
+            ("profit_protection_trigger_r", self.profit_protection_trigger_r),
+            ("profit_protection_lock_r", self.profit_protection_lock_r),
+        ):
+            if not isfinite(value):
+                raise BacktestEngineError(f"{name} must be finite.")
+            if value < 0:
+                raise BacktestEngineError(f"{name} cannot be negative.")
+
+        if self.profit_protection_lock_r > self.profit_protection_trigger_r:
+            raise BacktestEngineError(
+                "profit_protection_lock_r cannot exceed profit_protection_trigger_r."
+            )
+
+        if self.require_lower_timeframe_confirmation and not self.lower_timeframe:
+            raise BacktestEngineError(
+                "lower_timeframe is required when lower-timeframe confirmation is enabled."
             )
 
 
@@ -304,6 +355,9 @@ class BacktestDiagnostics:
     take_profit_extensions: int = 0
     trailing_activations: int = 0
     trailing_stop_updates: int = 0
+    profit_protection_activations: int = 0
+    lower_timeframe_checks: int = 0
+    lower_timeframe_rejections: int = 0
 
     wait_reason_counts: dict[str, int] = field(
         default_factory=dict
@@ -504,6 +558,9 @@ class BacktestDiagnostics:
 
         elif event_upper == "TRAILING_STOP_UPDATE":
             self.trailing_stop_updates += 1
+
+        elif event_upper == "PROFIT_PROTECTION":
+            self.profit_protection_activations += 1
 
         example = {
             "type": "MANAGEMENT",
@@ -792,6 +849,7 @@ class BacktestEngine:
         *,
         candles: Sequence[Mapping[str, Any]],
         specification: SymbolSpecification,
+        lower_timeframe_candles: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> BacktestResult:
 
         self.config.validate()
@@ -799,6 +857,23 @@ class BacktestEngine:
         normalized = self._validate_and_normalize_candles(
             candles
         )
+
+        normalized_lower: list[dict[str, Any]] = []
+        if lower_timeframe_candles is not None:
+            normalized_lower = self._validate_and_normalize_candles(
+                lower_timeframe_candles,
+                require_timestamps=True,
+            )
+
+        if self.config.require_lower_timeframe_confirmation:
+            if not normalized_lower:
+                raise BacktestEngineError(
+                    "Lower-timeframe confirmation is enabled, but no lower-timeframe candles were supplied."
+                )
+            if len(normalized_lower) < self.config.warmup_candles:
+                raise BacktestEngineError(
+                    "Insufficient lower-timeframe candles for confirmation."
+                )
 
         if len(normalized) <= self.config.warmup_candles:
             raise BacktestEngineError(
@@ -833,6 +908,9 @@ class BacktestEngine:
 
         diagnostics = BacktestDiagnostics()
 
+        lower_cursor = 0
+        lower_history: list[dict[str, Any]] = []
+
         for index in range(
             self.config.warmup_candles,
             len(normalized),
@@ -865,13 +943,10 @@ class BacktestEngine:
                         closed_trade.pnl
                         - closed_trade.partial_realized_pnl
                     )
-
                     balance += close_pnl
 
                     if close_pnl < 0:
-                        daily_loss += abs(
-                            close_pnl
-                        )
+                        daily_loss += abs(close_pnl)
 
                     trades.append(closed_trade)
 
@@ -947,6 +1022,18 @@ class BacktestEngine:
 
             history = normalized[: index + 1]
 
+            if normalized_lower:
+                primary_timestamp = self._timestamp_datetime(candle)
+                if primary_timestamp is not None:
+                    while lower_cursor < len(normalized_lower):
+                        lower_timestamp = self._timestamp_datetime(
+                            normalized_lower[lower_cursor]
+                        )
+                        if lower_timestamp is None or lower_timestamp > primary_timestamp:
+                            break
+                        lower_history.append(normalized_lower[lower_cursor])
+                        lower_cursor += 1
+
             try:
                 decision = (
                     self.pipeline_service.evaluate_decision(
@@ -1000,6 +1087,54 @@ class BacktestEngine:
                 raise BacktestEngineError(
                     "AI returned BUY/SELL without a proposal."
                 )
+
+            if self.config.lower_timeframe and self.config.require_lower_timeframe_confirmation:
+                diagnostics.lower_timeframe_checks += 1
+
+                if len(lower_history) < self.config.warmup_candles:
+                    diagnostics.lower_timeframe_rejections += 1
+                    diagnostics.wait_reason_counts["LOWER_TIMEFRAME_WARMUP"] = (
+                        diagnostics.wait_reason_counts.get("LOWER_TIMEFRAME_WARMUP", 0) + 1
+                    )
+                    continue
+
+                try:
+                    lower_decision = self.pipeline_service.evaluate_decision(
+                        symbol=self.config.symbol,
+                        timeframe=self.config.lower_timeframe,
+                        candles=lower_history,
+                    )
+                except (
+                    TradingPipelineServiceError,
+                    TechnicalIndicatorError,
+                    ValueError,
+                ) as exc:
+                    diagnostics.record_exception(
+                        timestamp=self._timestamp(candle),
+                        error=exc,
+                    )
+                    raise BacktestEngineError(
+                        "Lower-timeframe strategy evaluation failed at historical "
+                        f"index {index}: {exc}"
+                    ) from exc
+
+                lower_confidence = float(getattr(lower_decision, "confidence", 0.0) or 0.0)
+                lower_confluence = float(getattr(lower_decision, "confluence_score", 0.0) or 0.0)
+
+                lower_direction = getattr(lower_decision, "direction", AIDirection.WAIT)
+
+                lower_ok = (
+                    lower_direction is decision.direction
+                    and lower_confidence >= self.config.lower_timeframe_min_confidence
+                    and lower_confluence >= self.config.lower_timeframe_min_confluence
+                )
+
+                if not lower_ok:
+                    diagnostics.lower_timeframe_rejections += 1
+                    diagnostics.wait_reason_counts["LOWER_TIMEFRAME_CONFIRMATION"] = (
+                        diagnostics.wait_reason_counts.get("LOWER_TIMEFRAME_CONFIRMATION", 0) + 1
+                    )
+                    continue
 
             diagnostics.decisions_with_proposal += 1
 
@@ -1209,7 +1344,6 @@ class BacktestEngine:
                 final_trade.pnl
                 - final_trade.partial_realized_pnl
             )
-
             balance += final_close_pnl
             trades.append(final_trade)
 
@@ -1280,6 +1414,8 @@ class BacktestEngine:
     @staticmethod
     def _validate_and_normalize_candles(
         candles: Sequence[Mapping[str, Any]],
+        *,
+        require_timestamps: bool = False,
     ) -> list[dict[str, Any]]:
 
         if not candles:
@@ -1381,6 +1517,11 @@ class BacktestEngine:
 
             if timestamp is None:
                 timestamp = item.get("datetime")
+
+            if timestamp is None and require_timestamps:
+                raise BacktestEngineError(
+                    f"Candle {index} requires a timestamp for multi-timeframe alignment."
+                )
 
             if timestamp is not None:
 
@@ -2038,7 +2179,83 @@ class BacktestEngine:
                 "Cannot manage WAIT position."
             )
 
+        # Apply the additional profit-protection layer after the existing
+        # management rules. This means it can tighten a stop but can never
+        # loosen a stop already improved by break-even or trailing logic.
+        if self.config.profit_protection_enabled:
+            self._apply_profit_protection(
+                position=position,
+                candle=candle,
+                diagnostics=diagnostics,
+            )
+
         return management_pnl
+
+    def _apply_profit_protection(
+        self,
+        *,
+        position: _OpenPosition,
+        candle: Mapping[str, Any],
+        diagnostics: BacktestDiagnostics,
+    ) -> None:
+        """Lock a small profit once the trade has proved itself."""
+
+        risk = position.initial_risk
+        trigger = self.config.profit_protection_trigger_r
+        lock = self.config.profit_protection_lock_r
+
+        if risk <= 0 or trigger <= 0:
+            return
+
+        if position.direction is AIDirection.BUY:
+            trigger_price = position.entry_price + risk * trigger
+            protected_stop = position.entry_price + risk * lock
+            reached = float(candle["high"]) >= trigger_price
+
+            if reached and protected_stop > position.stop_loss:
+                old_stop = position.stop_loss
+                position.stop_loss = min(
+                    protected_stop,
+                    position.take_profit - max(risk * 0.001, 1e-9),
+                )
+                if position.stop_loss > old_stop:
+                    self._record_management_event(
+                        position=position,
+                        diagnostics=diagnostics,
+                        event="PROFIT_PROTECTION",
+                        timestamp=self._timestamp(candle),
+                        details={
+                            "trigger_r": trigger,
+                            "lock_r": lock,
+                            "old_stop_loss": round(old_stop, 8),
+                            "new_stop_loss": round(position.stop_loss, 8),
+                        },
+                    )
+
+        elif position.direction is AIDirection.SELL:
+            trigger_price = position.entry_price - risk * trigger
+            protected_stop = position.entry_price - risk * lock
+            reached = float(candle["low"]) <= trigger_price
+
+            if reached and protected_stop < position.stop_loss:
+                old_stop = position.stop_loss
+                position.stop_loss = max(
+                    protected_stop,
+                    position.take_profit + max(risk * 0.001, 1e-9),
+                )
+                if position.stop_loss < old_stop:
+                    self._record_management_event(
+                        position=position,
+                        diagnostics=diagnostics,
+                        event="PROFIT_PROTECTION",
+                        timestamp=self._timestamp(candle),
+                        details={
+                            "trigger_r": trigger,
+                            "lock_r": lock,
+                            "old_stop_loss": round(old_stop, 8),
+                            "new_stop_loss": round(position.stop_loss, 8),
+                        },
+                    )
 
     @staticmethod
     def _record_management_event(
@@ -2393,6 +2610,25 @@ class BacktestEngine:
             rebased_stop,
             rebased_take_profit,
         )
+
+    @staticmethod
+    def _timestamp_datetime(
+        candle: Mapping[str, Any],
+    ) -> Optional[datetime]:
+        value = candle.get("timestamp")
+        if value is None:
+            value = candle.get("time")
+        if value is None:
+            value = candle.get("datetime")
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
 
     @staticmethod
     def _trading_day(
@@ -2806,6 +3042,24 @@ class BacktestEngine:
         print(
             f"  Trailing stop updates: "
             f"{diagnostics.trailing_stop_updates:,}",
+            flush=True,
+        )
+
+        print(
+            f"  Profit protection activations: "
+            f"{diagnostics.profit_protection_activations:,}",
+            flush=True,
+        )
+
+        print(
+            f"  Lower-timeframe checks: "
+            f"{diagnostics.lower_timeframe_checks:,}",
+            flush=True,
+        )
+
+        print(
+            f"  Lower-timeframe rejections: "
+            f"{diagnostics.lower_timeframe_rejections:,}",
             flush=True,
         )
 
