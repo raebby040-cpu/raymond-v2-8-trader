@@ -720,6 +720,7 @@ class _OpenPosition:
     stop_loss: float
     take_profit: float
     position_size: float
+    contract_size: float
 
     # Permanent original trade parameters.
     initial_stop_loss: float
@@ -860,11 +861,16 @@ class BacktestEngine:
                 )
 
                 if closed_trade is not None:
-                    balance += closed_trade.pnl
+                    close_pnl = (
+                        closed_trade.pnl
+                        - closed_trade.partial_realized_pnl
+                    )
 
-                    if closed_trade.pnl < 0:
+                    balance += close_pnl
+
+                    if close_pnl < 0:
                         daily_loss += abs(
-                            closed_trade.pnl
+                            close_pnl
                         )
 
                     trades.append(closed_trade)
@@ -1168,6 +1174,7 @@ class BacktestEngine:
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 position_size=position_size,
+                contract_size=float(specification.contract_size),
                 initial_stop_loss=stop_loss,
                 initial_take_profit=take_profit,
                 initial_position_size=position_size,
@@ -1198,7 +1205,12 @@ class BacktestEngine:
                 exit_reason="end_of_data",
             )
 
-            balance += final_trade.pnl
+            final_close_pnl = (
+                final_trade.pnl
+                - final_trade.partial_realized_pnl
+            )
+
+            balance += final_close_pnl
             trades.append(final_trade)
 
             open_position = None
@@ -1608,7 +1620,7 @@ class BacktestEngine:
                     gross_partial_pnl = (
                         partial_exit_price
                         - position.entry_price
-                    ) * partial_size
+                    ) * partial_size * position.contract_size
 
                     commission = (
                         self.config.commission_per_unit
@@ -1838,7 +1850,7 @@ class BacktestEngine:
                     gross_partial_pnl = (
                         position.entry_price
                         - partial_exit_price
-                    ) * partial_size
+                    ) * partial_size * position.contract_size
 
                     commission = (
                         self.config.commission_per_unit
@@ -2068,14 +2080,14 @@ class BacktestEngine:
             gross_pnl = (
                 exit_price
                 - position.entry_price
-            ) * position.position_size
+            ) * position.position_size * position.contract_size
 
         elif position.direction is AIDirection.SELL:
 
             gross_pnl = (
                 position.entry_price
                 - exit_price
-            ) * position.position_size
+            ) * position.position_size * position.contract_size
 
         else:
             raise BacktestEngineError(
@@ -2116,6 +2128,7 @@ class BacktestEngine:
         notional = abs(
             position.entry_price
             * position.initial_position_size
+            * position.contract_size
         )
 
         pnl_percent = (
@@ -2227,13 +2240,13 @@ class BacktestEngine:
             return (
                 mark_price
                 - position.entry_price
-            ) * position.position_size
+            ) * position.position_size * position.contract_size
 
         if position.direction is AIDirection.SELL:
             return (
                 position.entry_price
                 - mark_price
-            ) * position.position_size
+            ) * position.position_size * position.contract_size
 
         raise BacktestEngineError(
             "Cannot calculate unrealized PnL for WAIT position."
