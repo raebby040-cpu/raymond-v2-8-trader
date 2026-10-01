@@ -23,6 +23,17 @@ IMPORTANT SAFETY RULES
 - Price gaps through protective levels are executed at the achievable
   candle open rather than at an unavailable historical stop/target price.
 
+EXPOSURE MODEL
+--------------
+- The backtester models XAUUSD exposure using a configurable leverage
+  assumption.
+- The default backtest leverage is 200:1.
+- This is a BACKTEST-ONLY assumption.
+- It does not change live broker leverage.
+- It does not connect to MT5 or Exness.
+- Live trading risk controls must eventually use the actual broker/account
+  margin requirements and leverage.
+
 DIAGNOSTICS
 -----------
 The engine records:
@@ -92,6 +103,13 @@ class BacktestConfig:
     slippage: float = 0.0
     commission_per_unit: float = 0.0
 
+    # Backtest-only leverage assumption used when converting raw
+    # XAUUSD notional value into modeled exposure for RiskEngine checks.
+    #
+    # This does NOT change live broker leverage and must not be interpreted
+    # as an MT5/Exness account setting.
+    exposure_leverage: float = 200.0
+
     def validate(self) -> None:
         if not isinstance(self.symbol, str) or not self.symbol.strip():
             raise BacktestEngineError("symbol is required.")
@@ -124,6 +142,7 @@ class BacktestConfig:
             ("spread", self.spread),
             ("slippage", self.slippage),
             ("commission_per_unit", self.commission_per_unit),
+            ("exposure_leverage", self.exposure_leverage),
         ):
             if not isfinite(value):
                 raise BacktestEngineError(
@@ -134,6 +153,11 @@ class BacktestConfig:
                 raise BacktestEngineError(
                     f"{name} cannot be negative."
                 )
+
+        if self.exposure_leverage <= 0:
+            raise BacktestEngineError(
+                "exposure_leverage must be greater than zero."
+            )
 
 
 @dataclass(frozen=True)
@@ -913,11 +937,42 @@ class BacktestEngine:
                     )
                     continue
 
-                proposed_exposure = abs(
+                # Calculate the raw XAUUSD notional value first.
+                #
+                # Example:
+                #   0.10 lot
+                #   x $2,000 gold
+                #   x 100 oz contract size
+                #   = $20,000 raw notional.
+                #
+                # RiskEngine's total exposure limit is intended to be
+                # evaluated against modeled exposure for a leveraged
+                # instrument, rather than treating the entire raw
+                # notional value as required account exposure.
+                proposed_notional = abs(
                     position_size
                     * entry_price
                     * specification.contract_size
                 )
+
+                # Convert raw notional into modeled exposure using the
+                # explicit backtest leverage assumption.
+                #
+                # This is BACKTEST ONLY. It is not a live broker setting.
+                proposed_exposure = (
+                    proposed_notional
+                    / self.config.exposure_leverage
+                )
+
+                if not isfinite(proposed_notional):
+                    raise BacktestEngineError(
+                        "Calculated proposed notional exposure is not finite."
+                    )
+
+                if not isfinite(proposed_exposure):
+                    raise BacktestEngineError(
+                        "Calculated proposed exposure is not finite."
+                    )
 
                 diagnostics.risk_checks += 1
 
