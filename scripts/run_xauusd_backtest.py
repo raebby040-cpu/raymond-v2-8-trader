@@ -116,11 +116,11 @@ def validate_dataframe(
             "Historical dataset contains zero rows."
         )
 
+    df = df.copy()
+
     # ---------------------------------------------------------
     # Timestamp
     # ---------------------------------------------------------
-
-    df = df.copy()
 
     df["timestamp"] = pd.to_datetime(
         df["timestamp"],
@@ -335,12 +335,21 @@ def write_outputs(
 ) -> None:
     """
     Serialize the BacktestResult into stable JSON/CSV artifacts.
+
+    Diagnostics are persisted separately so a zero-trade run can
+    be investigated without relying only on the GitHub Actions log.
     """
 
     out_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
+
+    diagnostics = result.diagnostics or {}
+
+    # ---------------------------------------------------------
+    # Complete result JSON
+    # ---------------------------------------------------------
 
     result_dict = {
         "status": result.status,
@@ -374,6 +383,7 @@ def write_outputs(
         ),
         "trades": result.trades,
         "equity_curve": result.equity_curve,
+        "diagnostics": diagnostics,
     }
 
     result_path = (
@@ -388,6 +398,10 @@ def write_outputs(
         ),
         encoding="utf-8",
     )
+
+    # ---------------------------------------------------------
+    # Trades CSV
+    # ---------------------------------------------------------
 
     trades_path = (
         out_dir / "trades.csv"
@@ -415,6 +429,23 @@ def write_outputs(
             )
         else:
             file_handle.write("no_trades\n")
+
+    # ---------------------------------------------------------
+    # Diagnostics JSON
+    # ---------------------------------------------------------
+
+    diagnostics_path = (
+        out_dir / "diagnostics.json"
+    )
+
+    diagnostics_path.write_text(
+        json.dumps(
+            diagnostics,
+            indent=2,
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
 
     # ---------------------------------------------------------
     # Human-readable summary
@@ -460,7 +491,108 @@ def write_outputs(
         f"Warmup candles: {result.warmup_candles}",
         f"Elapsed seconds: {elapsed_seconds:.3f}",
         "",
+        "",
+        "BACKTEST DIAGNOSTICS",
+        "====================",
+        f"Candles evaluated: {diagnostics.get('candles_evaluated', 0)}",
+        f"WAIT decisions: {diagnostics.get('wait_decisions', 0)}",
+        f"BUY decisions: {diagnostics.get('buy_decisions', 0)}",
+        f"SELL decisions: {diagnostics.get('sell_decisions', 0)}",
+        f"Decisions with proposal: {diagnostics.get('decisions_with_proposal', 0)}",
+        f"Decisions without proposal: {diagnostics.get('decisions_without_proposal', 0)}",
+        f"Missing stop loss: {diagnostics.get('missing_stop_loss', 0)}",
+        f"Missing take profit: {diagnostics.get('missing_take_profit', 0)}",
+        f"Zero position size: {diagnostics.get('zero_position_size', 0)}",
+        f"Risk checks: {diagnostics.get('risk_checks', 0)}",
+        f"Risk rejections: {diagnostics.get('risk_rejections', 0)}",
+        f"Accepted entries: {diagnostics.get('accepted_entries', 0)}",
+        f"Confidence observations: {diagnostics.get('confidence_observations', 0)}",
+        f"Confidence minimum: {diagnostics.get('confidence_min')}",
+        f"Confidence maximum: {diagnostics.get('confidence_max')}",
+        f"Confluence observations: {diagnostics.get('confluence_observations', 0)}",
+        f"Confluence minimum: {diagnostics.get('confluence_min')}",
+        f"Confluence maximum: {diagnostics.get('confluence_max')}",
+        "",
+        "WAIT REASONS",
+        "------------",
     ]
+
+    wait_reason_counts = diagnostics.get(
+        "wait_reason_counts",
+        {},
+    )
+
+    if wait_reason_counts:
+        for reason, count in sorted(
+            wait_reason_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            summary_lines.append(
+                f"{reason}: {count}"
+            )
+    else:
+        summary_lines.append(
+            "None recorded."
+        )
+
+    summary_lines.extend(
+        [
+            "",
+            "RISK REJECTION REASONS",
+            "----------------------",
+        ]
+    )
+
+    risk_rejection_reason_counts = diagnostics.get(
+        "risk_rejection_reason_counts",
+        {},
+    )
+
+    if risk_rejection_reason_counts:
+        for reason, count in sorted(
+            risk_rejection_reason_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            summary_lines.append(
+                f"{reason}: {count}"
+            )
+    else:
+        summary_lines.append(
+            "None recorded."
+        )
+
+    summary_lines.extend(
+        [
+            "",
+            "DIAGNOSTIC EXAMPLES",
+            "-------------------",
+        ]
+    )
+
+    examples = diagnostics.get(
+        "examples",
+        [],
+    )
+
+    if examples:
+        for index, example in enumerate(
+            examples,
+            start=1,
+        ):
+            summary_lines.append(
+                f"{index}. "
+                + json.dumps(
+                    example,
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+    else:
+        summary_lines.append(
+            "None recorded."
+        )
+
+    summary_lines.append("")
 
     summary_path.write_text(
         "\n".join(summary_lines),
@@ -500,6 +632,7 @@ def write_outputs(
                     "bars_processed",
                     "warmup_candles",
                     "elapsed_seconds",
+                    "diagnostics",
                 )
             },
             indent=2,
@@ -738,8 +871,6 @@ def main() -> None:
             - start_time
         )
 
-        # Save an explicit failure artifact so GitHub Actions
-        # does not leave us with no useful diagnostic information.
         out_dir.mkdir(
             parents=True,
             exist_ok=True,
@@ -835,6 +966,11 @@ def main() -> None:
 
     print(
         out_dir / "summary.txt",
+        flush=True,
+    )
+
+    print(
+        out_dir / "diagnostics.json",
         flush=True,
     )
 
