@@ -7,9 +7,6 @@ jobs:
   backtest:
     runs-on: ubuntu-latest
 
-    # Hard upper bound for the complete job.
-    # The individual download and backtest steps also have
-    # their own timeouts so the workflow cannot silently hang.
     timeout-minutes: 60
 
     steps:
@@ -59,16 +56,16 @@ jobs:
           echo "========================================"
 
       # ------------------------------------------------------------
-      # IMPORTANT:
+      # BACKTEST PERIOD
       #
-      # The previous workflow attempted to download approximately
-      # 2003 -> 2026 in one operation.
+      # Start:
+      #   2024-01-01
       #
-      # For the first reliable validation run we deliberately use
-      # a bounded 2024 -> 2025 period.
+      # End:
+      #   2026-10-01
       #
-      # Once the complete pipeline is proven, we can expand the
-      # historical period after optimizing the backtest engine.
+      # The end date is exclusive, so this includes all available
+      # candles through 2026-09-30.
       # ------------------------------------------------------------
 
       - name: Set backtest period
@@ -76,10 +73,17 @@ jobs:
           set -euxo pipefail
 
           echo "XAUUSD_START=2024-01-01" >> "$GITHUB_ENV"
-          echo "XAUUSD_END=2026-01-01" >> "$GITHUB_ENV"
+          echo "XAUUSD_END=2026-10-01" >> "$GITHUB_ENV"
 
-          echo "Backtest period:"
-          echo "2024-01-01 -> 2026-01-01"
+          echo "========================================"
+          echo "RAYMOND BACKTEST PERIOD"
+          echo "========================================"
+          echo "Start: 2024-01-01"
+          echo "End:   2026-10-01"
+          echo
+          echo "End date is exclusive."
+          echo "Data through 2026-09-30 will be included."
+          echo "========================================"
 
       - name: Download XAUUSD H1 historical data
         shell: bash
@@ -96,7 +100,6 @@ jobs:
           echo "To:   $XAUUSD_END"
           echo "========================================"
 
-          # Never allow the external downloader to run forever.
           timeout --foreground 15m \
             npx --yes dukascopy-node \
               -i xauusd \
@@ -259,7 +262,7 @@ jobs:
 
           target = Path(
               "data/historical/"
-              "xauusd_h1_2024_2025_normalized.csv"
+              "xauusd_h1_2024_2026_normalized.csv"
           )
 
           df = pd.read_csv(source)
@@ -281,8 +284,8 @@ jobs:
 
           # Dukascopy exports do not always expose a usable volume
           # column. Raymond's current H1 backtest requires the field
-          # structurally, but does not use zero volume as real market
-          # buy/sell volume.
+          # structurally, but does not treat zero volume as real
+          # market buy/sell volume.
           if "volume" not in df.columns:
               df["volume"] = 0.0
 
@@ -502,7 +505,7 @@ jobs:
 
           path = (
               "data/historical/"
-              "xauusd_h1_2024_2025_normalized.csv"
+              "xauusd_h1_2024_2026_normalized.csv"
           )
 
           df = pd.read_csv(path)
@@ -514,13 +517,6 @@ jobs:
           print()
           print(df.tail(3).to_string(index=False))
           PY
-
-      # ------------------------------------------------------------
-      # IMPORTANT:
-      #
-      # The runner itself now has an internal progress heartbeat.
-      # The shell timeout below is an additional safety layer.
-      # ------------------------------------------------------------
 
       - name: Run RAYMOND H1 backtest
         shell: bash
@@ -536,11 +532,13 @@ jobs:
           echo "========================================"
           echo "STARTING RAYMOND BACKTEST"
           echo "========================================"
+          echo "Period: $XAUUSD_START -> $XAUUSD_END"
+          echo "========================================"
           date -u
 
           timeout --foreground 30m \
             python scripts/run_xauusd_backtest.py \
-              --data data/historical/xauusd_h1_2024_2025_normalized.csv \
+              --data data/historical/xauusd_h1_2024_2026_normalized.csv \
               --out backtest_results \
               --starting-balance 10000 \
               --spread 0.30 \
@@ -555,8 +553,13 @@ jobs:
 
           if [ "$STATUS" -eq 124 ]; then
             echo "ERROR: RAYMOND backtest exceeded 30 minutes."
-            echo "This indicates the strategy/backtest engine needs"
-            echo "optimization before attempting the full historical period."
+            echo
+            echo "The 2024 -> 2026 backtest did not complete within"
+            echo "the configured safety timeout."
+            echo
+            echo "This does NOT change the strategy automatically."
+            echo "The engine should be optimized or investigated before"
+            echo "attempting a larger historical period."
             exit 124
           fi
 
@@ -652,6 +655,33 @@ jobs:
           for key in metrics:
               print(
                   f"{key}: {result.get(key)}"
+              )
+
+          # ---------------------------------------------------------
+          # Management metrics
+          # ---------------------------------------------------------
+
+          diagnostics = result.get(
+              "diagnostics",
+              {}
+          )
+
+          print()
+          print("========================================")
+          print("POSITION MANAGEMENT METRICS")
+          print("========================================")
+
+          management_metrics = [
+              "partial_take_profits",
+              "break_even_activations",
+              "take_profit_extensions",
+              "trailing_activations",
+              "trailing_stop_updates",
+          ]
+
+          for key in management_metrics:
+              print(
+                  f"{key}: {diagnostics.get(key, 0)}"
               )
 
           print("========================================")
