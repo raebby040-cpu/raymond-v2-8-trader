@@ -1,0 +1,607 @@
+name: Raymond Weekly Growth Strategy Backtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  weekly-growth:
+    name: Weekly Growth V1 - XAUUSD H1
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout Raymond v2.8
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # PYTHON
+      # ============================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ============================================================
+      # NODE
+      # ============================================================
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # ============================================================
+      # INSTALL PYTHON DEPENDENCIES
+      # ============================================================
+
+      - name: Install backtest dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      # ============================================================
+      # DOWNLOAD XAUUSD H1 DATA
+      # ============================================================
+
+      - name: Download XAUUSD H1 historical data
+        run: |
+          set -euo pipefail
+
+          rm -rf data/historical
+          mkdir -p data/historical
+
+          npx --yes dukascopy-node \
+            -i xauusd \
+            -from 2024-01-01 \
+            -to 2026-10-01 \
+            -t h1 \
+            -f csv \
+            -dir data/historical
+
+      # ============================================================
+      # FIND AND NORMALIZE DATASET
+      # ============================================================
+
+      - name: Locate and normalize XAUUSD dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Searching downloaded files..."
+
+          find data/historical -type f -maxdepth 5 -print
+
+          FILE="$(
+            find data/historical -type f \
+              \( \
+                -iname '*xauusd*h1*.csv' \
+                -o \
+                -iname '*xauusd*.csv' \
+                -o \
+                -iname '*.csv' \
+              \) \
+              -size +1k \
+              | head -n 1
+          )"
+
+          if [ -z "$FILE" ]; then
+            echo "ERROR: No usable CSV dataset was found."
+            exit 1
+          fi
+
+          echo "Using dataset:"
+          echo "$FILE"
+
+          python - "$FILE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          import pandas as pd
+
+
+          source = Path(sys.argv[1])
+
+          target = Path(
+              "data/historical/xauusd_h1_2024_2026_normalized.csv"
+          )
+
+
+          print("Reading:", source)
+
+          df = pd.read_csv(source)
+
+
+          # --------------------------------------------------------
+          # NORMALIZE COLUMN NAMES
+          # --------------------------------------------------------
+
+          rename = {}
+
+          for column in df.columns:
+
+              name = str(column).strip().lower()
+
+              if name in {
+                  "date",
+                  "datetime",
+                  "time",
+                  "timestamp",
+              }:
+                  rename[column] = "timestamp"
+
+              elif name in {
+                  "open",
+                  "o",
+              }:
+                  rename[column] = "open"
+
+              elif name in {
+                  "high",
+                  "h",
+              }:
+                  rename[column] = "high"
+
+              elif name in {
+                  "low",
+                  "l",
+              }:
+                  rename[column] = "low"
+
+              elif name in {
+                  "close",
+                  "c",
+              }:
+                  rename[column] = "close"
+
+              elif name in {
+                  "volume",
+                  "vol",
+                  "tick_volume",
+              }:
+                  rename[column] = "volume"
+
+
+          df = df.rename(columns=rename)
+
+
+          required = {
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+          }
+
+          missing = required - set(df.columns)
+
+          if missing:
+              raise SystemExit(
+                  "Missing required columns: "
+                  + str(sorted(missing))
+              )
+
+
+          # --------------------------------------------------------
+          # PARSE TIMESTAMP
+          # --------------------------------------------------------
+
+          df["timestamp"] = pd.to_datetime(
+              df["timestamp"],
+              utc=True,
+              errors="coerce",
+          )
+
+
+          # --------------------------------------------------------
+          # PARSE OHLC
+          # --------------------------------------------------------
+
+          for column in [
+              "open",
+              "high",
+              "low",
+              "close",
+          ]:
+
+              df[column] = pd.to_numeric(
+                  df[column],
+                  errors="coerce",
+              )
+
+
+          # --------------------------------------------------------
+          # REMOVE INVALID ROWS
+          # --------------------------------------------------------
+
+          df = df.dropna(
+              subset=[
+                  "timestamp",
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              ]
+          )
+
+
+          df = df.sort_values(
+              "timestamp"
+          )
+
+
+          df = df.drop_duplicates(
+              subset=["timestamp"],
+              keep="first",
+          )
+
+
+          # --------------------------------------------------------
+          # OHLC SANITY CHECK
+          # --------------------------------------------------------
+
+          invalid = (
+              (df["open"] <= 0)
+              |
+              (df["high"] <= 0)
+              |
+              (df["low"] <= 0)
+              |
+              (df["close"] <= 0)
+              |
+              (df["high"] < df["low"])
+              |
+              (df["open"] < df["low"])
+              |
+              (df["open"] > df["high"])
+              |
+              (df["close"] < df["low"])
+              |
+              (df["close"] > df["high"])
+          )
+
+
+          if invalid.any():
+
+              raise SystemExit(
+                  "Invalid OHLC rows detected: "
+                  + str(int(invalid.sum()))
+              )
+
+
+          # --------------------------------------------------------
+          # LIMIT TEST PERIOD
+          # --------------------------------------------------------
+
+          start = pd.Timestamp(
+              "2024-01-01",
+              tz="UTC",
+          )
+
+          end = pd.Timestamp(
+              "2026-10-01",
+              tz="UTC",
+          )
+
+
+          df = df[
+              (df["timestamp"] >= start)
+              &
+              (df["timestamp"] < end)
+          ].copy()
+
+
+          # --------------------------------------------------------
+          # MINIMUM DATA CHECK
+          # --------------------------------------------------------
+
+          if len(df) < 5000:
+
+              raise SystemExit(
+                  "Dataset unexpectedly small: "
+                  + str(len(df))
+              )
+
+
+          # --------------------------------------------------------
+          # SAVE NORMALIZED DATA
+          # --------------------------------------------------------
+
+          target.parent.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+
+          columns = [
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+          ]
+
+
+          if "volume" in df.columns:
+              columns.append("volume")
+
+
+          df[columns].to_csv(
+              target,
+              index=False,
+          )
+
+
+          print()
+          print("========================================")
+          print("NORMALIZED XAUUSD DATA")
+          print("========================================")
+          print("Rows:", len(df))
+          print("First:", df["timestamp"].iloc[0])
+          print("Last:", df["timestamp"].iloc[-1])
+          print("Output:", target)
+          print("========================================")
+          PY
+
+      # ============================================================
+      # VALIDATE NORMALIZED FILE
+      # ============================================================
+
+      - name: Validate normalized XAUUSD data
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          import pandas as pd
+
+
+          path = Path(
+              "data/historical/"
+              "xauusd_h1_2024_2026_normalized.csv"
+          )
+
+
+          if not path.exists():
+              raise SystemExit(
+                  "Normalized dataset does not exist."
+              )
+
+
+          df = pd.read_csv(path)
+
+
+          required = [
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+          ]
+
+
+          missing = [
+              column
+              for column in required
+              if column not in df.columns
+          ]
+
+
+          if missing:
+              raise SystemExit(
+                  "Missing columns: "
+                  + str(missing)
+              )
+
+
+          if len(df) < 5000:
+              raise SystemExit(
+                  f"Only {len(df)} rows found."
+              )
+
+
+          print(
+              f"Validated {len(df):,} XAUUSD H1 candles."
+          )
+          PY
+
+      # ============================================================
+      # RUN WEEKLY GROWTH STRATEGY
+      # ============================================================
+
+      - name: Run Weekly Growth V1 backtest
+        env:
+          PYTHONUNBUFFERED: "1"
+
+        run: |
+          set -euo pipefail
+
+          rm -rf weekly_growth_results
+
+          python scripts/run_weekly_growth_backtest.py \
+            --input \
+              data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output-dir \
+              weekly_growth_results \
+            --starting-balance \
+              1000 \
+            --risk-per-trade \
+              0.03 \
+            --weekly-target \
+              0.25 \
+            --weekly-loss-limit \
+              -0.09 \
+            --max-trades-per-week \
+              6 \
+            --risk-reward \
+              2.5 \
+            --min-signal-score \
+              75 \
+            --spread \
+              0.30 \
+            --slippage \
+              0.05
+
+      # ============================================================
+      # DISPLAY RESULT
+      # ============================================================
+
+      - name: Display final result
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+
+          path = Path(
+              "weekly_growth_results/result.json"
+          )
+
+
+          if not path.exists():
+              raise SystemExit(
+                  "result.json was not created."
+              )
+
+
+          result = json.loads(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+
+          metrics = result.get(
+              "metrics",
+              {}
+          )
+
+
+          print()
+          print("========================================")
+          print("RAYMOND v2.8")
+          print("WEEKLY GROWTH STRATEGY V1")
+          print("========================================")
+          print()
+          print(
+              "Starting balance: $"
+              + f"{metrics.get('starting_balance', 0):,.2f}"
+          )
+          print(
+              "Ending balance: $"
+              + f"{metrics.get('ending_balance', 0):,.2f}"
+          )
+          print(
+              "Total profit: $"
+              + f"{metrics.get('total_profit', 0):,.2f}"
+          )
+          print(
+              "Total return: "
+              + f"{metrics.get('total_return_pct', 0):.2f}%"
+          )
+          print(
+              "Trades: "
+              + str(metrics.get('total_trades', 0))
+          )
+          print(
+              "Wins: "
+              + str(metrics.get('wins', 0))
+          )
+          print(
+              "Losses: "
+              + str(metrics.get('losses', 0))
+          )
+          print(
+              "Win rate: "
+              + f"{metrics.get('win_rate_pct', 0):.2f}%"
+          )
+          print(
+              "Profit factor: "
+              + str(metrics.get('profit_factor'))
+          )
+          print(
+              "Average R: "
+              + f"{metrics.get('average_r', 0):.3f}"
+          )
+          print(
+              "Maximum drawdown: "
+              + f"{metrics.get('max_drawdown_pct', 0):.2f}%"
+          )
+          print()
+          print(
+              "Weeks tested: "
+              + str(metrics.get('total_weeks', 0))
+          )
+          print(
+              "Positive weeks: "
+              + str(metrics.get('positive_weeks', 0))
+          )
+          print(
+              "Negative weeks: "
+              + str(metrics.get('negative_weeks', 0))
+          )
+          print(
+              "Weeks >= 25%: "
+              + str(metrics.get('weekly_target_hits', 0))
+          )
+          print(
+              "25% target hit rate: "
+              + f"{metrics.get('weekly_target_hit_rate_pct', 0):.2f}%"
+          )
+          print(
+              "Average weekly return: "
+              + f"{metrics.get('average_weekly_return_pct', 0):.2f}%"
+          )
+          print(
+              "Median weekly return: "
+              + f"{metrics.get('median_weekly_return_pct', 0):.2f}%"
+          )
+          print()
+          print(
+              "Best week: "
+              + str(metrics.get('best_week'))
+              + " / "
+              + str(metrics.get('best_week_return_pct'))
+              + "%"
+          )
+          print(
+              "Worst week: "
+              + str(metrics.get('worst_week'))
+              + " / "
+              + str(metrics.get('worst_week_return_pct'))
+              + "%"
+          )
+          print()
+          print("========================================")
+          PY
+
+      # ============================================================
+      # UPLOAD RESULTS
+      # ============================================================
+
+      - name: Upload Weekly Growth results
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-weekly-growth-v1-results
+          path: |
+            weekly_growth_results/
+            data/historical/xauusd_h1_2024_2026_normalized.csv
+          retention-days: 30
+
+      # ============================================================
+      # UPLOAD RAW DATA SEPARATELY
+      # ============================================================
+
+      - name: Upload normalized dataset
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-xauusd-h1-normalized-2024-2026
+          path: data/historical/xauusd_h1_2024_2026_normalized.csv
+          retention-days: 7
