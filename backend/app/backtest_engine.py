@@ -3,8 +3,16 @@ RAYMOND v2.8 - Production Backtest Engine
 
 Historical simulation for the canonical RAYMOND trading pipeline.
 
-This version adds diagnostic instrumentation to determine why historical
-candles do or do not become executable trades.
+This version adds deterministic dynamic position management:
+
+- 50% partial TP at +1R
+- Break-even activation at +1R
+- TP extension to +2.5R after +1.25R
+- Trailing SL activation at +1.5R
+- Trailing distance of 0.75R
+- Persistent management state per open position
+- Management-event audit trail
+- Correct partial-realized-PnL accounting
 
 IMPORTANT SAFETY RULES
 ----------------------
@@ -22,6 +30,38 @@ IMPORTANT SAFETY RULES
 - Historical daily-loss limits reset at trading-day boundaries.
 - Price gaps through protective levels are executed at the achievable
   candle open rather than at an unavailable historical stop/target price.
+
+POSITION MANAGEMENT TIMING
+--------------------------
+For each candle:
+
+1. Existing SL/TP exit logic is checked first.
+2. If the position survives the candle, management triggers are evaluated.
+3. Any management changes become effective on the NEXT candle.
+
+This deliberately avoids assuming an intrabar order of events that H1 OHLC
+data cannot prove.
+
+MANAGEMENT RULES
+----------------
+For BUY:
+- +1.00R: realize 50% of remaining position at exactly +1R.
+- +1.00R: move stop loss to entry.
+- +1.25R: extend take profit to +2.5R.
+- +1.50R: activate trailing stop.
+- Trailing distance: 0.75R below the candle high.
+- Trailing stop only moves in the protective direction.
+
+For SELL:
+- +1.00R: realize 50% of remaining position at exactly +1R.
+- +1.00R: move stop loss to entry.
+- +1.25R: extend take profit to +2.5R.
+- +1.50R: activate trailing stop.
+- Trailing distance: 0.75R above the candle low.
+- Trailing stop only moves in the protective direction.
+
+The initial risk R is permanently stored from the actual executed entry
+price to the original rebased stop loss.
 
 EXPOSURE MODEL
 --------------
@@ -49,13 +89,18 @@ The engine records:
 - Risk Engine rejections
 - accepted trade entries
 - exception/rejection examples
+- partial exits
+- break-even activations
+- TP extensions
+- trailing activations
+- trailing stop updates
 
 The diagnostics do NOT change strategy thresholds or trading behaviour.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from math import isfinite
 from typing import Any, Mapping, Optional, Sequence
@@ -105,9 +150,6 @@ class BacktestConfig:
 
     # Backtest-only leverage assumption used when converting raw
     # XAUUSD notional value into modeled exposure for RiskEngine checks.
-    #
-    # This does NOT change live broker leverage and must not be interpreted
-    # as an MT5/Exness account setting.
     exposure_leverage: float = 200.0
 
     def validate(self) -> None:
@@ -189,6 +231,24 @@ class BacktestTrade:
     exit_reason: str
     bars_held: int
 
+    # Management audit information.
+    initial_stop_loss: float = 0.0
+    initial_take_profit: float = 0.0
+    initial_position_size: float = 0.0
+    remaining_position_size: float = 0.0
+    initial_risk: float = 0.0
+
+    partial_realized_pnl: float = 0.0
+
+    break_even_active: bool = False
+    partial_take_profit_taken: bool = False
+    trailing_active: bool = False
+
+    management_event_count: int = 0
+    management_events: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+
 
 @dataclass(frozen=True)
 class BacktestEquityPoint:
@@ -239,20 +299,23 @@ class BacktestDiagnostics:
     minimum_confluence_observed: Optional[float] = None
     maximum_confluence_observed: Optional[float] = None
 
-    wait_reason_counts: dict[str, int] = None
-    risk_rejection_reason_counts: dict[str, int] = None
+    partial_take_profits: int = 0
+    break_even_activations: int = 0
+    take_profit_extensions: int = 0
+    trailing_activations: int = 0
+    trailing_stop_updates: int = 0
 
-    examples: list[dict[str, Any]] = None
+    wait_reason_counts: dict[str, int] = field(
+        default_factory=dict
+    )
 
-    def __post_init__(self) -> None:
-        if self.wait_reason_counts is None:
-            self.wait_reason_counts = {}
+    risk_rejection_reason_counts: dict[str, int] = field(
+        default_factory=dict
+    )
 
-        if self.risk_rejection_reason_counts is None:
-            self.risk_rejection_reason_counts = {}
-
-        if self.examples is None:
-            self.examples = []
+    examples: list[dict[str, Any]] = field(
+        default_factory=list
+    )
 
     def record_wait(
         self,
@@ -418,6 +481,41 @@ class BacktestDiagnostics:
             }
         )
 
+    def record_management(
+        self,
+        *,
+        event: str,
+        timestamp: Optional[str],
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        event_upper = event.upper()
+
+        if event_upper == "PARTIAL_TAKE_PROFIT":
+            self.partial_take_profits += 1
+
+        elif event_upper == "BREAK_EVEN":
+            self.break_even_activations += 1
+
+        elif event_upper == "TAKE_PROFIT_EXTENSION":
+            self.take_profit_extensions += 1
+
+        elif event_upper == "TRAILING_ACTIVATED":
+            self.trailing_activations += 1
+
+        elif event_upper == "TRAILING_STOP_UPDATE":
+            self.trailing_stop_updates += 1
+
+        example = {
+            "type": "MANAGEMENT",
+            "event": event_upper,
+            "timestamp": timestamp,
+        }
+
+        if details:
+            example.update(details)
+
+        self._add_example(example)
+
     def _record_decision_metrics(
         self,
         decision: Any,
@@ -477,7 +575,6 @@ class BacktestDiagnostics:
         self,
         example: dict[str, Any],
     ) -> None:
-        # Keep the diagnostic artifact bounded.
         if len(self.examples) < 25:
             self.examples.append(example)
 
@@ -624,6 +721,28 @@ class _OpenPosition:
     take_profit: float
     position_size: float
 
+    # Permanent original trade parameters.
+    initial_stop_loss: float
+    initial_take_profit: float
+    initial_position_size: float
+    initial_risk: float
+
+    # Dynamic management state.
+    break_even_active: bool = False
+    partial_take_profit_taken: bool = False
+    trailing_active: bool = False
+
+    # PnL already realized by partial exits.
+    realized_pnl: float = 0.0
+
+    # Gross partial PnL before execution costs.
+    partial_realized_gross_pnl: float = 0.0
+
+    # Management audit trail.
+    management_events: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+
     bars_held: int = 0
 
 
@@ -633,6 +752,13 @@ class BacktestEngine:
 
     The engine deliberately does not execute through PaperExecutionGateway.
     """
+
+    PARTIAL_TP_R = 1.0
+    BREAK_EVEN_R = 1.0
+    TP_EXTENSION_TRIGGER_R = 1.25
+    TP_EXTENSION_R = 2.5
+    TRAILING_TRIGGER_R = 1.5
+    TRAILING_DISTANCE_R = 0.75
 
     def __init__(
         self,
@@ -724,6 +850,10 @@ class BacktestEngine:
             if open_position is not None:
                 open_position.bars_held += 1
 
+                # IMPORTANT:
+                # Existing SL/TP logic runs FIRST.
+                # Management changes only become effective after this
+                # check and therefore affect the next candle.
                 closed_trade = self._check_exit(
                     position=open_position,
                     candle=candle,
@@ -740,6 +870,22 @@ class BacktestEngine:
                     trades.append(closed_trade)
 
                     open_position = None
+
+                else:
+                    management_pnl = (
+                        self._manage_open_position(
+                            position=open_position,
+                            candle=candle,
+                            diagnostics=diagnostics,
+                        )
+                    )
+
+                    balance += management_pnl
+
+                    if management_pnl < 0:
+                        daily_loss += abs(
+                            management_pnl
+                        )
 
             unrealized = 0.0
 
@@ -937,28 +1083,12 @@ class BacktestEngine:
                     )
                     continue
 
-                # Calculate the raw XAUUSD notional value first.
-                #
-                # Example:
-                #   0.10 lot
-                #   x $2,000 gold
-                #   x 100 oz contract size
-                #   = $20,000 raw notional.
-                #
-                # RiskEngine's total exposure limit is intended to be
-                # evaluated against modeled exposure for a leveraged
-                # instrument, rather than treating the entire raw
-                # notional value as required account exposure.
                 proposed_notional = abs(
                     position_size
                     * entry_price
                     * specification.contract_size
                 )
 
-                # Convert raw notional into modeled exposure using the
-                # explicit backtest leverage assumption.
-                #
-                # This is BACKTEST ONLY. It is not a live broker setting.
                 proposed_exposure = (
                     proposed_notional
                     / self.config.exposure_leverage
@@ -1014,6 +1144,18 @@ class BacktestEngine:
 
             diagnostics.accepted_entries += 1
 
+            initial_risk = abs(
+                entry_price - stop_loss
+            )
+
+            if (
+                not isfinite(initial_risk)
+                or initial_risk <= 0
+            ):
+                raise BacktestEngineError(
+                    "Calculated initial trade risk is invalid."
+                )
+
             open_position = _OpenPosition(
                 trade_id=self._new_trade_id(),
                 direction=decision.direction,
@@ -1026,6 +1168,10 @@ class BacktestEngine:
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 position_size=position_size,
+                initial_stop_loss=stop_loss,
+                initial_take_profit=take_profit,
+                initial_position_size=position_size,
+                initial_risk=initial_risk,
             )
 
         if (
@@ -1147,10 +1293,10 @@ class BacktestEngine:
                 "close",
             )
 
-            for field in required:
-                if field not in raw:
+            for field_name in required:
+                if field_name not in raw:
                     raise BacktestEngineError(
-                        f"Candle {index} is missing '{field}'."
+                        f"Candle {index} is missing '{field_name}'."
                     )
 
             try:
@@ -1287,6 +1433,7 @@ class BacktestEngine:
                     exit_reason="take_profit_gap",
                 )
 
+            # If both are touched, SL is assumed first.
             if hit_stop:
 
                 exit_price = self._apply_exit_costs(
@@ -1348,6 +1495,7 @@ class BacktestEngine:
                     exit_reason="take_profit_gap",
                 )
 
+            # If both are touched, SL is assumed first.
             if hit_stop:
 
                 exit_price = self._apply_exit_costs(
@@ -1377,6 +1525,534 @@ class BacktestEngine:
                 )
 
         return None
+
+    def _manage_open_position(
+        self,
+        *,
+        position: _OpenPosition,
+        candle: Mapping[str, Any],
+        diagnostics: BacktestDiagnostics,
+    ) -> float:
+        """
+        Apply dynamic management AFTER the current candle's normal SL/TP
+        check.
+
+        Returns realized PnL generated by a partial exit on this candle.
+        """
+
+        if position.position_size <= 0:
+            raise BacktestEngineError(
+                "Open position has invalid remaining position size."
+            )
+
+        risk = position.initial_risk
+
+        if (
+            not isfinite(risk)
+            or risk <= 0
+        ):
+            raise BacktestEngineError(
+                "Open position has invalid initial risk."
+            )
+
+        high = float(candle["high"])
+        low = float(candle["low"])
+        timestamp = self._timestamp(candle)
+
+        management_pnl = 0.0
+
+        if position.direction is AIDirection.BUY:
+
+            one_r_price = (
+                position.entry_price
+                + risk * self.PARTIAL_TP_R
+            )
+
+            one_point_two_five_r_price = (
+                position.entry_price
+                + risk * self.TP_EXTENSION_TRIGGER_R
+            )
+
+            one_point_five_r_price = (
+                position.entry_price
+                + risk * self.TRAILING_TRIGGER_R
+            )
+
+            two_point_five_r_price = (
+                position.entry_price
+                + risk * self.TP_EXTENSION_R
+            )
+
+            # ---------------------------------------------------------
+            # 1R PARTIAL TP
+            # ---------------------------------------------------------
+            if (
+                high >= one_r_price
+                and not position.partial_take_profit_taken
+            ):
+                partial_size = (
+                    position.position_size * 0.50
+                )
+
+                if partial_size > 0:
+
+                    raw_partial_exit = one_r_price
+
+                    partial_exit_price = (
+                        self._apply_exit_costs(
+                            direction=position.direction,
+                            raw_price=raw_partial_exit,
+                        )
+                    )
+
+                    gross_partial_pnl = (
+                        partial_exit_price
+                        - position.entry_price
+                    ) * partial_size
+
+                    commission = (
+                        self.config.commission_per_unit
+                        * partial_size
+                    )
+
+                    partial_pnl = (
+                        gross_partial_pnl
+                        - commission
+                    )
+
+                    position.position_size -= partial_size
+
+                    if position.position_size < 0:
+                        position.position_size = 0.0
+
+                    position.realized_pnl += partial_pnl
+                    position.partial_realized_gross_pnl += (
+                        gross_partial_pnl
+                    )
+                    position.partial_take_profit_taken = True
+
+                    management_pnl += partial_pnl
+
+                    self._record_management_event(
+                        position=position,
+                        diagnostics=diagnostics,
+                        event="PARTIAL_TAKE_PROFIT",
+                        timestamp=timestamp,
+                        details={
+                            "r_multiple": 1.0,
+                            "raw_price": round(
+                                raw_partial_exit,
+                                8,
+                            ),
+                            "execution_price": round(
+                                partial_exit_price,
+                                8,
+                            ),
+                            "closed_size": round(
+                                partial_size,
+                                8,
+                            ),
+                            "remaining_size": round(
+                                position.position_size,
+                                8,
+                            ),
+                            "pnl": round(
+                                partial_pnl,
+                                8,
+                            ),
+                        },
+                    )
+
+            # ---------------------------------------------------------
+            # BREAK EVEN
+            # ---------------------------------------------------------
+            if (
+                high >= one_r_price
+                and not position.break_even_active
+            ):
+                old_stop = position.stop_loss
+
+                if position.stop_loss < position.entry_price:
+                    position.stop_loss = position.entry_price
+
+                position.break_even_active = True
+
+                self._record_management_event(
+                    position=position,
+                    diagnostics=diagnostics,
+                    event="BREAK_EVEN",
+                    timestamp=timestamp,
+                    details={
+                        "old_stop_loss": round(
+                            old_stop,
+                            8,
+                        ),
+                        "new_stop_loss": round(
+                            position.stop_loss,
+                            8,
+                        ),
+                        "r_multiple": 1.0,
+                    },
+                )
+
+            # ---------------------------------------------------------
+            # TP EXTENSION
+            # ---------------------------------------------------------
+            if (
+                high >= one_point_two_five_r_price
+                and position.take_profit
+                < two_point_five_r_price
+            ):
+                old_take_profit = position.take_profit
+
+                position.take_profit = (
+                    two_point_five_r_price
+                )
+
+                self._record_management_event(
+                    position=position,
+                    diagnostics=diagnostics,
+                    event="TAKE_PROFIT_EXTENSION",
+                    timestamp=timestamp,
+                    details={
+                        "old_take_profit": round(
+                            old_take_profit,
+                            8,
+                        ),
+                        "new_take_profit": round(
+                            position.take_profit,
+                            8,
+                        ),
+                        "trigger_r": 1.25,
+                        "target_r": 2.5,
+                    },
+                )
+
+            # ---------------------------------------------------------
+            # TRAILING STOP
+            # ---------------------------------------------------------
+            if high >= one_point_five_r_price:
+
+                if not position.trailing_active:
+                    position.trailing_active = True
+
+                    self._record_management_event(
+                        position=position,
+                        diagnostics=diagnostics,
+                        event="TRAILING_ACTIVATED",
+                        timestamp=timestamp,
+                        details={
+                            "trigger_r": 1.5,
+                            "distance_r": 0.75,
+                        },
+                    )
+
+                proposed_stop = (
+                    high
+                    - risk * self.TRAILING_DISTANCE_R
+                )
+
+                # Never move a BUY stop backwards.
+                proposed_stop = max(
+                    proposed_stop,
+                    position.stop_loss,
+                )
+
+                # Keep protective stop below target.
+                if (
+                    position.take_profit > 0
+                    and proposed_stop
+                    < position.take_profit
+                ):
+                    if proposed_stop > position.stop_loss:
+
+                        old_stop = position.stop_loss
+                        position.stop_loss = proposed_stop
+
+                        self._record_management_event(
+                            position=position,
+                            diagnostics=diagnostics,
+                            event="TRAILING_STOP_UPDATE",
+                            timestamp=timestamp,
+                            details={
+                                "old_stop_loss": round(
+                                    old_stop,
+                                    8,
+                                ),
+                                "new_stop_loss": round(
+                                    position.stop_loss,
+                                    8,
+                                ),
+                                "candle_high": round(
+                                    high,
+                                    8,
+                                ),
+                                "distance_r": 0.75,
+                            },
+                        )
+
+        elif position.direction is AIDirection.SELL:
+
+            one_r_price = (
+                position.entry_price
+                - risk * self.PARTIAL_TP_R
+            )
+
+            one_point_two_five_r_price = (
+                position.entry_price
+                - risk * self.TP_EXTENSION_TRIGGER_R
+            )
+
+            one_point_five_r_price = (
+                position.entry_price
+                - risk * self.TRAILING_TRIGGER_R
+            )
+
+            two_point_five_r_price = (
+                position.entry_price
+                - risk * self.TP_EXTENSION_R
+            )
+
+            # ---------------------------------------------------------
+            # 1R PARTIAL TP
+            # ---------------------------------------------------------
+            if (
+                low <= one_r_price
+                and not position.partial_take_profit_taken
+            ):
+                partial_size = (
+                    position.position_size * 0.50
+                )
+
+                if partial_size > 0:
+
+                    raw_partial_exit = one_r_price
+
+                    partial_exit_price = (
+                        self._apply_exit_costs(
+                            direction=position.direction,
+                            raw_price=raw_partial_exit,
+                        )
+                    )
+
+                    gross_partial_pnl = (
+                        position.entry_price
+                        - partial_exit_price
+                    ) * partial_size
+
+                    commission = (
+                        self.config.commission_per_unit
+                        * partial_size
+                    )
+
+                    partial_pnl = (
+                        gross_partial_pnl
+                        - commission
+                    )
+
+                    position.position_size -= partial_size
+
+                    if position.position_size < 0:
+                        position.position_size = 0.0
+
+                    position.realized_pnl += partial_pnl
+                    position.partial_realized_gross_pnl += (
+                        gross_partial_pnl
+                    )
+                    position.partial_take_profit_taken = True
+
+                    management_pnl += partial_pnl
+
+                    self._record_management_event(
+                        position=position,
+                        diagnostics=diagnostics,
+                        event="PARTIAL_TAKE_PROFIT",
+                        timestamp=timestamp,
+                        details={
+                            "r_multiple": 1.0,
+                            "raw_price": round(
+                                raw_partial_exit,
+                                8,
+                            ),
+                            "execution_price": round(
+                                partial_exit_price,
+                                8,
+                            ),
+                            "closed_size": round(
+                                partial_size,
+                                8,
+                            ),
+                            "remaining_size": round(
+                                position.position_size,
+                                8,
+                            ),
+                            "pnl": round(
+                                partial_pnl,
+                                8,
+                            ),
+                        },
+                    )
+
+            # ---------------------------------------------------------
+            # BREAK EVEN
+            # ---------------------------------------------------------
+            if (
+                low <= one_r_price
+                and not position.break_even_active
+            ):
+                old_stop = position.stop_loss
+
+                if position.stop_loss > position.entry_price:
+                    position.stop_loss = position.entry_price
+
+                position.break_even_active = True
+
+                self._record_management_event(
+                    position=position,
+                    diagnostics=diagnostics,
+                    event="BREAK_EVEN",
+                    timestamp=timestamp,
+                    details={
+                        "old_stop_loss": round(
+                            old_stop,
+                            8,
+                        ),
+                        "new_stop_loss": round(
+                            position.stop_loss,
+                            8,
+                        ),
+                        "r_multiple": 1.0,
+                    },
+                )
+
+            # ---------------------------------------------------------
+            # TP EXTENSION
+            # ---------------------------------------------------------
+            if (
+                low <= one_point_two_five_r_price
+                and position.take_profit
+                > two_point_five_r_price
+            ):
+                old_take_profit = position.take_profit
+
+                position.take_profit = (
+                    two_point_five_r_price
+                )
+
+                self._record_management_event(
+                    position=position,
+                    diagnostics=diagnostics,
+                    event="TAKE_PROFIT_EXTENSION",
+                    timestamp=timestamp,
+                    details={
+                        "old_take_profit": round(
+                            old_take_profit,
+                            8,
+                        ),
+                        "new_take_profit": round(
+                            position.take_profit,
+                            8,
+                        ),
+                        "trigger_r": 1.25,
+                        "target_r": 2.5,
+                    },
+                )
+
+            # ---------------------------------------------------------
+            # TRAILING STOP
+            # ---------------------------------------------------------
+            if low <= one_point_five_r_price:
+
+                if not position.trailing_active:
+                    position.trailing_active = True
+
+                    self._record_management_event(
+                        position=position,
+                        diagnostics=diagnostics,
+                        event="TRAILING_ACTIVATED",
+                        timestamp=timestamp,
+                        details={
+                            "trigger_r": 1.5,
+                            "distance_r": 0.75,
+                        },
+                    )
+
+                proposed_stop = (
+                    low
+                    + risk * self.TRAILING_DISTANCE_R
+                )
+
+                # Never move a SELL stop backwards.
+                proposed_stop = min(
+                    proposed_stop,
+                    position.stop_loss,
+                )
+
+                # Keep protective stop above target.
+                if (
+                    position.take_profit > 0
+                    and proposed_stop
+                    > position.take_profit
+                ):
+                    if proposed_stop < position.stop_loss:
+
+                        old_stop = position.stop_loss
+                        position.stop_loss = proposed_stop
+
+                        self._record_management_event(
+                            position=position,
+                            diagnostics=diagnostics,
+                            event="TRAILING_STOP_UPDATE",
+                            timestamp=timestamp,
+                            details={
+                                "old_stop_loss": round(
+                                    old_stop,
+                                    8,
+                                ),
+                                "new_stop_loss": round(
+                                    position.stop_loss,
+                                    8,
+                                ),
+                                "candle_low": round(
+                                    low,
+                                    8,
+                                ),
+                                "distance_r": 0.75,
+                            },
+                        )
+
+        else:
+            raise BacktestEngineError(
+                "Cannot manage WAIT position."
+            )
+
+        return management_pnl
+
+    @staticmethod
+    def _record_management_event(
+        *,
+        position: _OpenPosition,
+        diagnostics: BacktestDiagnostics,
+        event: str,
+        timestamp: Optional[str],
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+
+        record: dict[str, Any] = {
+            "event": event,
+            "timestamp": timestamp,
+        }
+
+        if details:
+            record.update(details)
+
+        position.management_events.append(record)
+
+        diagnostics.record_management(
+            event=event,
+            timestamp=timestamp,
+            details=details,
+        )
 
     def _close_position(
         self,
@@ -1409,25 +2085,49 @@ class BacktestEngine:
         commission = (
             self.config.commission_per_unit
             * position.position_size
-            * 2.0
         )
 
-        pnl = gross_pnl - commission
+        remaining_pnl = (
+            gross_pnl
+            - commission
+        )
+
+        # The position's realized partial PnL was already added to balance
+        # when the partial exit occurred. Therefore this method returns ONLY
+        # the PnL from the remaining position plus the remaining exit cost.
+        total_pnl = (
+            position.realized_pnl
+            + remaining_pnl
+        )
+
+        total_execution_cost = (
+            (
+                abs(
+                    position.partial_realized_gross_pnl
+                    - position.realized_pnl
+                )
+            )
+            + abs(
+                gross_pnl
+                - remaining_pnl
+            )
+        )
 
         notional = abs(
             position.entry_price
-            * position.position_size
+            * position.initial_position_size
         )
 
         pnl_percent = (
-            (pnl / notional) * 100
+            (total_pnl / notional) * 100
             if notional > 0
             else 0.0
         )
 
-        execution_cost = abs(
-            gross_pnl - pnl
-        )
+        management_events = [
+            dict(event)
+            for event in position.management_events
+        ]
 
         return BacktestTrade(
             trade_id=position.trade_id,
@@ -1455,11 +2155,11 @@ class BacktestEngine:
                 8,
             ),
             position_size=round(
-                position.position_size,
+                position.initial_position_size,
                 8,
             ),
             pnl=round(
-                pnl,
+                total_pnl,
                 8,
             ),
             pnl_percent=round(
@@ -1467,11 +2167,48 @@ class BacktestEngine:
                 8,
             ),
             execution_cost=round(
-                execution_cost,
+                total_execution_cost,
                 8,
             ),
             exit_reason=exit_reason,
             bars_held=position.bars_held,
+            initial_stop_loss=round(
+                position.initial_stop_loss,
+                8,
+            ),
+            initial_take_profit=round(
+                position.initial_take_profit,
+                8,
+            ),
+            initial_position_size=round(
+                position.initial_position_size,
+                8,
+            ),
+            remaining_position_size=round(
+                position.position_size,
+                8,
+            ),
+            initial_risk=round(
+                position.initial_risk,
+                8,
+            ),
+            partial_realized_pnl=round(
+                position.realized_pnl,
+                8,
+            ),
+            break_even_active=(
+                position.break_even_active
+            ),
+            partial_take_profit_taken=(
+                position.partial_take_profit_taken
+            ),
+            trailing_active=(
+                position.trailing_active
+            ),
+            management_event_count=len(
+                management_events
+            ),
+            management_events=management_events,
         )
 
     @staticmethod
@@ -1480,6 +2217,11 @@ class BacktestEngine:
         position: _OpenPosition,
         mark_price: float,
     ) -> float:
+
+        if not isfinite(mark_price):
+            raise BacktestEngineError(
+                "Mark price must be finite."
+            )
 
         if position.direction is AIDirection.BUY:
             return (
@@ -2011,6 +2753,46 @@ class BacktestEngine:
         print(
             f"Actual completed trades: "
             f"{result.total_trades:,}",
+            flush=True,
+        )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "POSITION MANAGEMENT:",
+            flush=True,
+        )
+
+        print(
+            f"  Partial take profits: "
+            f"{diagnostics.partial_take_profits:,}",
+            flush=True,
+        )
+
+        print(
+            f"  Break-even activations: "
+            f"{diagnostics.break_even_activations:,}",
+            flush=True,
+        )
+
+        print(
+            f"  TP extensions: "
+            f"{diagnostics.take_profit_extensions:,}",
+            flush=True,
+        )
+
+        print(
+            f"  Trailing activations: "
+            f"{diagnostics.trailing_activations:,}",
+            flush=True,
+        )
+
+        print(
+            f"  Trailing stop updates: "
+            f"{diagnostics.trailing_stop_updates:,}",
             flush=True,
         )
 
