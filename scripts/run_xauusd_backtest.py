@@ -17,6 +17,7 @@ Example:
       --spread 0.30 \
       --slippage 0.05 \
       --commission 0.0 \
+      --exposure-leverage 200 \
       --progress-every 1000
 
 IMPORTANT
@@ -31,6 +32,10 @@ It does not enable live trading.
 
 It only feeds historical candles into the RAYMOND
 BacktestEngine.
+
+The exposure leverage value is a BACKTEST-ONLY assumption.
+It does not change broker leverage and must not be treated
+as a live MT5/Exness account setting.
 """
 
 from __future__ import annotations
@@ -332,6 +337,7 @@ def write_outputs(
     out_dir: Path,
     *,
     elapsed_seconds: float,
+    exposure_leverage: float,
 ) -> None:
     """
     Serialize the BacktestResult into stable JSON/CSV artifacts.
@@ -381,6 +387,7 @@ def write_outputs(
             elapsed_seconds,
             3,
         ),
+        "backtest_exposure_leverage": exposure_leverage,
         "trades": result.trades,
         "equity_curve": result.equity_curve,
         "diagnostics": diagnostics,
@@ -490,7 +497,10 @@ def write_outputs(
         f"Bars processed: {result.bars_processed}",
         f"Warmup candles: {result.warmup_candles}",
         f"Elapsed seconds: {elapsed_seconds:.3f}",
+        f"Backtest exposure leverage: {exposure_leverage}",
         "",
+        "IMPORTANT: Exposure leverage is a backtest-only "
+        "assumption. It does not change live broker leverage.",
         "",
         "BACKTEST DIAGNOSTICS",
         "====================",
@@ -632,6 +642,7 @@ def write_outputs(
                     "bars_processed",
                     "warmup_candles",
                     "elapsed_seconds",
+                    "backtest_exposure_leverage",
                     "diagnostics",
                 )
             },
@@ -692,6 +703,17 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--exposure-leverage",
+        type=float,
+        default=200.0,
+        help=(
+            "Backtest-only leverage assumption used to convert "
+            "raw XAUUSD notional into margin exposure for the "
+            "Risk Engine. Default: 200."
+        ),
+    )
+
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=1000,
@@ -709,6 +731,20 @@ def main() -> None:
     if args.progress_every <= 0:
         raise SystemExit(
             "--progress-every must be greater than zero."
+        )
+
+    if args.exposure_leverage <= 0:
+        raise SystemExit(
+            "--exposure-leverage must be greater than zero."
+        )
+
+    if not (
+        float("-inf")
+        < args.exposure_leverage
+        < float("inf")
+    ):
+        raise SystemExit(
+            "--exposure-leverage must be finite."
         )
 
     data_path = Path(
@@ -761,6 +797,16 @@ def main() -> None:
 
     print(
         f"Commission: {args.commission}",
+        flush=True,
+    )
+
+    print(
+        f"Exposure leverage: {args.exposure_leverage}",
+        flush=True,
+    )
+
+    print(
+        "Exposure leverage is BACKTEST-ONLY.",
         flush=True,
     )
 
@@ -835,6 +881,7 @@ def main() -> None:
         spread=args.spread,
         slippage=args.slippage,
         commission_per_unit=args.commission,
+        exposure_leverage=args.exposure_leverage,
     )
 
     engine = BacktestEngine(
@@ -886,6 +933,7 @@ def main() -> None:
             ),
             "dataset": str(data_path),
             "candles": len(candles),
+            "exposure_leverage": args.exposure_leverage,
         }
 
         (
@@ -942,6 +990,7 @@ def main() -> None:
         result,
         out_dir,
         elapsed_seconds=elapsed,
+        exposure_leverage=args.exposure_leverage,
     )
 
     print(
