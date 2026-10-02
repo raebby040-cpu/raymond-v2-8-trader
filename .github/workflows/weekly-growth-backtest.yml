@@ -13,44 +13,23 @@ jobs:
     timeout-minutes: 60
 
     steps:
-
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
-
       - name: Checkout Raymond v2.8
         uses: actions/checkout@v4
-
-      # ============================================================
-      # PYTHON
-      # ============================================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ============================================================
-      # NODE
-      # ============================================================
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      # ============================================================
-      # INSTALL PYTHON DEPENDENCIES
-      # ============================================================
-
       - name: Install backtest dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy
-
-      # ============================================================
-      # DOWNLOAD XAUUSD H1 DATA
-      # ============================================================
 
       - name: Download XAUUSD H1 historical data
         run: |
@@ -59,194 +38,264 @@ jobs:
           rm -rf data/historical
           mkdir -p data/historical
 
-          npx --yes dukascopy-node \
-            -i xauusd \
-            -from 2024-01-01 \
-            -to 2026-10-01 \
-            -t h1 \
-            -f csv \
-            -dir data/historical
+          for YEAR in 2024 2025 2026; do
 
-      # ============================================================
-      # FIND AND NORMALIZE DATASET
-      # ============================================================
+            if [ "$YEAR" = "2024" ]; then
+              FROM="2024-01-01"
+              TO="2025-01-01"
+
+            elif [ "$YEAR" = "2025" ]; then
+              FROM="2025-01-01"
+              TO="2026-01-01"
+
+            else
+              FROM="2026-01-01"
+              TO="2026-10-01"
+            fi
+
+            OUT="data/historical/$YEAR"
+
+            mkdir -p "$OUT"
+
+            echo "========================================"
+            echo "Downloading XAUUSD H1"
+            echo "From: $FROM"
+            echo "To:   $TO"
+            echo "========================================"
+
+            npx --yes dukascopy-node \
+              -i xauusd \
+              -from "$FROM" \
+              -to "$TO" \
+              -t h1 \
+              -f csv \
+              -dir "$OUT" \
+              -bs 5 \
+              -bp 1000
+
+            echo "Files produced for $YEAR:"
+
+            find "$OUT" \
+              -type f \
+              -maxdepth 2 \
+              -print
+
+            CSV_COUNT="$(
+              find "$OUT" \
+                -type f \
+                -name '*.csv' \
+                -size +1k \
+                | wc -l
+            )"
+
+            if [ "$CSV_COUNT" -lt 1 ]; then
+              echo "ERROR:"
+              echo "XAUUSD H1 download produced no non-empty CSV for $YEAR."
+              exit 1
+            fi
+
+          done
+
+          echo "========================================"
+          echo "ALL YEARLY DOWNLOADS COMPLETED"
+          echo "========================================"
+
+          find data/historical \
+            -type f \
+            -name '*.csv' \
+            -print
 
       - name: Locate and normalize XAUUSD dataset
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Searching downloaded files..."
+          echo "Searching downloaded XAUUSD CSV files..."
 
-          find data/historical -type f -maxdepth 5 -print
+          find data/historical \
+            -type f \
+            -name '*.csv' \
+            -print
 
-          FILE="$(
-            find data/historical -type f \
-              \( \
-                -iname '*xauusd*h1*.csv' \
-                -o \
-                -iname '*xauusd*.csv' \
-                -o \
-                -iname '*.csv' \
-              \) \
-              -size +1k \
-              | head -n 1
-          )"
-
-          if [ -z "$FILE" ]; then
-            echo "ERROR: No usable CSV dataset was found."
-            exit 1
-          fi
-
-          echo "Using dataset:"
-          echo "$FILE"
-
-          python - "$FILE" <<'PY'
-          import sys
+          python - <<'PY'
           from pathlib import Path
-
           import pandas as pd
 
+          root = Path("data/historical")
 
-          source = Path(sys.argv[1])
-
-          target = Path(
-              "data/historical/xauusd_h1_2024_2026_normalized.csv"
+          target = (
+              root
+              / "xauusd_h1_2024_2026_normalized.csv"
           )
 
+          files = sorted(
+              p
+              for p in root.rglob("*.csv")
+              if p != target
+              and p.stat().st_size > 1000
+          )
 
-          print("Reading:", source)
-
-          df = pd.read_csv(source)
-
-
-          # --------------------------------------------------------
-          # NORMALIZE COLUMN NAMES
-          # --------------------------------------------------------
-
-          rename = {}
-
-          for column in df.columns:
-
-              name = str(column).strip().lower()
-
-              if name in {
-                  "date",
-                  "datetime",
-                  "time",
-                  "timestamp",
-              }:
-                  rename[column] = "timestamp"
-
-              elif name in {
-                  "open",
-                  "o",
-              }:
-                  rename[column] = "open"
-
-              elif name in {
-                  "high",
-                  "h",
-              }:
-                  rename[column] = "high"
-
-              elif name in {
-                  "low",
-                  "l",
-              }:
-                  rename[column] = "low"
-
-              elif name in {
-                  "close",
-                  "c",
-              }:
-                  rename[column] = "close"
-
-              elif name in {
-                  "volume",
-                  "vol",
-                  "tick_volume",
-              }:
-                  rename[column] = "volume"
-
-
-          df = df.rename(columns=rename)
-
-
-          required = {
-              "timestamp",
-              "open",
-              "high",
-              "low",
-              "close",
-          }
-
-          missing = required - set(df.columns)
-
-          if missing:
+          if not files:
               raise SystemExit(
-                  "Missing required columns: "
-                  + str(sorted(missing))
+                  "ERROR: No non-empty XAUUSD CSV files were found."
               )
 
+          print()
+          print("CSV FILES SELECTED")
+          print("----------------------------------------")
 
-          # --------------------------------------------------------
-          # PARSE TIMESTAMP
-          # --------------------------------------------------------
+          for path in files:
+              print(path)
 
-          df["timestamp"] = pd.to_datetime(
-              df["timestamp"],
-              utc=True,
-              errors="coerce",
-          )
+          print("----------------------------------------")
 
+          frames = []
 
-          # --------------------------------------------------------
-          # PARSE OHLC
-          # --------------------------------------------------------
+          for source in files:
 
-          for column in [
-              "open",
-              "high",
-              "low",
-              "close",
-          ]:
+              print()
+              print("Reading:", source)
 
-              df[column] = pd.to_numeric(
-                  df[column],
-                  errors="coerce",
+              df = pd.read_csv(source)
+
+              rename = {}
+
+              for column in df.columns:
+
+                  name = str(column).strip().lower()
+
+                  if name in {
+                      "date",
+                      "datetime",
+                      "time",
+                      "timestamp",
+                  }:
+                      rename[column] = "timestamp"
+
+                  elif name in {
+                      "open",
+                      "o",
+                  }:
+                      rename[column] = "open"
+
+                  elif name in {
+                      "high",
+                      "h",
+                  }:
+                      rename[column] = "high"
+
+                  elif name in {
+                      "low",
+                      "l",
+                  }:
+                      rename[column] = "low"
+
+                  elif name in {
+                      "close",
+                      "c",
+                  }:
+                      rename[column] = "close"
+
+                  elif name in {
+                      "volume",
+                      "vol",
+                      "tick_volume",
+                  }:
+                      rename[column] = "volume"
+
+              df = df.rename(
+                  columns=rename
               )
 
-
-          # --------------------------------------------------------
-          # REMOVE INVALID ROWS
-          # --------------------------------------------------------
-
-          df = df.dropna(
-              subset=[
+              required = {
                   "timestamp",
                   "open",
                   "high",
                   "low",
                   "close",
-              ]
-          )
+              }
 
+              missing = (
+                  required
+                  - set(df.columns)
+              )
+
+              if missing:
+                  raise SystemExit(
+                      f"{source}: missing required columns: "
+                      f"{sorted(missing)}"
+                  )
+
+              raw_timestamp = df[
+                  "timestamp"
+              ]
+
+              # Dukascopy CSV timestamps are Unix
+              # timestamps in milliseconds.
+              if pd.api.types.is_numeric_dtype(
+                  raw_timestamp
+              ):
+
+                  df["timestamp"] = pd.to_datetime(
+                      pd.to_numeric(
+                          raw_timestamp,
+                          errors="coerce",
+                      ),
+                      unit="ms",
+                      utc=True,
+                      errors="coerce",
+                  )
+
+              else:
+
+                  df["timestamp"] = pd.to_datetime(
+                      raw_timestamp,
+                      utc=True,
+                      errors="coerce",
+                  )
+
+              for column in [
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              ]:
+
+                  df[column] = pd.to_numeric(
+                      df[column],
+                      errors="coerce",
+                  )
+
+              df = df.dropna(
+                  subset=[
+                      "timestamp",
+                      "open",
+                      "high",
+                      "low",
+                      "close",
+                  ]
+              )
+
+              frames.append(df)
+
+          if not frames:
+              raise SystemExit(
+                  "ERROR: No valid dataframes were created."
+              )
+
+          df = pd.concat(
+              frames,
+              ignore_index=True,
+          )
 
           df = df.sort_values(
               "timestamp"
           )
 
-
           df = df.drop_duplicates(
               subset=["timestamp"],
               keep="first",
           )
-
-
-          # --------------------------------------------------------
-          # OHLC SANITY CHECK
-          # --------------------------------------------------------
 
           invalid = (
               (df["open"] <= 0)
@@ -268,18 +317,12 @@ jobs:
               (df["close"] > df["high"])
           )
 
-
           if invalid.any():
 
               raise SystemExit(
                   "Invalid OHLC rows detected: "
                   + str(int(invalid.sum()))
               )
-
-
-          # --------------------------------------------------------
-          # LIMIT TEST PERIOD
-          # --------------------------------------------------------
 
           start = pd.Timestamp(
               "2024-01-01",
@@ -291,35 +334,36 @@ jobs:
               tz="UTC",
           )
 
-
           df = df[
               (df["timestamp"] >= start)
               &
               (df["timestamp"] < end)
           ].copy()
 
-
-          # --------------------------------------------------------
-          # MINIMUM DATA CHECK
-          # --------------------------------------------------------
-
           if len(df) < 5000:
 
               raise SystemExit(
-                  "Dataset unexpectedly small: "
+                  "Dataset unexpectedly small after normalization: "
                   + str(len(df))
               )
 
+          # Explicit timestamp sanity check.
+          # This catches accidentally interpreting
+          # millisecond timestamps as nanoseconds.
+          if df["timestamp"].min() >= pd.Timestamp(
+              "2025-01-01",
+              tz="UTC",
+          ):
 
-          # --------------------------------------------------------
-          # SAVE NORMALIZED DATA
-          # --------------------------------------------------------
+              raise SystemExit(
+                  "Timestamp conversion looks incorrect. "
+                  "Expected data beginning in 2024."
+              )
 
           target.parent.mkdir(
               parents=True,
               exist_ok=True,
           )
-
 
           columns = [
               "timestamp",
@@ -329,54 +373,54 @@ jobs:
               "close",
           ]
 
-
           if "volume" in df.columns:
               columns.append("volume")
-
 
           df[columns].to_csv(
               target,
               index=False,
           )
 
-
           print()
           print("========================================")
           print("NORMALIZED XAUUSD DATA")
           print("========================================")
-          print("Rows:", len(df))
-          print("First:", df["timestamp"].iloc[0])
-          print("Last:", df["timestamp"].iloc[-1])
-          print("Output:", target)
+          print(
+              "Rows:",
+              len(df),
+          )
+          print(
+              "First:",
+              df["timestamp"].iloc[0],
+          )
+          print(
+              "Last:",
+              df["timestamp"].iloc[-1],
+          )
+          print(
+              "Output:",
+              target,
+          )
           print("========================================")
           PY
-
-      # ============================================================
-      # VALIDATE NORMALIZED FILE
-      # ============================================================
 
       - name: Validate normalized XAUUSD data
         run: |
           python - <<'PY'
           from pathlib import Path
-
           import pandas as pd
-
 
           path = Path(
               "data/historical/"
               "xauusd_h1_2024_2026_normalized.csv"
           )
 
-
           if not path.exists():
               raise SystemExit(
                   "Normalized dataset does not exist."
               )
 
-
           df = pd.read_csv(path)
-
 
           required = [
               "timestamp",
@@ -386,13 +430,11 @@ jobs:
               "close",
           ]
 
-
           missing = [
               column
               for column in required
               if column not in df.columns
           ]
-
 
           if missing:
               raise SystemExit(
@@ -400,21 +442,47 @@ jobs:
                   + str(missing)
               )
 
-
           if len(df) < 5000:
               raise SystemExit(
                   f"Only {len(df)} rows found."
               )
 
+          parsed = pd.to_datetime(
+              df["timestamp"],
+              utc=True,
+              errors="coerce",
+          )
+
+          if parsed.isna().any():
+              raise SystemExit(
+                  "Normalized file contains invalid timestamps."
+              )
+
+          if parsed.min() >= pd.Timestamp(
+              "2025-01-01",
+              tz="UTC",
+          ):
+
+              raise SystemExit(
+                  "Normalized timestamps do not begin "
+                  "in the expected 2024 period."
+              )
 
           print(
-              f"Validated {len(df):,} XAUUSD H1 candles."
+              f"Validated {len(df):,} "
+              "XAUUSD H1 candles."
+          )
+
+          print(
+              "First:",
+              parsed.min(),
+          )
+
+          print(
+              "Last:",
+              parsed.max(),
           )
           PY
-
-      # ============================================================
-      # RUN WEEKLY GROWTH STRATEGY
-      # ============================================================
 
       - name: Run Weekly Growth V1 backtest
         env:
@@ -449,27 +517,20 @@ jobs:
             --slippage \
               0.05
 
-      # ============================================================
-      # DISPLAY RESULT
-      # ============================================================
-
       - name: Display final result
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-
           path = Path(
               "weekly_growth_results/result.json"
           )
-
 
           if not path.exists():
               raise SystemExit(
                   "result.json was not created."
               )
-
 
           result = json.loads(
               path.read_text(
@@ -477,12 +538,10 @@ jobs:
               )
           )
 
-
           metrics = result.get(
               "metrics",
               {}
           )
-
 
           print()
           print("========================================")
@@ -490,118 +549,195 @@ jobs:
           print("WEEKLY GROWTH STRATEGY V1")
           print("========================================")
           print()
+
           print(
               "Starting balance: $"
               + f"{metrics.get('starting_balance', 0):,.2f}"
           )
+
           print(
               "Ending balance: $"
               + f"{metrics.get('ending_balance', 0):,.2f}"
           )
+
           print(
               "Total profit: $"
               + f"{metrics.get('total_profit', 0):,.2f}"
           )
+
           print(
               "Total return: "
               + f"{metrics.get('total_return_pct', 0):.2f}%"
           )
+
           print(
               "Trades: "
-              + str(metrics.get('total_trades', 0))
+              + str(
+                  metrics.get(
+                      "total_trades",
+                      0,
+                  )
+              )
           )
+
           print(
               "Wins: "
-              + str(metrics.get('wins', 0))
+              + str(
+                  metrics.get(
+                      "wins",
+                      0,
+                  )
+              )
           )
+
           print(
               "Losses: "
-              + str(metrics.get('losses', 0))
+              + str(
+                  metrics.get(
+                      "losses",
+                      0,
+                  )
+              )
           )
+
           print(
               "Win rate: "
               + f"{metrics.get('win_rate_pct', 0):.2f}%"
           )
+
           print(
               "Profit factor: "
-              + str(metrics.get('profit_factor'))
+              + str(
+                  metrics.get(
+                      "profit_factor"
+                  )
+              )
           )
+
           print(
               "Average R: "
               + f"{metrics.get('average_r', 0):.3f}"
           )
+
           print(
               "Maximum drawdown: "
               + f"{metrics.get('max_drawdown_pct', 0):.2f}%"
           )
+
           print()
+
           print(
               "Weeks tested: "
-              + str(metrics.get('total_weeks', 0))
+              + str(
+                  metrics.get(
+                      "total_weeks",
+                      0,
+                  )
+              )
           )
+
           print(
               "Positive weeks: "
-              + str(metrics.get('positive_weeks', 0))
+              + str(
+                  metrics.get(
+                      "positive_weeks",
+                      0,
+                  )
+              )
           )
+
           print(
               "Negative weeks: "
-              + str(metrics.get('negative_weeks', 0))
+              + str(
+                  metrics.get(
+                      "negative_weeks",
+                      0,
+                  )
+              )
           )
+
           print(
               "Weeks >= 25%: "
-              + str(metrics.get('weekly_target_hits', 0))
+              + str(
+                  metrics.get(
+                      "weekly_target_hits",
+                      0,
+                  )
+              )
           )
+
           print(
               "25% target hit rate: "
               + f"{metrics.get('weekly_target_hit_rate_pct', 0):.2f}%"
           )
+
           print(
               "Average weekly return: "
               + f"{metrics.get('average_weekly_return_pct', 0):.2f}%"
           )
+
           print(
               "Median weekly return: "
               + f"{metrics.get('median_weekly_return_pct', 0):.2f}%"
           )
+
           print()
+
           print(
               "Best week: "
-              + str(metrics.get('best_week'))
+              + str(
+                  metrics.get(
+                      "best_week"
+                  )
+              )
               + " / "
-              + str(metrics.get('best_week_return_pct'))
+              + str(
+                  metrics.get(
+                      "best_week_return_pct"
+                  )
+              )
               + "%"
           )
+
           print(
               "Worst week: "
-              + str(metrics.get('worst_week'))
+              + str(
+                  metrics.get(
+                      "worst_week"
+                  )
+              )
               + " / "
-              + str(metrics.get('worst_week_return_pct'))
+              + str(
+                  metrics.get(
+                      "worst_week_return_pct"
+                  )
+              )
               + "%"
           )
+
           print()
+
           print("========================================")
           PY
 
-      # ============================================================
-      # UPLOAD RESULTS
-      # ============================================================
-
       - name: Upload Weekly Growth results
         uses: actions/upload-artifact@v4
+
         with:
           name: raymond-weekly-growth-v1-results
+
           path: |
             weekly_growth_results/
             data/historical/xauusd_h1_2024_2026_normalized.csv
-          retention-days: 30
 
-      # ============================================================
-      # UPLOAD RAW DATA SEPARATELY
-      # ============================================================
+          retention-days: 30
 
       - name: Upload normalized dataset
         uses: actions/upload-artifact@v4
+
         with:
           name: raymond-xauusd-h1-normalized-2024-2026
+
           path: data/historical/xauusd_h1_2024_2026_normalized.csv
+
           retention-days: 7
