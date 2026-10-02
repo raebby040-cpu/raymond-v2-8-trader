@@ -10,6 +10,22 @@ STEP 12:
 - Never executes broker orders.
 - Never contacts MT5.
 - Paper/read-only management decisions only.
+
+IMPORTANT:
+A protective stop is validated against the CURRENT MARKET PRICE,
+not against the original entry price.
+
+This allows profitable positions to move their stop through entry:
+
+BUY:
+    original SL < entry
+    profitable protective SL may become > entry
+    but must remain < current price
+
+SELL:
+    original SL > entry
+    profitable protective SL may become < entry
+    but must remain > current price
 """
 
 from dataclasses import dataclass
@@ -103,6 +119,34 @@ class PositionSnapshot:
     partial_close_applied: bool = False
 
     def validate(self) -> None:
+        """
+        Validate the position snapshot.
+
+        IMPORTANT:
+        Stop-loss validation uses the CURRENT MARKET PRICE.
+
+        A stop-loss is a protective order. Once a position becomes
+        profitable, the stop is allowed to cross the original entry.
+
+        BUY:
+            stop_loss must remain BELOW current_price.
+
+        SELL:
+            stop_loss must remain ABOVE current_price.
+
+        This permits:
+
+        BUY:
+            entry = 4000
+            current = 4020
+            stop = 4010
+
+        SELL:
+            entry = 4000
+            current = 3980
+            stop = 3990
+        """
+
         if not self.trade_id or not self.trade_id.strip():
             raise TradeManagementError(
                 "trade_id is required"
@@ -140,15 +184,27 @@ class PositionSnapshot:
                     "take_profit must be greater than zero"
                 )
 
+        # ----------------------------------------------------
+        # BUY
+        # ----------------------------------------------------
+
         if self.direction == TradeDirection.BUY:
+
+            # A BUY stop must always remain below the
+            # CURRENT market price.
+            #
+            # It is intentionally NOT required to remain
+            # below the original entry price.
             if (
                 self.stop_loss is not None
-                and self.stop_loss >= self.entry_price
+                and self.stop_loss >= self.current_price
             ):
                 raise TradeManagementError(
-                    "BUY stop_loss must be below entry_price"
+                    "BUY stop_loss must remain below current_price"
                 )
 
+            # Take-profit remains on the profitable side
+            # of the original entry.
             if (
                 self.take_profit is not None
                 and self.take_profit <= self.entry_price
@@ -157,15 +213,34 @@ class PositionSnapshot:
                     "BUY take_profit must be above entry_price"
                 )
 
+        # ----------------------------------------------------
+        # SELL
+        # ----------------------------------------------------
+
         elif self.direction == TradeDirection.SELL:
+
+            # A SELL stop must always remain above the
+            # CURRENT market price.
+            #
+            # It is intentionally NOT required to remain
+            # above the original entry price.
+            #
+            # Example:
+            #
+            # Entry       = 4000
+            # Current     = 3980
+            # Stop        = 3990
+            #
+            # This is a valid profitable SELL position.
             if (
                 self.stop_loss is not None
-                and self.stop_loss <= self.entry_price
+                and self.stop_loss <= self.current_price
             ):
                 raise TradeManagementError(
-                    "SELL stop_loss must be above entry_price"
+                    "SELL stop_loss must remain above current_price"
                 )
 
+            # Take-profit remains below the original entry.
             if (
                 self.take_profit is not None
                 and self.take_profit >= self.entry_price
@@ -246,6 +321,7 @@ class AdvancedTradeManager:
     def _profit_distance(
         position: PositionSnapshot,
     ) -> float:
+
         if position.direction == TradeDirection.BUY:
             return (
                 position.current_price
@@ -327,6 +403,7 @@ class AdvancedTradeManager:
         position.validate()
 
         if position.direction == TradeDirection.BUY:
+
             candidate = (
                 position.current_price
                 - self.config.trailing_distance
@@ -335,6 +412,13 @@ class AdvancedTradeManager:
             if candidate <= 0:
                 raise TradeManagementError(
                     "calculated BUY trailing stop must be positive"
+                )
+
+            # The trailing stop must remain below
+            # the current market price.
+            if candidate >= position.current_price:
+                raise TradeManagementError(
+                    "calculated BUY trailing stop must remain below current_price"
                 )
 
             return candidate
@@ -347,6 +431,13 @@ class AdvancedTradeManager:
         if candidate <= 0:
             raise TradeManagementError(
                 "calculated SELL trailing stop must be positive"
+            )
+
+        # The trailing stop must remain above
+        # the current market price.
+        if candidate <= position.current_price:
+            raise TradeManagementError(
+                "calculated SELL trailing stop must remain above current_price"
             )
 
         return candidate
@@ -447,8 +538,10 @@ class AdvancedTradeManager:
             position
         )
 
-        # A losing or flat position does not get
-        # break-even, trailing, or partial-close actions.
+        # ----------------------------------------------------
+        # LOSING / FLAT POSITION
+        # ----------------------------------------------------
+
         if current_r <= 0:
             return ManagementDecision(
                 action=ManagementAction.HOLD,
@@ -505,9 +598,29 @@ class AdvancedTradeManager:
                 self.break_even_stop(position)
             )
 
-            if self._stop_improves(
-                position,
-                candidate,
+            # Safety check:
+            #
+            # BUY break-even must be below current.
+            # SELL break-even must be above current.
+            #
+            # This is particularly important when price
+            # has moved strongly in profit.
+
+            if position.direction == TradeDirection.BUY:
+                candidate_valid = (
+                    candidate < position.current_price
+                )
+            else:
+                candidate_valid = (
+                    candidate > position.current_price
+                )
+
+            if (
+                candidate_valid
+                and self._stop_improves(
+                    position,
+                    candidate,
+                )
             ):
                 return ManagementDecision(
                     action=ManagementAction.MOVE_TO_BREAK_EVEN,
@@ -527,6 +640,7 @@ class AdvancedTradeManager:
         # ----------------------------------------------------
 
         if self.config.trailing_enabled:
+
             candidate = (
                 self.trailing_stop(position)
             )
@@ -553,6 +667,10 @@ class AdvancedTradeManager:
                         "the existing stop-loss."
                     ),
                 )
+
+        # ----------------------------------------------------
+        # HOLD
+        # ----------------------------------------------------
 
         return ManagementDecision(
             action=ManagementAction.HOLD,
