@@ -33,11 +33,13 @@ jobs:
       - name: Create directories
         run: |
           rm -rf /tmp/raymond_v4
+
           mkdir -p /tmp/raymond_v4/h1
           mkdir -p /tmp/raymond_v4/m15
           mkdir -p /tmp/raymond_v4/m5
+
           mkdir -p data/historical
-          mkdir -p data/backtest_results/v4
+          mkdir -p backtest_results/weekly_growth_v4
 
       - name: Download XAUUSD H1 data
         run: |
@@ -77,13 +79,13 @@ jobs:
 
       - name: Inspect downloaded data
         run: |
-          echo "===== H1 ====="
+          echo "===== H1 FILES ====="
           find /tmp/raymond_v4/h1 -type f -name "*.csv" -print
 
-          echo "===== M15 ====="
+          echo "===== M15 FILES ====="
           find /tmp/raymond_v4/m15 -type f -name "*.csv" -print
 
-          echo "===== M5 ====="
+          echo "===== M5 FILES ====="
           find /tmp/raymond_v4/m5 -type f -name "*.csv" -print
 
       - name: Normalize downloaded CSV files
@@ -102,23 +104,31 @@ jobs:
           }
 
           outputs = {
-              "h1": Path("data/historical/xauusd_h1_2024_2026_normalized.csv"),
-              "m15": Path("data/historical/xauusd_m15_2024_2026_normalized.csv"),
-              "m5": Path("data/historical/xauusd_m5_2024_2026_normalized.csv"),
+              "h1": Path(
+                  "data/historical/"
+                  "xauusd_h1_2024_2026_normalized.csv"
+              ),
+              "m15": Path(
+                  "data/historical/"
+                  "xauusd_m15_2024_2026_normalized.csv"
+              ),
+              "m5": Path(
+                  "data/historical/"
+                  "xauusd_m5_2024_2026_normalized.csv"
+              ),
           }
 
-          def find_csvs(folder):
-              return sorted(folder.rglob("*.csv"))
-
           def normalize(kind, folder, output):
-              files = find_csvs(folder)
+              files = sorted(folder.rglob("*.csv"))
 
               if not files:
                   raise RuntimeError(
-                      f"No CSV files were downloaded for {kind.upper()}."
+                      f"No CSV files downloaded for {kind.upper()}."
                   )
 
-              print(f"{kind.upper()} files found: {len(files)}")
+              print(
+                  f"{kind.upper()} files found: {len(files)}"
+              )
 
               frames = []
 
@@ -144,7 +154,8 @@ jobs:
 
                   if missing:
                       raise RuntimeError(
-                          f"{file} is missing columns: {sorted(missing)}"
+                          f"{file} missing columns: "
+                          f"{sorted(missing)}"
                       )
 
                   keep = [
@@ -160,8 +171,9 @@ jobs:
 
                   df = df[keep].copy()
 
-                  # Dukascopy numeric timestamps are milliseconds.
-                  if pd.api.types.is_numeric_dtype(df["timestamp"]):
+                  if pd.api.types.is_numeric_dtype(
+                      df["timestamp"]
+                  ):
                       df["timestamp"] = pd.to_datetime(
                           df["timestamp"],
                           unit="ms",
@@ -175,9 +187,14 @@ jobs:
                           errors="coerce",
                       )
 
-                  for col in ["open", "high", "low", "close"]:
-                      df[col] = pd.to_numeric(
-                          df[col],
+                  for column in [
+                      "open",
+                      "high",
+                      "low",
+                      "close",
+                  ]:
+                      df[column] = pd.to_numeric(
+                          df[column],
                           errors="coerce",
                       )
 
@@ -219,13 +236,15 @@ jobs:
               ].copy()
 
               data = data[
-                  data["high"] >= data[
+                  data["high"]
+                  >= data[
                       ["open", "close", "low"]
                   ].max(axis=1)
               ].copy()
 
               data = data[
-                  data["low"] <= data[
+                  data["low"]
+                  <= data[
                       ["open", "close", "high"]
                   ].min(axis=1)
               ].copy()
@@ -241,7 +260,7 @@ jobs:
 
               if data.empty:
                   raise RuntimeError(
-                      f"{kind.upper()} dataset is empty after normalization."
+                      f"{kind.upper()} dataset is empty."
                   )
 
               output.parent.mkdir(
@@ -256,16 +275,16 @@ jobs:
 
               print(
                   f"{kind.upper()} normalized rows: "
-                  f"{len(data)}"
+                  f"{len(data):,}"
               )
 
               print(
-                  f"{kind.upper()} first timestamp: "
+                  f"{kind.upper()} first: "
                   f"{data['timestamp'].iloc[0]}"
               )
 
               print(
-                  f"{kind.upper()} last timestamp: "
+                  f"{kind.upper()} last: "
                   f"{data['timestamp'].iloc[-1]}"
               )
 
@@ -283,33 +302,65 @@ jobs:
           from pathlib import Path
           import pandas as pd
 
-          files = {
+          datasets = {
               "H1": (
-                  Path("data/historical/xauusd_h1_2024_2026_normalized.csv"),
+                  Path(
+                      "data/historical/"
+                      "xauusd_h1_2024_2026_normalized.csv"
+                  ),
                   5000,
               ),
               "M15": (
-                  Path("data/historical/xauusd_m15_2024_2026_normalized.csv"),
+                  Path(
+                      "data/historical/"
+                      "xauusd_m15_2024_2026_normalized.csv"
+                  ),
                   15000,
               ),
               "M5": (
-                  Path("data/historical/xauusd_m5_2024_2026_normalized.csv"),
+                  Path(
+                      "data/historical/"
+                      "xauusd_m5_2024_2026_normalized.csv"
+                  ),
                   40000,
               ),
           }
 
-          for name, (path, minimum_rows) in files.items():
+          for name, (path, minimum_rows) in datasets.items():
+              print()
+              print(f"===== VALIDATING {name} =====")
+
               if not path.exists():
                   raise RuntimeError(
-                      f"{name} dataset does not exist: {path}"
+                      f"{name} file does not exist: {path}"
                   )
 
               df = pd.read_csv(path)
 
+              print(
+                  f"{name} rows: {len(df):,}"
+              )
+
               if len(df) < minimum_rows:
                   raise RuntimeError(
-                      f"{name} dataset has only {len(df)} rows. "
+                      f"{name} has only {len(df)} rows. "
                       f"Expected at least {minimum_rows}."
+                  )
+
+              required = {
+                  "timestamp",
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              }
+
+              missing = required - set(df.columns)
+
+              if missing:
+                  raise RuntimeError(
+                      f"{name} missing columns: "
+                      f"{sorted(missing)}"
                   )
 
               df["timestamp"] = pd.to_datetime(
@@ -333,50 +384,63 @@ jobs:
                       f"{name} timestamps are not sorted."
                   )
 
-              for col in [
+              for column in [
                   "open",
                   "high",
                   "low",
                   "close",
               ]:
-                  if (df[col] <= 0).any():
+                  if (df[column] <= 0).any():
                       raise RuntimeError(
-                          f"{name} contains non-positive {col} values."
+                          f"{name} contains invalid "
+                          f"{column} values."
                       )
 
               print(
-                  f"{name}: VALID - {len(df)} rows"
+                  f"{name}: VALID"
               )
 
-          print("")
-          print("All H1/M15/M5 datasets passed validation.")
+          print()
+          print(
+              "ALL H1 + M15 + M5 DATASETS PASSED."
+          )
           PY
 
       - name: Run V4 research backtest
         run: |
           python scripts/run_weekly_growth_v4_research.py \
-            --h1 data/historical/xauusd_h1_2024_2026_normalized.csv \
-            --m15 data/historical/xauusd_m15_2024_2026_normalized.csv \
-            --m5 data/historical/xauusd_m5_2024_2026_normalized.csv \
-            --output-dir data/backtest_results/v4
+            data/historical/xauusd_h1_2024_2026_normalized.csv \
+            data/historical/xauusd_m15_2024_2026_normalized.csv \
+            data/historical/xauusd_m5_2024_2026_normalized.csv \
+            backtest_results/weekly_growth_v4
 
       - name: Display V4 summary
         run: |
-          echo "===== V4 SUMMARY ====="
+          echo "===== RAYMOND V2.8 V4 SUMMARY ====="
 
-          if [ -f data/backtest_results/v4/summary.txt ]; then
-            cat data/backtest_results/v4/summary.txt
-          else
-            echo "ERROR: V4 summary.txt was not created."
+          if [ ! -f \
+            backtest_results/weekly_growth_v4/summary.txt
+          ]; then
+            echo "ERROR: summary.txt was not created."
             exit 1
           fi
 
+          cat \
+            backtest_results/weekly_growth_v4/summary.txt
+
       - name: Verify V4 result files
         run: |
-          test -f data/backtest_results/v4/summary.txt
-          test -f data/backtest_results/v4/optimization.json
-          test -f data/backtest_results/v4/top_50_candidates.csv
-          test -f data/backtest_results/v4/selected_full_period_trades.csv
+          test -f \
+            backtest_results/weekly_growth_v4/summary.txt
+
+          test -f \
+            backtest_results/weekly_growth_v4/optimization.json
+
+          test -f \
+            backtest_results/weekly_growth_v4/top_50_candidates.csv
+
+          test -f \
+            backtest_results/weekly_growth_v4/selected_full_period_trades.csv
 
           echo "All V4 result files exist."
 
@@ -385,7 +449,7 @@ jobs:
         with:
           name: raymond-v2-8-v4-research-results
           path: |
-            data/backtest_results/v4/
+            backtest_results/weekly_growth_v4/
             data/historical/xauusd_h1_2024_2026_normalized.csv
             data/historical/xauusd_m15_2024_2026_normalized.csv
             data/historical/xauusd_m5_2024_2026_normalized.csv
