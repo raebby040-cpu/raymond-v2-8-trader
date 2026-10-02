@@ -1,4 +1,4 @@
-name: Raymond Weekly Growth V4 Research
+name: v4-research
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
 jobs:
   v4-research:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -20,178 +20,373 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests
+          pip install pandas numpy
 
-      - name: Create data directory
+      - name: Create directories
         run: |
+          rm -rf /tmp/raymond_v4
+          mkdir -p /tmp/raymond_v4/h1
+          mkdir -p /tmp/raymond_v4/m15
+          mkdir -p /tmp/raymond_v4/m5
           mkdir -p data/historical
-          mkdir -p backtest_results/weekly_growth_v4
+          mkdir -p data/backtest_results/v4
 
       - name: Download XAUUSD H1 data
         run: |
+          npx --yes dukascopy-node \
+            -i xauusd \
+            -from 2024-01-01 \
+            -to 2026-10-02 \
+            -t h1 \
+            -f csv \
+            -dir /tmp/raymond_v4/h1 \
+            -bs 5 \
+            -bp 1000
+
+      - name: Download XAUUSD M15 data
+        run: |
+          npx --yes dukascopy-node \
+            -i xauusd \
+            -from 2024-01-01 \
+            -to 2026-10-02 \
+            -t m15 \
+            -f csv \
+            -dir /tmp/raymond_v4/m15 \
+            -bs 5 \
+            -bp 1000
+
+      - name: Download XAUUSD M5 data
+        run: |
+          npx --yes dukascopy-node \
+            -i xauusd \
+            -from 2024-01-01 \
+            -to 2026-10-02 \
+            -t m5 \
+            -f csv \
+            -dir /tmp/raymond_v4/m5 \
+            -bs 5 \
+            -bp 1000
+
+      - name: Inspect downloaded data
+        run: |
+          echo "===== H1 ====="
+          find /tmp/raymond_v4/h1 -type f -name "*.csv" -print
+
+          echo "===== M15 ====="
+          find /tmp/raymond_v4/m15 -type f -name "*.csv" -print
+
+          echo "===== M5 ====="
+          find /tmp/raymond_v4/m5 -type f -name "*.csv" -print
+
+      - name: Normalize downloaded CSV files
+        run: |
           python - <<'PY'
-          import requests
-          import pandas as pd
-          from io import BytesIO
           from pathlib import Path
+          import pandas as pd
 
-          output = Path(
-              "data/historical/xauusd_h1_2024_2026_normalized.csv"
-          )
+          START = pd.Timestamp("2024-01-01", tz="UTC")
+          END = pd.Timestamp("2026-10-02", tz="UTC")
 
-          urls = [
-              "https://datafeed.dukascopy.com/datafeed/XAUUSD/2024/01/XAUUSD_Candlestick_1_Hour_Bid_2024-01.zip"
-          ]
+          sources = {
+              "h1": Path("/tmp/raymond_v4/h1"),
+              "m15": Path("/tmp/raymond_v4/m15"),
+              "m5": Path("/tmp/raymond_v4/m5"),
+          }
 
-          print("V4 data preparation")
-          print("Existing repository data will be used if available.")
+          outputs = {
+              "h1": Path("data/historical/xauusd_h1_2024_2026_normalized.csv"),
+              "m15": Path("data/historical/xauusd_m15_2024_2026_normalized.csv"),
+              "m5": Path("data/historical/xauusd_m5_2024_2026_normalized.csv"),
+          }
 
-          if output.exists():
-              df = pd.read_csv(output)
+          def find_csvs(folder):
+              return sorted(folder.rglob("*.csv"))
+
+          def normalize(kind, folder, output):
+              files = find_csvs(folder)
+
+              if not files:
+                  raise RuntimeError(
+                      f"No CSV files were downloaded for {kind.upper()}."
+                  )
+
+              print(f"{kind.upper()} files found: {len(files)}")
+
+              frames = []
+
+              for file in files:
+                  print(f"Reading {file}")
+
+                  df = pd.read_csv(file)
+
+                  df.columns = [
+                      str(c).strip().lower()
+                      for c in df.columns
+                  ]
+
+                  required = {
+                      "timestamp",
+                      "open",
+                      "high",
+                      "low",
+                      "close",
+                  }
+
+                  missing = required - set(df.columns)
+
+                  if missing:
+                      raise RuntimeError(
+                          f"{file} is missing columns: {sorted(missing)}"
+                      )
+
+                  keep = [
+                      "timestamp",
+                      "open",
+                      "high",
+                      "low",
+                      "close",
+                  ]
+
+                  if "volume" in df.columns:
+                      keep.append("volume")
+
+                  df = df[keep].copy()
+
+                  # Dukascopy numeric timestamps are milliseconds.
+                  if pd.api.types.is_numeric_dtype(df["timestamp"]):
+                      df["timestamp"] = pd.to_datetime(
+                          df["timestamp"],
+                          unit="ms",
+                          utc=True,
+                          errors="coerce",
+                      )
+                  else:
+                      df["timestamp"] = pd.to_datetime(
+                          df["timestamp"],
+                          utc=True,
+                          errors="coerce",
+                      )
+
+                  for col in ["open", "high", "low", "close"]:
+                      df[col] = pd.to_numeric(
+                          df[col],
+                          errors="coerce",
+                      )
+
+                  if "volume" in df.columns:
+                      df["volume"] = pd.to_numeric(
+                          df["volume"],
+                          errors="coerce",
+                      )
+                  else:
+                      df["volume"] = 0.0
+
+                  df = df.dropna(
+                      subset=[
+                          "timestamp",
+                          "open",
+                          "high",
+                          "low",
+                          "close",
+                      ]
+                  )
+
+                  frames.append(df)
+
+              data = pd.concat(
+                  frames,
+                  ignore_index=True,
+              )
+
+              data = data[
+                  (data["timestamp"] >= START)
+                  & (data["timestamp"] < END)
+              ].copy()
+
+              data = data[
+                  (data["open"] > 0)
+                  & (data["high"] > 0)
+                  & (data["low"] > 0)
+                  & (data["close"] > 0)
+              ].copy()
+
+              data = data[
+                  data["high"] >= data[
+                      ["open", "close", "low"]
+                  ].max(axis=1)
+              ].copy()
+
+              data = data[
+                  data["low"] <= data[
+                      ["open", "close", "high"]
+                  ].min(axis=1)
+              ].copy()
+
+              data = data.drop_duplicates(
+                  subset=["timestamp"],
+                  keep="last",
+              )
+
+              data = data.sort_values(
+                  "timestamp"
+              ).reset_index(drop=True)
+
+              if data.empty:
+                  raise RuntimeError(
+                      f"{kind.upper()} dataset is empty after normalization."
+                  )
+
+              output.parent.mkdir(
+                  parents=True,
+                  exist_ok=True,
+              )
+
+              data.to_csv(
+                  output,
+                  index=False,
+              )
 
               print(
-                  f"Existing H1 dataset found: {len(df):,} rows"
+                  f"{kind.upper()} normalized rows: "
+                  f"{len(data)}"
               )
 
-              if len(df) >= 300:
-                  print("H1 dataset is available.")
-              else:
-                  raise SystemExit(
-                      "Existing H1 dataset contains fewer than 300 rows."
-                  )
-          else:
-              raise SystemExit(
-                  "Required H1 dataset was not found. "
-                  "Keep the existing V3 historical dataset in "
-                  "data/historical/ before running V4."
-              )
-          PY
-
-      - name: Download M15 data
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          candidates = [
-              Path("data/historical/xauusd_m15_2024_2026_normalized.csv"),
-              Path("data/historical/xauusd_m15_2024_2026.csv"),
-          ]
-
-          found = next(
-              (p for p in candidates if p.exists()),
-              None,
-          )
-
-          if found is None:
-              raise SystemExit(
-                  "REAL M15 data is required for V4. "
-                  "No M15 dataset was found in data/historical/."
+              print(
+                  f"{kind.upper()} first timestamp: "
+                  f"{data['timestamp'].iloc[0]}"
               )
 
-          print(f"M15 dataset found: {found}")
-          PY
-
-      - name: Download M5 data
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          candidates = [
-              Path("data/historical/xauusd_m5_2024_2026_normalized.csv"),
-              Path("data/historical/xauusd_m5_2024_2026.csv"),
-          ]
-
-          found = next(
-              (p for p in candidates if p.exists()),
-              None,
-          )
-
-          if found is None:
-              raise SystemExit(
-                  "REAL M5 data is required for V4. "
-                  "No M5 dataset was found in data/historical/."
+              print(
+                  f"{kind.upper()} last timestamp: "
+                  f"{data['timestamp'].iloc[-1]}"
               )
 
-          print(f"M5 dataset found: {found}")
+          for kind in ["h1", "m15", "m5"]:
+              normalize(
+                  kind,
+                  sources[kind],
+                  outputs[kind],
+              )
           PY
 
       - name: Validate datasets
         run: |
           python - <<'PY'
-          import pandas as pd
           from pathlib import Path
+          import pandas as pd
 
-          files = [
-              Path("data/historical/xauusd_h1_2024_2026_normalized.csv"),
-          ]
+          files = {
+              "H1": (
+                  Path("data/historical/xauusd_h1_2024_2026_normalized.csv"),
+                  5000,
+              ),
+              "M15": (
+                  Path("data/historical/xauusd_m15_2024_2026_normalized.csv"),
+                  15000,
+              ),
+              "M5": (
+                  Path("data/historical/xauusd_m5_2024_2026_normalized.csv"),
+                  40000,
+              ),
+          }
 
-          m15 = Path(
-              "data/historical/xauusd_m15_2024_2026_normalized.csv"
-          )
-
-          m5 = Path(
-              "data/historical/xauusd_m5_2024_2026_normalized.csv"
-          )
-
-          if not m15.exists():
-              m15 = Path(
-                  "data/historical/xauusd_m15_2024_2026.csv"
-              )
-
-          if not m5.exists():
-              m5 = Path(
-                  "data/historical/xauusd_m5_2024_2026.csv"
-              )
-
-          files.extend([m15, m5])
-
-          for path in files:
-              print()
-              print(f"Checking {path}")
+          for name, (path, minimum_rows) in files.items():
+              if not path.exists():
+                  raise RuntimeError(
+                      f"{name} dataset does not exist: {path}"
+                  )
 
               df = pd.read_csv(path)
 
-              print(
-                  f"Rows: {len(df):,}"
-              )
-
-              if len(df) < 300:
-                  raise SystemExit(
-                      f"{path} has fewer than 300 rows."
+              if len(df) < minimum_rows:
+                  raise RuntimeError(
+                      f"{name} dataset has only {len(df)} rows. "
+                      f"Expected at least {minimum_rows}."
                   )
 
-              required = {
-                  "timestamp",
+              df["timestamp"] = pd.to_datetime(
+                  df["timestamp"],
+                  utc=True,
+                  errors="coerce",
+              )
+
+              if df["timestamp"].isna().any():
+                  raise RuntimeError(
+                      f"{name} contains invalid timestamps."
+                  )
+
+              if df["timestamp"].duplicated().any():
+                  raise RuntimeError(
+                      f"{name} contains duplicate timestamps."
+                  )
+
+              if not df["timestamp"].is_monotonic_increasing:
+                  raise RuntimeError(
+                      f"{name} timestamps are not sorted."
+                  )
+
+              for col in [
                   "open",
                   "high",
                   "low",
                   "close",
-              }
+              ]:
+                  if (df[col] <= 0).any():
+                      raise RuntimeError(
+                          f"{name} contains non-positive {col} values."
+                      )
 
-              missing = required - set(df.columns)
+              print(
+                  f"{name}: VALID - {len(df)} rows"
+              )
 
-              if missing:
-                  raise SystemExit(
-                      f"{path} missing columns: {sorted(missing)}"
-                  )
-
-              print("Dataset OK.")
+          print("")
+          print("All H1/M15/M5 datasets passed validation.")
           PY
 
-      - name: Run V4 research
+      - name: Run V4 research backtest
         run: |
           python scripts/run_weekly_growth_v4_research.py \
-            data/historical/xauusd_h1_2024_2026_normalized.csv \
-            data/historical/xauusd_m15_2024_2026_normalized.csv \
-            data/historical/xauusd_m5_2024_2026_normalized.csv \
-            backtest_results/weekly_growth_v4
+            --h1 data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --m15 data/historical/xauusd_m15_2024_2026_normalized.csv \
+            --m5 data/historical/xauusd_m5_2024_2026_normalized.csv \
+            --output-dir data/backtest_results/v4
+
+      - name: Display V4 summary
+        run: |
+          echo "===== V4 SUMMARY ====="
+
+          if [ -f data/backtest_results/v4/summary.txt ]; then
+            cat data/backtest_results/v4/summary.txt
+          else
+            echo "ERROR: V4 summary.txt was not created."
+            exit 1
+          fi
+
+      - name: Verify V4 result files
+        run: |
+          test -f data/backtest_results/v4/summary.txt
+          test -f data/backtest_results/v4/optimization.json
+          test -f data/backtest_results/v4/top_50_candidates.csv
+          test -f data/backtest_results/v4/selected_full_period_trades.csv
+
+          echo "All V4 result files exist."
 
       - name: Upload V4 research results
         uses: actions/upload-artifact@v4
         with:
-          name: raymond-weekly-growth-v4-results
-          path: backtest_results/weekly_growth_v4/
+          name: raymond-v2-8-v4-research-results
+          path: |
+            data/backtest_results/v4/
+            data/historical/xauusd_h1_2024_2026_normalized.csv
+            data/historical/xauusd_m15_2024_2026_normalized.csv
+            data/historical/xauusd_m5_2024_2026_normalized.csv
           if-no-files-found: error
