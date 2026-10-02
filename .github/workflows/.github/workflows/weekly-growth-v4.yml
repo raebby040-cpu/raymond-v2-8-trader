@@ -1,0 +1,811 @@
+name: Raymond Weekly Growth V4 Research
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  weekly-growth-v4:
+    name: Weekly Growth V4 - MTF Research
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+
+      # ==========================================================
+      # CHECKOUT
+      # ==========================================================
+
+      - name: Checkout Raymond v2.8
+        uses: actions/checkout@v4
+
+
+      # ==========================================================
+      # PYTHON
+      # ==========================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+
+      # ==========================================================
+      # NODE
+      # ==========================================================
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+
+      # ==========================================================
+      # DEPENDENCIES
+      # ==========================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+
+      # ==========================================================
+      # PREPARE DATA DIRECTORY
+      # ==========================================================
+
+      - name: Prepare historical data directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf data/historical
+          mkdir -p data/historical
+
+
+      # ==========================================================
+      # DOWNLOAD H1
+      # ==========================================================
+
+      - name: Download XAUUSD H1
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for YEAR in 2024 2025 2026
+          do
+
+            if [ "$YEAR" = "2024" ]; then
+              FROM="2024-01-01"
+              TO="2025-01-01"
+
+            elif [ "$YEAR" = "2025" ]; then
+              FROM="2025-01-01"
+              TO="2026-01-01"
+
+            else
+              FROM="2026-01-01"
+              TO="2026-10-01"
+            fi
+
+            OUT="data/historical/raw_h1/$YEAR"
+
+            mkdir -p "$OUT"
+
+            echo "========================================="
+            echo "Downloading XAUUSD H1"
+            echo "$FROM -> $TO"
+            echo "========================================="
+
+            npx --yes dukascopy-node \
+              -i xauusd \
+              -from "$FROM" \
+              -to "$TO" \
+              -t h1 \
+              -f csv \
+              -dir "$OUT" \
+              -bs 5 \
+              -bp 1000
+
+          done
+
+
+      # ==========================================================
+      # DOWNLOAD M15
+      # ==========================================================
+
+      - name: Download XAUUSD M15
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for YEAR in 2024 2025 2026
+          do
+
+            if [ "$YEAR" = "2024" ]; then
+              FROM="2024-01-01"
+              TO="2025-01-01"
+
+            elif [ "$YEAR" = "2025" ]; then
+              FROM="2025-01-01"
+              TO="2026-01-01"
+
+            else
+              FROM="2026-01-01"
+              TO="2026-10-01"
+            fi
+
+            OUT="data/historical/raw_m15/$YEAR"
+
+            mkdir -p "$OUT"
+
+            echo "========================================="
+            echo "Downloading XAUUSD M15"
+            echo "$FROM -> $TO"
+            echo "========================================="
+
+            npx --yes dukascopy-node \
+              -i xauusd \
+              -from "$FROM" \
+              -to "$TO" \
+              -t m15 \
+              -f csv \
+              -dir "$OUT" \
+              -bs 5 \
+              -bp 1000
+
+          done
+
+
+      # ==========================================================
+      # DOWNLOAD M5
+      # ==========================================================
+
+      - name: Download XAUUSD M5
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for YEAR in 2024 2025 2026
+          do
+
+            if [ "$YEAR" = "2024" ]; then
+              FROM="2024-01-01"
+              TO="2025-01-01"
+
+            elif [ "$YEAR" = "2025" ]; then
+              FROM="2025-01-01"
+              TO="2026-01-01"
+
+            else
+              FROM="2026-01-01"
+              TO="2026-10-01"
+            fi
+
+            OUT="data/historical/raw_m5/$YEAR"
+
+            mkdir -p "$OUT"
+
+            echo "========================================="
+            echo "Downloading XAUUSD M5"
+            echo "$FROM -> $TO"
+            echo "========================================="
+
+            npx --yes dukascopy-node \
+              -i xauusd \
+              -from "$FROM" \
+              -to "$TO" \
+              -t m5 \
+              -f csv \
+              -dir "$OUT" \
+              -bs 5 \
+              -bp 1000
+
+          done
+
+
+      # ==========================================================
+      # NORMALIZE ALL DATA
+      # ==========================================================
+
+      - name: Normalize H1 M15 M5 datasets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+
+          from pathlib import Path
+          import pandas as pd
+
+
+          ROOT = Path("data/historical")
+
+
+          def normalize(
+              source_root,
+              output_file,
+              minimum_rows,
+          ):
+
+              source_root = Path(source_root)
+
+              files = sorted(
+                  p
+                  for p in source_root.rglob("*.csv")
+                  if p.stat().st_size > 1000
+              )
+
+
+              if not files:
+
+                  raise SystemExit(
+                      f"No CSV files found in {source_root}"
+                  )
+
+
+              frames = []
+
+
+              for source in files:
+
+                  print(
+                      f"Reading {source}"
+                  )
+
+
+                  df = pd.read_csv(
+                      source
+                  )
+
+
+                  rename = {}
+
+
+                  for column in df.columns:
+
+                      name = (
+                          str(column)
+                          .strip()
+                          .lower()
+                      )
+
+
+                      if name in {
+                          "date",
+                          "datetime",
+                          "time",
+                          "timestamp",
+                      }:
+
+                          rename[column] = (
+                              "timestamp"
+                          )
+
+
+                      elif name in {
+                          "open",
+                          "o",
+                      }:
+
+                          rename[column] = (
+                              "open"
+                          )
+
+
+                      elif name in {
+                          "high",
+                          "h",
+                      }:
+
+                          rename[column] = (
+                              "high"
+                          )
+
+
+                      elif name in {
+                          "low",
+                          "l",
+                      }:
+
+                          rename[column] = (
+                              "low"
+                          )
+
+
+                      elif name in {
+                          "close",
+                          "c",
+                      }:
+
+                          rename[column] = (
+                              "close"
+                          )
+
+
+                      elif name in {
+                          "volume",
+                          "vol",
+                          "tick_volume",
+                      }:
+
+                          rename[column] = (
+                              "volume"
+                          )
+
+
+                  df = df.rename(
+                      columns=rename
+                  )
+
+
+                  required = {
+                      "timestamp",
+                      "open",
+                      "high",
+                      "low",
+                      "close",
+                  }
+
+
+                  missing = (
+                      required
+                      - set(df.columns)
+                  )
+
+
+                  if missing:
+
+                      raise SystemExit(
+                          f"{source}: missing "
+                          f"{sorted(missing)}"
+                      )
+
+
+                  raw_timestamp = (
+                      df["timestamp"]
+                  )
+
+
+                  if pd.api.types.is_numeric_dtype(
+                      raw_timestamp
+                  ):
+
+                      df["timestamp"] = (
+                          pd.to_datetime(
+                              pd.to_numeric(
+                                  raw_timestamp,
+                                  errors="coerce",
+                              ),
+                              unit="ms",
+                              utc=True,
+                              errors="coerce",
+                          )
+                      )
+
+                  else:
+
+                      df["timestamp"] = (
+                          pd.to_datetime(
+                              raw_timestamp,
+                              utc=True,
+                              errors="coerce",
+                          )
+                      )
+
+
+                  for column in [
+                      "open",
+                      "high",
+                      "low",
+                      "close",
+                  ]:
+
+                      df[column] = (
+                          pd.to_numeric(
+                              df[column],
+                              errors="coerce",
+                          )
+                      )
+
+
+                  if "volume" not in df.columns:
+
+                      df["volume"] = 0.0
+
+                  else:
+
+                      df["volume"] = (
+                          pd.to_numeric(
+                              df["volume"],
+                              errors="coerce",
+                          )
+                      )
+
+
+                  df = df.dropna(
+                      subset=[
+                          "timestamp",
+                          "open",
+                          "high",
+                          "low",
+                          "close",
+                      ]
+                  )
+
+
+                  frames.append(
+                      df[
+                          [
+                              "timestamp",
+                              "open",
+                              "high",
+                              "low",
+                              "close",
+                              "volume",
+                          ]
+                      ]
+                  )
+
+
+              out = pd.concat(
+                  frames,
+                  ignore_index=True,
+              )
+
+
+              out = (
+                  out
+                  .sort_values(
+                      "timestamp"
+                  )
+                  .drop_duplicates(
+                      "timestamp",
+                      keep="last",
+                  )
+                  .reset_index(
+                      drop=True
+                  )
+              )
+
+
+              invalid = (
+
+                  (out["open"] <= 0)
+
+                  | (out["high"] <= 0)
+
+                  | (out["low"] <= 0)
+
+                  | (out["close"] <= 0)
+
+                  | (
+                      out["high"]
+                      < out["low"]
+                  )
+
+                  | (
+                      out["open"]
+                      < out["low"]
+                  )
+
+                  | (
+                      out["open"]
+                      > out["high"]
+                  )
+
+                  | (
+                      out["close"]
+                      < out["low"]
+                  )
+
+                  | (
+                      out["close"]
+                      > out["high"]
+                  )
+              )
+
+
+              if invalid.any():
+
+                  raise SystemExit(
+                      f"{output_file}: "
+                      f"invalid OHLC rows: "
+                      f"{int(invalid.sum())}"
+                  )
+
+
+              start = pd.Timestamp(
+                  "2024-01-01",
+                  tz="UTC",
+              )
+
+
+              end = pd.Timestamp(
+                  "2026-10-01",
+                  tz="UTC",
+              )
+
+
+              out = out[
+                  (
+                      out["timestamp"]
+                      >= start
+                  )
+                  &
+                  (
+                      out["timestamp"]
+                      < end
+                  )
+              ].copy()
+
+
+              if len(out) < minimum_rows:
+
+                  raise SystemExit(
+                      f"{output_file}: only "
+                      f"{len(out):,} rows. "
+                      f"Expected at least "
+                      f"{minimum_rows:,}."
+                  )
+
+
+              if (
+                  out["timestamp"].min()
+                  >= pd.Timestamp(
+                      "2025-01-01",
+                      tz="UTC",
+                  )
+              ):
+
+                  raise SystemExit(
+                      f"{output_file}: "
+                      "timestamp conversion "
+                      "appears incorrect."
+                  )
+
+
+              if (
+                  out["timestamp"].max()
+                  < pd.Timestamp(
+                      "2026-01-01",
+                      tz="UTC",
+                  )
+              ):
+
+                  raise SystemExit(
+                      f"{output_file}: "
+                      "2026 data missing."
+                  )
+
+
+              output_file = Path(
+                  output_file
+              )
+
+              output_file.parent.mkdir(
+                  parents=True,
+                  exist_ok=True,
+              )
+
+
+              out.to_csv(
+                  output_file,
+                  index=False,
+              )
+
+
+              print()
+              print(
+                  f"VALIDATED: "
+                  f"{output_file}"
+              )
+              print(
+                  f"Rows: {len(out):,}"
+              )
+              print(
+                  f"First: "
+                  f"{out['timestamp'].min()}"
+              )
+              print(
+                  f"Last: "
+                  f"{out['timestamp'].max()}"
+              )
+              print()
+
+
+          normalize(
+              ROOT / "raw_h1",
+              ROOT
+              / "xauusd_h1_2024_2026_normalized.csv",
+              5000,
+          )
+
+
+          normalize(
+              ROOT / "raw_m15",
+              ROOT
+              / "xauusd_m15_2024_2026_normalized.csv",
+              15000,
+          )
+
+
+          normalize(
+              ROOT / "raw_m5",
+              ROOT
+              / "xauusd_m5_2024_2026_normalized.csv",
+              40000,
+          )
+
+          PY
+
+
+      # ==========================================================
+      # FINAL DATA VALIDATION
+      # ==========================================================
+
+      - name: Validate V4 datasets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+
+          from pathlib import Path
+          import pandas as pd
+
+
+          files = [
+              (
+                  "H1",
+                  Path(
+                      "data/historical/"
+                      "xauusd_h1_2024_2026_normalized.csv"
+                  ),
+                  5000,
+              ),
+
+              (
+                  "M15",
+                  Path(
+                      "data/historical/"
+                      "xauusd_m15_2024_2026_normalized.csv"
+                  ),
+                  15000,
+              ),
+
+              (
+                  "M5",
+                  Path(
+                      "data/historical/"
+                      "xauusd_m5_2024_2026_normalized.csv"
+                  ),
+                  40000,
+              ),
+          ]
+
+
+          for name, path, minimum in files:
+
+              if not path.exists():
+
+                  raise SystemExit(
+                      f"{name}: file missing: {path}"
+                  )
+
+
+              df = pd.read_csv(
+                  path
+              )
+
+
+              if len(df) < minimum:
+
+                  raise SystemExit(
+                      f"{name}: only "
+                      f"{len(df):,} rows."
+                  )
+
+
+              ts = pd.to_datetime(
+                  df["timestamp"],
+                  utc=True,
+                  errors="coerce",
+              )
+
+
+              if ts.isna().any():
+
+                  raise SystemExit(
+                      f"{name}: invalid "
+                      "timestamps found."
+                  )
+
+
+              print(
+                  f"{name}: "
+                  f"{len(df):,} rows | "
+                  f"{ts.min()} -> {ts.max()}"
+              )
+
+
+          print()
+          print(
+              "ALL V4 DATASETS VALID."
+          )
+
+          PY
+
+
+      # ==========================================================
+      # RUN V4
+      # ==========================================================
+
+      - name: Run V4 research
+        env:
+          PYTHONUNBUFFERED: "1"
+
+        run: |
+
+          set -euo pipefail
+
+          rm -rf \
+            backtest_results/weekly_growth_v4
+
+
+          python \
+            scripts/run_weekly_growth_v4_research.py \
+            data/historical/xauusd_h1_2024_2026_normalized.csv \
+            data/historical/xauusd_m15_2024_2026_normalized.csv \
+            data/historical/xauusd_m5_2024_2026_normalized.csv \
+            backtest_results/weekly_growth_v4
+
+
+      # ==========================================================
+      # PRINT RESULT
+      # ==========================================================
+
+      - name: Print V4 result
+        if: always()
+
+        run: |
+
+          if [
+            -f
+            backtest_results/weekly_growth_v4/summary.txt
+          ]; then
+
+            cat \
+              backtest_results/weekly_growth_v4/summary.txt
+
+          else
+
+            echo \
+              "No V4 summary was produced."
+
+          fi
+
+
+      # ==========================================================
+      # UPLOAD RESULTS
+      # ==========================================================
+
+      - name: Upload V4 results
+        if: always()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+          name: raymond-weekly-growth-v4-results
+
+          path: |
+            backtest_results/weekly_growth_v4/
+            data/historical/xauusd_h1_2024_2026_normalized.csv
+            data/historical/xauusd_m15_2024_2026_normalized.csv
+            data/historical/xauusd_m5_2024_2026_normalized.csv
+
+          if-no-files-found: warn
+
+          retention-days: 14
