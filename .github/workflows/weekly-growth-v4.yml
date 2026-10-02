@@ -1,0 +1,197 @@
+name: Raymond Weekly Growth V4 Research
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  v4-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests
+
+      - name: Create data directory
+        run: |
+          mkdir -p data/historical
+          mkdir -p backtest_results/weekly_growth_v4
+
+      - name: Download XAUUSD H1 data
+        run: |
+          python - <<'PY'
+          import requests
+          import pandas as pd
+          from io import BytesIO
+          from pathlib import Path
+
+          output = Path(
+              "data/historical/xauusd_h1_2024_2026_normalized.csv"
+          )
+
+          urls = [
+              "https://datafeed.dukascopy.com/datafeed/XAUUSD/2024/01/XAUUSD_Candlestick_1_Hour_Bid_2024-01.zip"
+          ]
+
+          print("V4 data preparation")
+          print("Existing repository data will be used if available.")
+
+          if output.exists():
+              df = pd.read_csv(output)
+
+              print(
+                  f"Existing H1 dataset found: {len(df):,} rows"
+              )
+
+              if len(df) >= 300:
+                  print("H1 dataset is available.")
+              else:
+                  raise SystemExit(
+                      "Existing H1 dataset contains fewer than 300 rows."
+                  )
+          else:
+              raise SystemExit(
+                  "Required H1 dataset was not found. "
+                  "Keep the existing V3 historical dataset in "
+                  "data/historical/ before running V4."
+              )
+          PY
+
+      - name: Download M15 data
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          candidates = [
+              Path("data/historical/xauusd_m15_2024_2026_normalized.csv"),
+              Path("data/historical/xauusd_m15_2024_2026.csv"),
+          ]
+
+          found = next(
+              (p for p in candidates if p.exists()),
+              None,
+          )
+
+          if found is None:
+              raise SystemExit(
+                  "REAL M15 data is required for V4. "
+                  "No M15 dataset was found in data/historical/."
+              )
+
+          print(f"M15 dataset found: {found}")
+          PY
+
+      - name: Download M5 data
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          candidates = [
+              Path("data/historical/xauusd_m5_2024_2026_normalized.csv"),
+              Path("data/historical/xauusd_m5_2024_2026.csv"),
+          ]
+
+          found = next(
+              (p for p in candidates if p.exists()),
+              None,
+          )
+
+          if found is None:
+              raise SystemExit(
+                  "REAL M5 data is required for V4. "
+                  "No M5 dataset was found in data/historical/."
+              )
+
+          print(f"M5 dataset found: {found}")
+          PY
+
+      - name: Validate datasets
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          files = [
+              Path("data/historical/xauusd_h1_2024_2026_normalized.csv"),
+          ]
+
+          m15 = Path(
+              "data/historical/xauusd_m15_2024_2026_normalized.csv"
+          )
+
+          m5 = Path(
+              "data/historical/xauusd_m5_2024_2026_normalized.csv"
+          )
+
+          if not m15.exists():
+              m15 = Path(
+                  "data/historical/xauusd_m15_2024_2026.csv"
+              )
+
+          if not m5.exists():
+              m5 = Path(
+                  "data/historical/xauusd_m5_2024_2026.csv"
+              )
+
+          files.extend([m15, m5])
+
+          for path in files:
+              print()
+              print(f"Checking {path}")
+
+              df = pd.read_csv(path)
+
+              print(
+                  f"Rows: {len(df):,}"
+              )
+
+              if len(df) < 300:
+                  raise SystemExit(
+                      f"{path} has fewer than 300 rows."
+                  )
+
+              required = {
+                  "timestamp",
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              }
+
+              missing = required - set(df.columns)
+
+              if missing:
+                  raise SystemExit(
+                      f"{path} missing columns: {sorted(missing)}"
+                  )
+
+              print("Dataset OK.")
+          PY
+
+      - name: Run V4 research
+        run: |
+          python scripts/run_weekly_growth_v4_research.py \
+            data/historical/xauusd_h1_2024_2026_normalized.csv \
+            data/historical/xauusd_m15_2024_2026_normalized.csv \
+            data/historical/xauusd_m5_2024_2026_normalized.csv \
+            backtest_results/weekly_growth_v4
+
+      - name: Upload V4 research results
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-weekly-growth-v4-results
+          path: backtest_results/weekly_growth_v4/
+          if-no-files-found: error
