@@ -7,6 +7,9 @@ Persistent Position State
 Stage 16.3
 Persistent Trade Thesis
 
+Stage 18
+Exact Partial-Close Accounting
+
 This module performs small, idempotent schema upgrades for the
 existing SQLAlchemy database.
 
@@ -65,6 +68,11 @@ POSITION_COLUMNS = {
     # Performance tracking
     "max_drawdown": "FLOAT DEFAULT 0",
     "max_profit": "FLOAT DEFAULT 0",
+
+    # Stage 18 - exact partial-close accounting
+    "partial_close_price": "FLOAT",
+    "partial_close_quantity": "FLOAT",
+    "partial_close_pnl": "FLOAT",
 }
 
 
@@ -212,6 +220,15 @@ def migrate_stage_16_2() -> dict:
             if column_name == "trade_thesis":
                 continue
 
+            # Stage 18 is handled separately so that the
+            # migration has its own explicit audit trail.
+            if column_name in {
+                "partial_close_price",
+                "partial_close_quantity",
+                "partial_close_pnl",
+            }:
+                continue
+
             added = add_missing_column(
                 connection=connection,
                 table_name="positions",
@@ -324,6 +341,92 @@ def migrate_stage_16_3() -> dict:
 
 
 # ============================================================
+# STAGE 18 MIGRATION
+# ============================================================
+
+def migrate_stage_18() -> dict:
+    """
+    Apply the Stage 18 exact partial-close accounting schema.
+
+    Adds three optional fields to the existing positions table:
+
+        positions.partial_close_price
+        positions.partial_close_quantity
+        positions.partial_close_pnl
+
+    These fields allow future partial closes to preserve the
+    exact execution price, quantity closed, and realized P/L.
+
+    IMPORTANT:
+    This migration does NOT attempt to reconstruct historical
+    partial-close values. Existing historical rows remain
+    untouched and NULL in these fields when exact information
+    was never persisted.
+
+    The migration is idempotent.
+    """
+
+    added_columns = []
+    skipped_columns = []
+
+    stage_18_columns = {
+        "partial_close_price": POSITION_COLUMNS[
+            "partial_close_price"
+        ],
+        "partial_close_quantity": POSITION_COLUMNS[
+            "partial_close_quantity"
+        ],
+        "partial_close_pnl": POSITION_COLUMNS[
+            "partial_close_pnl"
+        ],
+    }
+
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+
+        table_names = inspector.get_table_names()
+
+        # ----------------------------------------------------
+        # POSITION TABLE MUST EXIST
+        # ----------------------------------------------------
+
+        if "positions" not in table_names:
+            raise RuntimeError(
+                "Stage 18 migration cannot run because the "
+                "'positions' table does not exist."
+            )
+
+        # ----------------------------------------------------
+        # ADD PARTIAL-CLOSE ACCOUNTING COLUMNS
+        # ----------------------------------------------------
+
+        for column_name, column_definition in stage_18_columns.items():
+
+            added = add_missing_column(
+                connection=connection,
+                table_name="positions",
+                column_name=column_name,
+                column_definition=column_definition,
+            )
+
+            if added:
+                added_columns.append(
+                    column_name
+                )
+            else:
+                skipped_columns.append(
+                    column_name
+                )
+
+    return {
+        "migration": "stage_18",
+        "status": "completed",
+        "added_columns": added_columns,
+        "skipped_existing_columns": skipped_columns,
+    }
+
+
+# ============================================================
 # STARTUP HELPER
 # ============================================================
 
@@ -331,9 +434,11 @@ def run_database_migrations() -> dict:
     """
     Run all currently required database migrations.
 
-    Stage 16.2 runs first and retains its original behavior.
+    Order:
 
-    Stage 16.3 then adds the persistent trade thesis column.
+        Stage 16.2
+        Stage 16.3
+        Stage 18
 
     Each migration remains independently idempotent.
     """
@@ -342,11 +447,14 @@ def run_database_migrations() -> dict:
 
     stage_16_3_result = migrate_stage_16_3()
 
+    stage_18_result = migrate_stage_18()
+
     return {
         "status": "completed",
         "migrations": [
             stage_16_2_result,
             stage_16_3_result,
+            stage_18_result,
         ],
     }
 
@@ -370,6 +478,7 @@ if __name__ == "__main__":
         print(
             f"Migration: {migration['migration']}"
         )
+
         print(
             f"Status: {migration['status']}"
         )
@@ -387,6 +496,18 @@ if __name__ == "__main__":
                 )
 
         if migration.get(
+            "skipped_existing_columns"
+        ):
+            print("Already existing columns:")
+
+            for column in migration[
+                "skipped_existing_columns"
+            ]:
+                print(
+                    f"  = {column}"
+                )
+
+        if migration.get(
             "created_indexes"
         ):
             print("Created indexes:")
@@ -396,4 +517,16 @@ if __name__ == "__main__":
             ]:
                 print(
                     f"  + {index_name}"
+                )
+
+        if migration.get(
+            "skipped_existing_indexes"
+        ):
+            print("Already existing indexes:")
+
+            for index_name in migration[
+                "skipped_existing_indexes"
+            ]:
+                print(
+                    f"  = {index_name}"
                 )
