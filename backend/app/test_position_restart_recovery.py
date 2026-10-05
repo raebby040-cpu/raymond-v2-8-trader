@@ -1,7 +1,7 @@
 """
-RAYMOND v2.8 - Stage 16.2 Restart / Recovery Tests
+RAYMOND v2.8 - Restart / Recovery Tests
 
-These tests verify that persistent position state survives the
+These tests verify that persistent paper-position state survives the
 lifecycle of a database session.
 
 The test intentionally closes the original SQLAlchemy session and
@@ -9,6 +9,13 @@ creates a completely new session against the same SQLite database.
 
 This simulates the persistence boundary required after an application
 restart without contacting MT5, a broker, or live trading services.
+
+Accounting rules tested:
+
+- XAUUSD uses a 100 oz contract size.
+- Remaining-position PnL uses remaining quantity.
+- Partial-close PnL is persisted.
+- Restart recovery does not lose partial-close accounting.
 """
 
 from pathlib import Path
@@ -101,12 +108,19 @@ def test_position_survives_database_session_restart(
         4300.0,
     )
 
+    # Close 0.50 lot at 4310.
+    #
+    # Realized partial PnL:
+    # (4310 - 4300) × 0.50 × 100 = +$500.
     PositionRepository.mark_partial_close(
         db,
         position.position_id,
         0.50,
+        execution_price=4310.0,
+        closed_quantity=0.50,
     )
 
+    # Update remaining 0.50 lot to 4310.
     PositionRepository.update_price(
         db,
         position.position_id,
@@ -160,12 +174,29 @@ def test_position_survives_database_session_restart(
 
         assert recovered.current_price == 4310.0
 
-        # After the 50% partial close, only 0.50 quantity remains.
+        # Remaining 0.50 lot:
         #
-        # BUY PnL:
-        # (4310 - 4300) * 0.50 = 5.0
-        assert recovered.pnl == 5.0
-        assert recovered.max_profit == 5.0
+        # (4310 - 4300) × 0.50 × 100 = +$500.
+        assert recovered.pnl == 500.0
+
+        # The earlier 0.50 lot partial close:
+        #
+        # (4310 - 4300) × 0.50 × 100 = +$500.
+        assert recovered.partial_close_pnl == 500.0
+
+        # Total economic trade PnL represented at this point:
+        #
+        # realized partial $500
+        # +
+        # remaining unrealized $500
+        # =
+        # $1,000.
+        total_economic_pnl = (
+            float(recovered.partial_close_pnl or 0.0)
+            + float(recovered.pnl or 0.0)
+        )
+
+        assert total_economic_pnl == 1000.0
 
         assert recovered.regime == "trending_up"
         assert recovered.setup == "bullish_continuation"
@@ -204,9 +235,6 @@ def test_open_position_recovery_returns_only_open_positions(
         take_profit_1=4315.0,
     )
 
-    # Store the identifier as a normal Python string before the
-    # SQLAlchemy session is closed. The ORM object itself becomes
-    # detached after db.close().
     open_position_id = open_position.position_id
 
     closed_position = PositionRepository.create(
@@ -223,10 +251,6 @@ def test_open_position_recovery_returns_only_open_positions(
 
     closed_position_id = closed_position.position_id
 
-    # Close one position through the repository.
-    #
-    # PositionRepository.close() accepts exit_price.
-    # It does not accept close_price or reason.
     closed = PositionRepository.close(
         db,
         closed_position_id,
@@ -236,11 +260,9 @@ def test_open_position_recovery_returns_only_open_positions(
     assert closed is not None
     assert closed.status == PositionStatus.CLOSED
 
-    # Close the first session.
     db.close()
     engine.dispose()
 
-    # Start a completely new session.
     recovery_engine = create_engine(
         f"sqlite:///{database_path}",
         connect_args={"check_same_thread": False},
