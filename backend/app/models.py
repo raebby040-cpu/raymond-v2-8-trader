@@ -49,7 +49,11 @@ class TradeDirection(str, enum.Enum):
 class Trade(Base):
     __tablename__ = "trades"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
 
     trade_id = Column(
         String,
@@ -213,6 +217,8 @@ class Position(Base):
 
     Stage 16.3 adds persistent trade thesis storage.
 
+    Stage 18 adds exact partial-close accounting.
+
     Important compatibility rules:
     - Existing quantity is retained.
     - Existing stop_loss is retained.
@@ -221,6 +227,8 @@ class Position(Base):
     - Existing positions can therefore be upgraded without losing data.
     - trade_id is used as the paper-execution/idempotency linkage key.
     - trade_thesis is nullable so existing Stage 16.2 positions remain valid.
+    - Stage 18 partial-close fields are nullable so all historical
+      positions remain compatible.
     """
 
     __tablename__ = "positions"
@@ -404,6 +412,7 @@ class Position(Base):
     #
     # Nullable because positions created before Stage 16.3 do
     # not have this field populated.
+
     trade_thesis = Column(
         String,
         nullable=True,
@@ -425,6 +434,31 @@ class Position(Base):
         nullable=False,
     )
 
+    # --------------------------------------------------------
+    # STAGE 18 - EXACT PARTIAL-CLOSE ACCOUNTING
+    # --------------------------------------------------------
+    #
+    # These fields record the realized portion of a partial close
+    # separately from the remaining position.
+    #
+    # This prevents future audits from having to guess the
+    # partial-close execution price or realized P/L.
+
+    partial_close_price = Column(
+        Float,
+        nullable=True,
+    )
+
+    partial_close_quantity = Column(
+        Float,
+        nullable=True,
+    )
+
+    partial_close_pnl = Column(
+        Float,
+        nullable=True,
+    )
+
     trailing_active = Column(
         Integer,
         default=0,
@@ -440,6 +474,7 @@ class Position(Base):
     # trailing
     # exiting
     # closed
+
     management_status = Column(
         String,
         default="open",
@@ -611,7 +646,12 @@ def create_tables():
 
     Stage 16.3 similarly requires the database migration to add
     trade_thesis to an existing positions table.
+
+    Stage 18 similarly requires the database migration to add
+    the partial-close accounting columns to an existing
+    positions table.
     """
+
     Base.metadata.create_all(
         bind=engine
     )
