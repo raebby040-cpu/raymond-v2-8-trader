@@ -4,12 +4,18 @@ RAYMOND v2.8 - Paper Position Manager Tests
 Stage 17
 Advanced Trade Management Integration
 
+Stage 18
+Exact Partial-Close Accounting
+
 These tests verify that the integration layer:
+
 - updates persistent paper prices,
 - delegates decisions to AdvancedTradeManager,
 - persists break-even,
 - persists trailing stops,
 - persists partial closes,
+- passes exact execution price to partial-close persistence,
+- passes exact closed quantity,
 - prevents duplicate management actions,
 - supports BUY and SELL,
 - remains paper-only,
@@ -23,7 +29,6 @@ import pytest
 
 from app.advanced_trade_management import (
     ManagementAction,
-    ManagementDecision,
     TradeDirection,
 )
 from app.models import PositionStatus
@@ -378,11 +383,23 @@ def test_sell_trailing_stop_that_improves_protection_is_persisted(db):
     assert result.new_stop_loss == 4292.0
 
 
-def test_partial_close_is_persisted(db):
+def test_partial_close_is_persisted_with_exact_execution_details(db):
+    """
+    The manager must pass both:
+
+        execution_price
+        closed_quantity
+
+    to the repository.
+
+    This is required for exact realized P/L reconciliation.
+    """
+
     position = make_position(
         quantity=1.0,
         current_price=4320.0,
     )
+
     updated = make_position(
         quantity=1.0,
         current_price=4320.0,
@@ -419,6 +436,8 @@ def test_partial_close_is_persisted(db):
         db,
         "paper-position-1",
         0.5,
+        execution_price=4320.0,
+        closed_quantity=0.5,
     )
 
     assert result.action == ManagementAction.PARTIAL_CLOSE.value
@@ -615,5 +634,3 @@ def test_manager_never_calls_broker_or_mt5():
 
     fake_broker.assert_not_called()
     fake_mt5.assert_not_called()
-
-
