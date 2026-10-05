@@ -9,6 +9,10 @@ existing RAYMOND Step 13 decision.
 Also exposes the persistent PAPER position state required by
 the Android trading terminal.
 
+Also exposes a READ-ONLY historical XAUUSD P/L reconciliation
+endpoint used to identify positions whose stored P/L was recorded
+using the old pre-contract-size calculation.
+
 SAFETY
 ------
 All endpoints in this router are READ-ONLY.
@@ -22,16 +26,9 @@ They do NOT:
 - bypass Step 14 Risk Engine
 - replace Step 13
 - enable live trading
+- modify historical database P/L
 
 The existing RAYMOND Step 13 decision remains authoritative.
-
-The advisory endpoint only compares:
-
-    RAYMOND Step 13
-            +
-    8 independent advisory brains
-            =
-    advisory comparison
 """
 
 from __future__ import annotations
@@ -49,7 +46,7 @@ try:
         AITradingDecisionEngine,
     )
     from .database import get_db
-    from .models import Position
+    from .models import Position, PositionStatus
     from .online_market_api import (
         _context,
         _decision_payload,
@@ -68,7 +65,7 @@ except ImportError:
         AITradingDecisionEngine,
     )
     from database import get_db
-    from models import Position
+    from models import Position, PositionStatus
     from online_market_api import (
         _context,
         _decision_payload,
@@ -89,6 +86,8 @@ router = APIRouter(
 
 _ai = AITradingDecisionEngine()
 
+XAUUSD_CONTRACT_SIZE = 100.0
+
 
 def _utc() -> str:
     """Return the current UTC timestamp."""
@@ -98,9 +97,6 @@ def _utc() -> str:
 def _enum_value(value: Any) -> Any:
     """
     Safely serialize enum-like values.
-
-    SQLAlchemy Enum fields may arrive as enum instances,
-    while compatibility code may provide strings.
     """
     if hasattr(value, "value"):
         return value.value
@@ -181,8 +177,6 @@ def _position_to_dict(
         else None
     )
 
-    # Calculate current R from the original price-distance
-    # risk where available.
     current_r = 0.0
 
     if (
@@ -230,7 +224,6 @@ def _position_to_dict(
             else "paper"
         ),
 
-        # Original trade.
         "entry_price": entry_price,
         "original_quantity": (
             float(original_quantity)
@@ -254,7 +247,6 @@ def _position_to_dict(
         ),
         "risk_1r": risk_1r,
 
-        # Current position.
         "current_price": current_price,
         "current_stop_loss": (
             float(current_stop_loss)
@@ -282,7 +274,6 @@ def _position_to_dict(
             else None
         ),
 
-        # Performance.
         "pnl": pnl,
         "pnl_percent": pnl_percent,
         "current_r": current_r,
@@ -293,7 +284,6 @@ def _position_to_dict(
             position.max_drawdown or 0.0
         ),
 
-        # Entry intelligence.
         "regime": position.regime,
         "setup": position.setup,
         "technical_score": (
@@ -313,7 +303,6 @@ def _position_to_dict(
         ),
         "trade_thesis": position.trade_thesis,
 
-        # Management.
         "break_even_applied": bool(
             position.break_even_applied
         ),
@@ -335,7 +324,6 @@ def _position_to_dict(
             )
         ),
 
-        # Lifecycle.
         "opened_at": _datetime_value(
             position.opened_at
         ),
@@ -343,7 +331,6 @@ def _position_to_dict(
             position.closed_at
         ),
 
-        # Hard safety declaration.
         "paper_only": True,
         "read_only": True,
         "live_trading_enabled": False,
@@ -391,10 +378,6 @@ async def advisory_analysis(
 
         context = _context(indicators)
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Existing RAYMOND Step 13 remains authoritative.
-        # ----------------------------------------------------
         decision = _ai.evaluate(context)
 
         comparison = analyze_and_compare(
@@ -434,21 +417,12 @@ async def advisory_analysis(
             indicators
         ),
 
-        # ----------------------------------------------------
-        # OFFICIAL RAYMOND STEP 13 DECISION
-        # ----------------------------------------------------
         "raymond": _decision_payload(
             decision
         ),
 
-        # ----------------------------------------------------
-        # 8-BRAIN ADVISORY COMPARISON
-        # ----------------------------------------------------
         "advisory_comparison": comparison,
 
-        # ----------------------------------------------------
-        # HARD SAFETY FLAGS
-        # ----------------------------------------------------
         "safety": {
             "read_only": True,
             "advisory_only": True,
@@ -491,17 +465,6 @@ def paper_positions(
     Return persistent PAPER positions for the trading terminal.
 
     This endpoint is READ-ONLY.
-
-    It does NOT:
-    - create positions,
-    - modify stops,
-    - close trades,
-    - execute management actions,
-    - contact MT5,
-    - contact a broker.
-
-    It simply exposes the authoritative persistent position
-    state already maintained by PositionRepository.
     """
 
     try:
@@ -603,6 +566,291 @@ def paper_positions(
 
         "safety": {
             "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "execution_authorized": False,
+            "broker_orders_allowed": False,
+            "risk_engine_bypass": False,
+        },
+
+        "timestamp": _utc(),
+    }
+
+
+@router.get("/paper-pnl-reconciliation")
+def paper_pnl_reconciliation(
+    symbol: str = Query(
+        "XAUUSD",
+        min_length=1,
+        max_length=32,
+    ),
+    limit: int = Query(
+        500,
+        ge=1,
+        le=500,
+    ),
+    offset: int = Query(
+        0,
+        ge=0,
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    READ-ONLY historical P/L reconciliation.
+
+    Purpose
+    -------
+    Compare the P/L stored in historical PAPER positions against
+    the corrected XAUUSD contract-size calculation.
+
+    Standard XAUUSD assumption used by RAYMOND:
+
+        1.00 lot = 100 oz
+
+    Therefore:
+
+        P/L = price movement × lot size × 100
+
+    Example:
+
+        BUY  2056 -> 2050 at 0.02 lot = -$12
+        SELL 2056 -> 2050 at 0.02 lot = +$12
+
+    IMPORTANT
+    ---------
+    This endpoint DOES NOT modify the database.
+
+    It only reports:
+
+        stored P/L
+        corrected P/L
+        difference
+
+    Historical P/L values remain untouched.
+    """
+
+    normalized_symbol = symbol.strip().upper()
+
+    if normalized_symbol != "XAUUSD":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "P/L reconciliation is currently "
+                    "implemented for XAUUSD only."
+                ),
+                "symbol": normalized_symbol,
+            },
+        )
+
+    contract_size = XAUUSD_CONTRACT_SIZE
+
+    try:
+        query = (
+            db.query(Position)
+            .filter(
+                Position.status
+                == PositionStatus.CLOSED
+            )
+            .filter(
+                Position.symbol
+                == normalized_symbol
+            )
+            .order_by(
+                Position.closed_at.desc()
+            )
+        )
+
+        positions = (
+            query
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": (
+                    "Unable to load closed positions "
+                    "for P/L reconciliation."
+                ),
+                "message": str(exc),
+                "timestamp": _utc(),
+            },
+        ) from exc
+
+    reconciled = []
+
+    stored_pnl_total = 0.0
+    corrected_pnl_total = 0.0
+    pnl_difference_total = 0.0
+
+    partial_close_review_count = 0
+
+    for position in positions:
+        entry_price = (
+            float(position.entry_price)
+            if position.entry_price is not None
+            else None
+        )
+
+        exit_price = (
+            float(position.current_price)
+            if position.current_price is not None
+            else None
+        )
+
+        quantity = (
+            float(position.original_quantity)
+            if position.original_quantity is not None
+            else float(position.quantity or 0.0)
+        )
+
+        stored_pnl = float(
+            position.pnl or 0.0
+        )
+
+        direction = str(
+            _enum_value(position.direction)
+        ).lower()
+
+        partial_close_applied = bool(
+            position.partial_close_applied
+        )
+
+        if partial_close_applied:
+            partial_close_review_count += 1
+
+        if (
+            entry_price is None
+            or exit_price is None
+        ):
+            corrected_pnl = None
+            pnl_difference = None
+            calculation_status = (
+                "insufficient_price_data"
+            )
+        else:
+            if direction == "buy":
+                price_move = (
+                    exit_price - entry_price
+                )
+            elif direction == "sell":
+                price_move = (
+                    entry_price - exit_price
+                )
+            else:
+                price_move = 0.0
+
+            corrected_pnl = (
+                price_move
+                * quantity
+                * contract_size
+            )
+
+            pnl_difference = (
+                corrected_pnl - stored_pnl
+            )
+
+            if partial_close_applied:
+                calculation_status = (
+                    "partial_close_manual_review"
+                )
+            else:
+                calculation_status = (
+                    "reconciled"
+                )
+
+            stored_pnl_total += stored_pnl
+            corrected_pnl_total += corrected_pnl
+            pnl_difference_total += pnl_difference
+
+        reconciled.append(
+            {
+                "id": position.id,
+                "position_id": position.position_id,
+                "trade_id": position.trade_id,
+
+                "symbol": position.symbol,
+                "direction": direction,
+
+                "status": _enum_value(
+                    position.status
+                ),
+
+                "entry_price": entry_price,
+                "recorded_exit_price": exit_price,
+                "original_quantity": quantity,
+
+                "stored_pnl": stored_pnl,
+                "corrected_pnl": corrected_pnl,
+                "pnl_difference": pnl_difference,
+
+                "contract_size": contract_size,
+
+                "partial_close_applied": (
+                    partial_close_applied
+                ),
+
+                "calculation_status": (
+                    calculation_status
+                ),
+
+                "opened_at": _datetime_value(
+                    position.opened_at
+                ),
+                "closed_at": _datetime_value(
+                    position.closed_at
+                ),
+            }
+        )
+
+    return {
+        "accepted": True,
+
+        "reconciliation": {
+            "symbol": normalized_symbol,
+            "contract_size": contract_size,
+            "positions_reconciled": len(
+                reconciled
+            ),
+            "partial_close_manual_review": (
+                partial_close_review_count
+            ),
+
+            "stored_pnl_total": (
+                round(stored_pnl_total, 10)
+            ),
+
+            "corrected_pnl_total": (
+                round(corrected_pnl_total, 10)
+            ),
+
+            "pnl_difference_total": (
+                round(pnl_difference_total, 10)
+            ),
+
+            "formula": (
+                "price movement × original lot quantity "
+                "× 100 contract size"
+            ),
+        },
+
+        "positions": reconciled,
+
+        "query": {
+            "symbol": normalized_symbol,
+            "limit": limit,
+            "offset": offset,
+        },
+
+        "safety": {
+            "read_only": True,
+            "database_modified": False,
+            "historical_pnl_modified": False,
+            "strategy_modified": False,
             "paper_only": True,
             "live_trading_enabled": False,
             "execution_authorized": False,
