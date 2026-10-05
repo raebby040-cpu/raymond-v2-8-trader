@@ -1,0 +1,192 @@
+name: Monthly Trade Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Month to audit (YYYY-MM)"
+        required: true
+        default: "2026-09"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  monthly-trade-audit:
+    name: Run Monthly Trade Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif [ -f backend/requirements.txt ]; then
+            pip install -r backend/requirements.txt
+          else
+            echo "No requirements.txt found."
+            exit 1
+          fi
+
+      - name: Validate month
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+
+          month = os.environ["AUDIT_MONTH"]
+
+          if not re.fullmatch(r"\d{4}-\d{2}", month):
+              raise SystemExit(
+                  f"Invalid month: {month}. Expected format YYYY-MM."
+              )
+
+          year, month_number = map(int, month.split("-"))
+
+          if not 1 <= month_number <= 12:
+              raise SystemExit(
+                  f"Invalid month: {month}. Month must be between 01 and 12."
+              )
+
+          if not 2000 <= year <= 2100:
+              raise SystemExit(
+                  f"Invalid year: {year}."
+              )
+
+          print(f"Auditing month: {month}")
+          PY
+
+      - name: Run September/monthly trade audit
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python scripts/monthly_trade_audit.py "$AUDIT_MONTH"
+
+      - name: Verify audit output
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          AUDIT_DIR="backtest_results/monthly_trade_audits/$AUDIT_MONTH"
+
+          if [ ! -f "$AUDIT_DIR/audit.json" ]; then
+            echo "ERROR: audit.json was not generated."
+            exit 1
+          fi
+
+          if [ ! -f "$AUDIT_DIR/audit.md" ]; then
+            echo "ERROR: audit.md was not generated."
+            exit 1
+          fi
+
+          echo "Audit files generated successfully:"
+          ls -lh "$AUDIT_DIR"
+
+      - name: Validate research-only safety
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          month = os.environ["AUDIT_MONTH"]
+          path = Path(
+              "backtest_results",
+              "monthly_trade_audits",
+              month,
+              "audit.json",
+          )
+
+          with path.open("r", encoding="utf-8") as f:
+              report = json.load(f)
+
+          if report.get("research_only") is not True:
+              raise SystemExit(
+                  "SAFETY CHECK FAILED: report is not marked research_only=true."
+              )
+
+          if report.get("live_trading_changed") is not False:
+              raise SystemExit(
+                  "SAFETY CHECK FAILED: live_trading_changed is not false."
+              )
+
+          print("Research-only safety check PASSED.")
+          print(f"research_only={report.get('research_only')}")
+          print(
+              f"live_trading_changed="
+              f"{report.get('live_trading_changed')}"
+          )
+          PY
+
+      - name: Display audit summary
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          month = os.environ["AUDIT_MONTH"]
+
+          path = Path(
+              "backtest_results",
+              "monthly_trade_audits",
+              month,
+              "audit.json",
+          )
+
+          with path.open("r", encoding="utf-8") as f:
+              report = json.load(f)
+
+          performance = report.get("performance", {})
+          accounting = report.get("accounting_reconciliation", {})
+
+          print("")
+          print("==========================================")
+          print(f" RAYMOND MONTHLY TRADE AUDIT - {month}")
+          print("==========================================")
+          print(f"Trades:       {performance.get('trades')}")
+          print(f"Wins:         {performance.get('wins')}")
+          print(f"Losses:       {performance.get('losses')}")
+          print(f"Win rate:     {performance.get('win_rate')}")
+          print(f"Total PnL:    {performance.get('total_pnl')}")
+          print(f"Gross profit: {performance.get('gross_profit')}")
+          print(f"Gross loss:   {performance.get('gross_loss')}")
+          print(f"Profit factor:{performance.get('profit_factor')}")
+          print("")
+          print(
+              "Accounting reconciled: "
+              f"{accounting.get('accounting_reconciled')}"
+          )
+          print(
+              "Reconciliation difference: "
+              f"{accounting.get('difference')}"
+          )
+          print("==========================================")
+          PY
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-trade-audit-${{ inputs.month }}
+          path: |
+            backtest_results/monthly_trade_audits/${{ inputs.month }}/audit.json
+            backtest_results/monthly_trade_audits/${{ inputs.month }}/audit.md
+          if-no-files-found: error
+          retention-days: 90
