@@ -20,6 +20,7 @@ Responsibilities:
 - Prevent duplicate position creation.
 - Keep database transactions atomic.
 - Work with both SQLite and PostgreSQL.
+- Calculate XAUUSD paper PnL using the correct contract size.
 
 This module does NOT:
 - place broker orders,
@@ -62,6 +63,41 @@ class PositionRepository:
     failed mutations so a partially written position state is
     never intentionally left pending in the caller's session.
     """
+
+    # ========================================================
+    # SYMBOL ACCOUNTING
+    # ========================================================
+
+    # Standard XAUUSD contract specification used by RAYMOND.
+    #
+    # 1.00 lot = 100 troy ounces.
+    #
+    # Therefore:
+    #   $1.00 gold price movement × 0.01 lot = $1.00
+    #   $1.00 gold price movement × 0.02 lot = $2.00
+    #   $6.00 gold price movement × 0.02 lot = $12.00
+    #
+    # Example:
+    #   BUY 2056 -> 2050 at 0.02 lot = -$12
+    #   SELL 2056 -> 2050 at 0.02 lot = +$12
+    XAUUSD_CONTRACT_SIZE = 100.0
+
+    @staticmethod
+    def _contract_size(symbol: str) -> float:
+        """
+        Return the contract size used for persistent paper PnL.
+
+        XAUUSD is explicitly modeled as 100 oz per 1.00 lot.
+
+        Other symbols retain the legacy multiplier of 1.0 until
+        their broker-specific contract specification is wired into
+        this persistence layer.
+        """
+
+        if str(symbol).upper() == "XAUUSD":
+            return PositionRepository.XAUUSD_CONTRACT_SIZE
+
+        return 1.0
 
     # ========================================================
     # NORMALIZATION HELPERS
@@ -127,23 +163,47 @@ class PositionRepository:
         if position.remaining_quantity is not None:
             position.quantity = position.remaining_quantity
 
+    # ========================================================
+    # PNL CALCULATION
+    # ========================================================
+
     @staticmethod
     def _calculate_pnl(
         position: Position,
         current_price: Optional[float],
     ) -> float:
         """
-        Calculate paper unrealized PnL using price movement.
+        Calculate paper unrealized PnL using price movement,
+        lot quantity, and the symbol contract size.
 
-        This is a price-distance calculation. Broker-specific
-        contract specifications remain the responsibility of the
-        risk/execution layers.
+        For standard XAUUSD:
+
+            PnL =
+                price movement
+                × lot quantity
+                × 100
+
+        Example:
+
+            BUY 2056 -> 2050 at 0.02 lot:
+
+                (2050 - 2056) × 0.02 × 100
+                = -$12
+
+            SELL 2056 -> 2050 at 0.02 lot:
+
+                (2056 - 2050) × 0.02 × 100
+                = +$12
 
         BUY:
-            (current - entry) * quantity
+            (current - entry) × quantity × contract_size
 
         SELL:
-            (entry - current) * quantity
+            (entry - current) × quantity × contract_size
+
+        IMPORTANT:
+        initial_stop_loss and risk_1r are not modified here.
+        This method only calculates current paper PnL.
         """
 
         if current_price is None:
@@ -162,16 +222,29 @@ class PositionRepository:
             position.direction
         )
 
+        contract_size = PositionRepository._contract_size(
+            position.symbol
+        )
+
+        entry_price = float(position.entry_price)
+        market_price = float(current_price)
+        lots = float(quantity)
+
         if direction == TradeDirection.BUY.value:
             return (
-                float(current_price)
-                - float(position.entry_price)
-            ) * float(quantity)
+                market_price
+                - entry_price
+            ) * lots * contract_size
 
-        return (
-            float(position.entry_price)
-            - float(current_price)
-        ) * float(quantity)
+        if direction == TradeDirection.SELL.value:
+            return (
+                entry_price
+                - market_price
+            ) * lots * contract_size
+
+        raise ValueError(
+            f"Unsupported position direction: {position.direction}"
+        )
 
     @staticmethod
     def _calculate_pnl_percent(
@@ -179,7 +252,14 @@ class PositionRepository:
         pnl: float,
     ) -> float:
         """
-        Calculate PnL percentage relative to entry notional.
+        Calculate PnL percentage relative to the entry notional.
+
+        The entry notional includes the symbol contract size.
+
+        For XAUUSD:
+
+            entry_notional =
+                entry_price × lots × 100
         """
 
         quantity = (
@@ -191,9 +271,14 @@ class PositionRepository:
         if not quantity:
             return 0.0
 
+        contract_size = PositionRepository._contract_size(
+            position.symbol
+        )
+
         entry_notional = (
             abs(float(position.entry_price))
             * float(quantity)
+            * contract_size
         )
 
         if entry_notional == 0:
@@ -305,10 +390,6 @@ class PositionRepository:
 
         # ----------------------------------------------------
         # Validate immutable opening risk BEFORE persistence.
-        #
-        # This prevents new malformed paper positions from
-        # entering the database with an invalid directional SL
-        # or TP configuration.
         # ----------------------------------------------------
 
         entry = float(entry_price)
@@ -337,6 +418,7 @@ class PositionRepository:
             )
 
         if direction_enum == TradeDirection.BUY:
+
             if initial_stop >= entry:
                 raise ValueError(
                     "BUY initial_stop_loss must be below entry_price."
@@ -359,6 +441,7 @@ class PositionRepository:
                 )
 
         elif direction_enum == TradeDirection.SELL:
+
             if initial_stop <= entry:
                 raise ValueError(
                     "SELL initial_stop_loss must be above entry_price."
@@ -448,9 +531,6 @@ class PositionRepository:
             confluence=confluence,
             confidence=confidence,
 
-            # Stage 16.3:
-            # Persist the Step 13 AI reasoning that produced
-            # the trade decision.
             trade_thesis=trade_thesis,
 
             break_even_applied=0,
@@ -480,8 +560,6 @@ class PositionRepository:
         except IntegrityError:
             db.rollback()
 
-            # Another request/process may have created the same
-            # position between our lookup and commit.
             existing = None
 
             if trade_id:
@@ -521,7 +599,7 @@ class PositionRepository:
         position_id: str,
     ) -> Optional[Position]:
         """
-        Load one position by its persistent position_id.
+        Load one position by persistent position_id.
         """
 
         return (
@@ -626,6 +704,7 @@ class PositionRepository:
         )
 
         position.pnl = pnl
+
         position.pnl_percent = (
             PositionRepository._calculate_pnl_percent(
                 position,
@@ -685,7 +764,6 @@ class PositionRepository:
             new_stop_loss
         )
 
-        # Maintain compatibility with existing API consumers.
         position.stop_loss = float(
             new_stop_loss
         )
@@ -1237,8 +1315,6 @@ class PositionRepository:
             "confluence": position.confluence,
             "confidence": position.confidence,
 
-            # Stage 16.3:
-            # Persistent Step 13 AI trade thesis.
             "trade_thesis": getattr(
                 position,
                 "trade_thesis",
