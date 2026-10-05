@@ -200,8 +200,11 @@ def test_price_update_persists_pnl_and_extremes(db_session):
 
     assert updated is not None
     assert updated.current_price == 4310.0
-    assert updated.pnl == 10.0
-    assert updated.max_profit == 10.0
+
+    # XAUUSD uses a 100 oz contract size:
+    # (4310 - 4300) × 1.00 lot × 100 = $1,000.
+    assert updated.pnl == 1000.0
+    assert updated.max_profit == 1000.0
     assert updated.max_drawdown == 0.0
 
     updated = PositionRepository.update_price(
@@ -210,9 +213,10 @@ def test_price_update_persists_pnl_and_extremes(db_session):
         4295.0,
     )
 
-    assert updated.pnl == -5.0
-    assert updated.max_profit == 10.0
-    assert updated.max_drawdown == 5.0
+    # (4295 - 4300) × 1.00 lot × 100 = -$500.
+    assert updated.pnl == -500.0
+    assert updated.max_profit == 1000.0
+    assert updated.max_drawdown == 500.0
 
 
 def test_break_even_and_partial_close_state_persist(db_session):
