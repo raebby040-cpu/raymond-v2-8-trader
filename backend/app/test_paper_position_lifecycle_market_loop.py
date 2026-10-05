@@ -14,6 +14,10 @@ Verifies:
 
 These tests use an isolated in-memory SQLite database.
 They never contact MT5, a broker, Exness, or live execution.
+
+XAUUSD accounting:
+    1.00 lot = 100 oz
+    PnL = price movement × lots × 100
 """
 
 from __future__ import annotations
@@ -27,18 +31,12 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import Position, PositionStatus, TradeDirection
-from app.paper_position_lifecycle import PaperPositionLifecycle
 from app.paper_position_lifecycle_market_loop import (
     LifecycleAwarePaperPositionMarketLoop,
 )
 from app.paper_position_market_loop import (
     PaperPositionMarketLoopConfig,
 )
-
-
-# ============================================================
-# DATABASE FIXTURE
-# ============================================================
 
 
 @pytest.fixture()
@@ -68,11 +66,6 @@ def db():
         session.close()
         Base.metadata.drop_all(bind=engine)
         engine.dispose()
-
-
-# ============================================================
-# TEST POSITION FACTORY
-# ============================================================
 
 
 def make_position(
@@ -132,11 +125,6 @@ def make_position(
     db.refresh(position)
 
     return position
-
-
-# ============================================================
-# FAKE RESULT
-# ============================================================
 
 
 @dataclass(frozen=True)
@@ -200,11 +188,6 @@ class FakeResult:
         }
 
 
-# ============================================================
-# FAKE LIFECYCLE
-# ============================================================
-
-
 class FakeLifecycle:
     """
     Controlled lifecycle used to verify loop ordering.
@@ -234,17 +217,12 @@ class FakeLifecycle:
                 quantity=1.0,
                 stop_loss=90.0,
                 take_profit_1=110.0,
-                pnl=10.0,
+                pnl=1000.0,
                 pnl_percent=10.0,
                 closed=True,
                 persisted=True,
             ),
         )
-
-
-# ============================================================
-# EMPTY LIFECYCLE
-# ============================================================
 
 
 class FakeLifecycleEmpty:
@@ -265,11 +243,6 @@ class FakeLifecycleEmpty:
         )
 
         return ()
-
-
-# ============================================================
-# FAKE MANAGEMENT ENGINE
-# ============================================================
 
 
 class FakeManager:
@@ -304,11 +277,6 @@ class FakeManager:
         )
 
 
-# ============================================================
-# LOOP FACTORY
-# ============================================================
-
-
 def make_loop(
     db,
     *,
@@ -328,11 +296,6 @@ def make_loop(
         manager=manager,
         lifecycle=lifecycle,
     )
-
-
-# ============================================================
-# ORDERING TEST
-# ============================================================
 
 
 def test_lifecycle_runs_before_management(db):
@@ -369,11 +332,6 @@ def test_lifecycle_runs_before_management(db):
     assert result.results[1]["phase"] == "management"
 
 
-# ============================================================
-# LIFECYCLE SERIALIZATION TEST
-# ============================================================
-
-
 def test_lifecycle_closure_is_reported_as_lifecycle_phase(db):
     lifecycle = FakeLifecycle()
     manager = FakeManager()
@@ -397,11 +355,6 @@ def test_lifecycle_closure_is_reported_as_lifecycle_phase(db):
     assert lifecycle_result["persisted"] is True
 
 
-# ============================================================
-# MANAGEMENT SERIALIZATION TEST
-# ============================================================
-
-
 def test_open_position_management_is_reported_separately(db):
     lifecycle = FakeLifecycleEmpty()
     manager = FakeManager()
@@ -421,11 +374,6 @@ def test_open_position_management_is_reported_separately(db):
     assert result.results[0]["action"] == "HOLD"
 
 
-# ============================================================
-# REAL TP LIFECYCLE TEST
-# ============================================================
-
-
 def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
     """
     Real lifecycle engine:
@@ -435,6 +383,9 @@ def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
     TP1   = 110
 
     Price reaches TP1.
+
+    XAUUSD:
+        $10 × 1 lot × 100 oz = $1,000
     """
 
     position = make_position(
@@ -468,9 +419,11 @@ def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
     assert position.current_price == pytest.approx(
         110.0
     )
+
     assert position.pnl == pytest.approx(
-        10.0
+        1000.0
     )
+
     assert position.management_status == "closed"
 
     lifecycle_results = [
@@ -493,11 +446,6 @@ def test_loop_uses_real_lifecycle_engine_for_take_profit(db):
     ]
 
 
-# ============================================================
-# REAL SL LIFECYCLE TEST
-# ============================================================
-
-
 def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
     """
     Real lifecycle engine:
@@ -507,6 +455,9 @@ def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
     SL    = 90
 
     Price reaches SL.
+
+    XAUUSD:
+        -$10 × 1 lot × 100 oz = -$1,000
     """
 
     position = make_position(
@@ -540,9 +491,11 @@ def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
     assert position.current_price == pytest.approx(
         90.0
     )
+
     assert position.pnl == pytest.approx(
-        -10.0
+        -1000.0
     )
+
     assert position.management_status == "closed"
 
     lifecycle_results = [
@@ -561,11 +514,6 @@ def test_loop_uses_real_lifecycle_engine_for_stop_loss(db):
     assert close_result["persisted"] is True
 
 
-# ============================================================
-# REAL HOLD TEST
-# ============================================================
-
-
 def test_loop_keeps_non_triggered_position_open(db):
     """
     BUY
@@ -576,6 +524,9 @@ def test_loop_keeps_non_triggered_position_open(db):
     Price = 105.
 
     Nothing should close.
+
+    XAUUSD:
+        $5 × 1 lot × 100 oz = $500
     """
 
     position = make_position(
@@ -613,18 +564,14 @@ def test_loop_keeps_non_triggered_position_open(db):
     assert position.current_price == pytest.approx(
         105.0
     )
+
     assert position.pnl == pytest.approx(
-        5.0
+        500.0
     )
 
     assert result.current_price == pytest.approx(
         105.0
     )
-
-
-# ============================================================
-# DUPLICATE-CLOSE PROTECTION
-# ============================================================
 
 
 def test_closed_position_is_not_processed_again(db):
@@ -694,11 +641,6 @@ def test_closed_position_is_not_processed_again(db):
     assert len(second_closes) == 0
 
 
-# ============================================================
-# PAPER-ONLY SAFETY
-# ============================================================
-
-
 def test_loop_safety_flags_remain_paper_only(db):
     lifecycle = FakeLifecycle()
     manager = FakeManager()
@@ -715,8 +657,6 @@ def test_loop_safety_flags_remain_paper_only(db):
 
     payload = result.to_dict()
 
-    # The production PaperPositionMarketLoopResult serializes
-    # safety flags inside the "safety" object.
     safety = payload["safety"]
 
     assert safety["paper_only"] is True
@@ -726,11 +666,6 @@ def test_loop_safety_flags_remain_paper_only(db):
     assert safety["broker_orders_allowed"] is False
     assert safety["mt5_execution_allowed"] is False
     assert safety["risk_engine_bypass"] is False
-
-
-# ============================================================
-# INVALID PRICE
-# ============================================================
 
 
 def test_loop_rejects_invalid_market_price(db):
