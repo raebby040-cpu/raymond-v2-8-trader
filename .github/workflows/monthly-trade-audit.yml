@@ -13,136 +13,606 @@ permissions:
 
 jobs:
   monthly-trade-audit:
+    name: Monthly Trade Audit + Price-Path Forensics
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      - name: Run September 2026 audit through Render
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas
+
+      - name: Prepare directories
+        run: |
+          mkdir -p audit_output
+          mkdir -p forensic_output
+          mkdir -p raw_m5
+          mkdir -p normalized_m5
+
+      # ------------------------------------------------------------
+      # SAFETY
+      # ------------------------------------------------------------
+
+      - name: Verify research-only environment
+        run: |
+          echo "=================================================="
+          echo "RESEARCH-ONLY MONTHLY AUDIT"
+          echo "=================================================="
+          echo "This workflow:"
+          echo "- does NOT place trades"
+          echo "- does NOT modify positions"
+          echo "- does NOT modify the live strategy"
+          echo "- does NOT promote research candidates"
+          echo "- does NOT deploy anything"
+          echo "=================================================="
+
+      # ------------------------------------------------------------
+      # MONTH CALCULATION
+      # ------------------------------------------------------------
+
+      - name: Calculate audit dates
+        id: dates
         env:
           AUDIT_MONTH: ${{ inputs.month }}
         run: |
-          set -e
+          python - <<'PY'
+          import os
+          from datetime import datetime
 
-          BASE_URL="https://raymond-v2-8-trader.onrender.com"
-          AUDIT_URL="${BASE_URL}/api/research/monthly-audit?month=${AUDIT_MONTH}"
+          month = os.environ["AUDIT_MONTH"]
 
-          echo "Requesting monthly audit for ${AUDIT_MONTH}..."
-          echo "Endpoint: ${BASE_URL}/api/research/monthly-audit"
+          start = datetime.strptime(month + "-01", "%Y-%m-%d")
 
-          curl \
-            --fail \
-            --show-error \
-            --silent \
-            --retry 3 \
+          if start.month == 12:
+              next_month = datetime(start.year + 1, 1, 1)
+          else:
+              next_month = datetime(start.year, start.month + 1, 1)
+
+          # Dukascopy's -to date is inclusive enough for our purposes,
+          # so use the first day of the following month.
+          start_str = start.strftime("%Y-%m-%d")
+          end_str = next_month.strftime("%Y-%m-%d")
+
+          print(f"Audit month: {month}")
+          print(f"M5 start:    {start_str}")
+          print(f"M5 end:      {end_str}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"start={start_str}\n")
+              f.write(f"end={end_str}\n")
+          PY
+
+      # ------------------------------------------------------------
+      # DOWNLOAD CORRECTED MONTHLY AUDIT FROM RENDER
+      # ------------------------------------------------------------
+
+      - name: Download monthly audit from Render
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+          RENDER_URL: "https://raymond-v2-8-trader.onrender.com"
+        run: |
+          echo "Downloading monthly audit for ${AUDIT_MONTH}..."
+
+          curl --fail --silent --show-error \
+            --retry 5 \
             --retry-delay 5 \
-            --connect-timeout 20 \
-            --max-time 120 \
-            "${AUDIT_URL}" \
-            -o monthly_trade_audit.json
+            --max-time 180 \
+            "${RENDER_URL}/api/research/monthly-audit?month=${AUDIT_MONTH}" \
+            -o audit_output/monthly_trade_audit.json
 
-          echo "Audit response received."
+          test -s audit_output/monthly_trade_audit.json
 
-      - name: Validate audit response
+          echo "Audit downloaded successfully."
+
+      # ------------------------------------------------------------
+      # VALIDATE AUDIT SAFETY
+      # ------------------------------------------------------------
+
+      - name: Validate monthly audit
         env:
           AUDIT_MONTH: ${{ inputs.month }}
         run: |
-          set -e
-
           python - <<'PY'
           import json
           import os
           import sys
 
-          month = os.environ["AUDIT_MONTH"]
+          path = "audit_output/monthly_trade_audit.json"
+          expected_month = os.environ["AUDIT_MONTH"]
 
-          with open("monthly_trade_audit.json", "r", encoding="utf-8") as f:
+          with open(path, "r", encoding="utf-8") as f:
               report = json.load(f)
 
           print("Report type:", report.get("report_type"))
           print("Report version:", report.get("version"))
-          print("Audit month:", report.get("month"))
-          print("Research only:", report.get("research_only"))
-          print("Live trading changed:", report.get("live_trading_changed"))
-
-          if report.get("report_type") != "RAYMOND_MONTHLY_TRADE_AUDIT":
-              print("ERROR: Unexpected report type.")
-              sys.exit(1)
-
-          if report.get("month") != month:
-              print(
-                  f"ERROR: Requested month {month}, "
-                  f"but report contains {report.get('month')}."
-              )
-              sys.exit(1)
-
-          if report.get("research_only") is not True:
-              print("ERROR: Audit is not marked research_only=true.")
-              sys.exit(1)
-
-          if report.get("live_trading_changed") is not False:
-              print("ERROR: Audit reports that live trading changed.")
-              sys.exit(1)
-
-          performance = report.get("performance", {})
-          accounting = report.get("accounting", {})
-
-          print("Total trades:", performance.get("total_trades"))
-          print("Total PnL:", performance.get("total_pnl"))
-          print("Win rate:", performance.get("win_rate_pct"))
-          print("Profit factor:", performance.get("profit_factor"))
-          print("Max-profit / max-drawdown excursion analysis present:", 
-                "excursion_analysis" in report)
-
-          if accounting.get("accounting_reconciled") is not True:
-              print("ERROR: Accounting is not reconciled.")
-              sys.exit(1)
-
-          print("Audit validation: PASSED")
-          PY
-
-      - name: Save audit artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: monthly-trade-audit-${{ inputs.month }}
-          path: monthly_trade_audit.json
-          if-no-files-found: error
-
-      - name: Print audit summary
-        run: |
-          python - <<'PY'
-          import json
-
-          with open("monthly_trade_audit.json", "r", encoding="utf-8") as f:
-              report = json.load(f)
-
-          performance = report.get("performance", {})
-          accounting = report.get("accounting", {})
-          excursion = report.get("excursion_analysis", {})
-
-          print("")
-          print("========================================")
-          print("RAYMOND MONTHLY TRADE AUDIT")
-          print("========================================")
           print("Month:", report.get("month"))
           print("Research only:", report.get("research_only"))
           print("Live trading changed:", report.get("live_trading_changed"))
-          print("----------------------------------------")
-          print("Total trades:", performance.get("total_trades"))
-          print("Winning trades:", performance.get("winning_trades"))
-          print("Losing trades:", performance.get("losing_trades"))
-          print("Win rate:", performance.get("win_rate_pct"))
-          print("Total PnL:", performance.get("total_pnl"))
-          print("Profit factor:", performance.get("profit_factor"))
-          print("----------------------------------------")
           print("Accounting reconciled:",
-                accounting.get("accounting_reconciled"))
-          print("Max-profit / drawdown analysis:")
-          print(
-              excursion.get(
-                  "losing_trades_that_were_profitable_first",
-                  {}
+                report.get("accounting", {}).get("accounting_reconciled"))
+
+          if report.get("report_type") != "RAYMOND_MONTHLY_TRADE_AUDIT":
+              raise SystemExit("ERROR: Unexpected report type.")
+
+          if report.get("month") != expected_month:
+              raise SystemExit(
+                  f"ERROR: Report month {report.get('month')} "
+                  f"does not match {expected_month}."
               )
-          )
-          print("----------------------------------------")
-          print("No strategy parameters were changed by this workflow.")
-          print("========================================")
+
+          if report.get("research_only") is not True:
+              raise SystemExit(
+                  "ERROR: Monthly audit is not marked research_only=true."
+              )
+
+          if report.get("live_trading_changed") is not False:
+              raise SystemExit(
+                  "ERROR: Audit reports that live trading changed."
+              )
+
+          if report.get("accounting", {}).get("accounting_reconciled") is not True:
+              raise SystemExit(
+                  "ERROR: Accounting is not reconciled."
+              )
+
+          trades = report.get("trades", [])
+
+          if not isinstance(trades, list):
+              raise SystemExit("ERROR: trades field is not a list.")
+
+          print(f"Trade records available: {len(trades)}")
+
+          print("Monthly audit safety validation PASSED.")
           PY
+
+      # ------------------------------------------------------------
+      # DOWNLOAD M5 MARKET DATA
+      # ------------------------------------------------------------
+
+      - name: Download XAUUSD M5 market data
+        env:
+          START_DATE: ${{ steps.dates.outputs.start }}
+          END_DATE: ${{ steps.dates.outputs.end }}
+        run: |
+          echo "Downloading XAUUSD M5 data..."
+          echo "From: ${START_DATE}"
+          echo "To:   ${END_DATE}"
+
+          npx --yes dukascopy-node \
+            -i xauusd \
+            -from "${START_DATE}" \
+            -to "${END_DATE}" \
+            -t m5 \
+            -f csv \
+            -dir raw_m5 \
+            -bs 5 \
+            -bp 1000
+
+          echo "Downloaded M5 files:"
+          find raw_m5 -type f -maxdepth 5 -print
+
+      # ------------------------------------------------------------
+      # NORMALIZE M5 DATA
+      # ------------------------------------------------------------
+
+      - name: Normalize M5 market data
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import pandas as pd
+
+          month = os.environ["AUDIT_MONTH"]
+
+          raw_dir = Path("raw_m5")
+          output = Path(
+              f"normalized_m5/xauusd_m5_{month}_normalized.csv"
+          )
+
+          files = sorted(raw_dir.rglob("*.csv"))
+
+          if not files:
+              raise SystemExit("ERROR: No M5 CSV files were downloaded.")
+
+          print(f"Found {len(files)} raw M5 CSV files.")
+
+          frames = []
+
+          for file in files:
+              try:
+                  df = pd.read_csv(file)
+              except Exception as exc:
+                  print(f"Skipping unreadable file {file}: {exc}")
+                  continue
+
+              if df.empty:
+                  continue
+
+              # Normalize column names.
+              original_columns = list(df.columns)
+
+              normalized_columns = {}
+              for column in df.columns:
+                  key = (
+                      str(column)
+                      .strip()
+                      .lower()
+                      .replace(" ", "_")
+                      .replace("-", "_")
+                  )
+                  normalized_columns[column] = key
+
+              df = df.rename(columns=normalized_columns)
+
+              # Timestamp variants.
+              timestamp_column = None
+
+              for candidate in (
+                  "timestamp",
+                  "time",
+                  "datetime",
+                  "date",
+                  "timestamp_utc",
+              ):
+                  if candidate in df.columns:
+                      timestamp_column = candidate
+                      break
+
+              if timestamp_column is None:
+                  print(
+                      f"Skipping {file}: "
+                      f"no timestamp column. Columns={original_columns}"
+                  )
+                  continue
+
+              # OHLC variants.
+              aliases = {
+                  "open": ["open", "o"],
+                  "high": ["high", "h"],
+                  "low": ["low", "l"],
+                  "close": ["close", "c"],
+                  "volume": ["volume", "vol", "v"],
+              }
+
+              rename = {}
+
+              for target, candidates in aliases.items():
+                  for candidate in candidates:
+                      if candidate in df.columns:
+                          rename[candidate] = target
+                          break
+
+              df = df.rename(columns=rename)
+
+              required = ["open", "high", "low", "close"]
+
+              if any(column not in df.columns for column in required):
+                  print(
+                      f"Skipping {file}: missing OHLC columns. "
+                      f"Columns={list(df.columns)}"
+                  )
+                  continue
+
+              df["timestamp"] = pd.to_datetime(
+                  df[timestamp_column],
+                  utc=True,
+                  errors="coerce",
+              )
+
+              for column in required:
+                  df[column] = pd.to_numeric(
+                      df[column],
+                      errors="coerce",
+                  )
+
+              if "volume" not in df.columns:
+                  df["volume"] = 0.0
+
+              df["volume"] = pd.to_numeric(
+                  df["volume"],
+                  errors="coerce",
+              ).fillna(0.0)
+
+              df = df[
+                  [
+                      "timestamp",
+                      "open",
+                      "high",
+                      "low",
+                      "close",
+                      "volume",
+                  ]
+              ]
+
+              df = df.dropna(
+                  subset=[
+                      "timestamp",
+                      "open",
+                      "high",
+                      "low",
+                      "close",
+                  ]
+              )
+
+              if not df.empty:
+                  frames.append(df)
+
+          if not frames:
+              raise SystemExit(
+                  "ERROR: No valid M5 OHLC data could be normalized."
+              )
+
+          combined = pd.concat(frames, ignore_index=True)
+
+          combined = combined.sort_values("timestamp")
+
+          combined = combined.drop_duplicates(
+              subset=["timestamp"],
+              keep="last",
+          )
+
+          combined = combined.reset_index(drop=True)
+
+          if combined.empty:
+              raise SystemExit("ERROR: Normalized M5 dataset is empty.")
+
+          # Basic OHLC sanity checks.
+          if (combined["high"] < combined["low"]).any():
+              raise SystemExit(
+                  "ERROR: M5 data contains high < low."
+              )
+
+          if (combined["high"] < combined["open"]).any():
+              raise SystemExit(
+                  "ERROR: M5 data contains high < open."
+              )
+
+          if (combined["high"] < combined["close"]).any():
+              raise SystemExit(
+                  "ERROR: M5 data contains high < close."
+              )
+
+          if (combined["low"] > combined["open"]).any():
+              raise SystemExit(
+                  "ERROR: M5 data contains low > open."
+              )
+
+          if (combined["low"] > combined["close"]).any():
+              raise SystemExit(
+                  "ERROR: M5 data contains low > close."
+              )
+
+          output.parent.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          combined.to_csv(
+              output,
+              index=False,
+          )
+
+          print("Normalized M5 dataset:")
+          print(f"Rows: {len(combined)}")
+          print(f"Start: {combined['timestamp'].min()}")
+          print(f"End:   {combined['timestamp'].max()}")
+          print(f"Output: {output}")
+          PY
+
+      # ------------------------------------------------------------
+      # RUN PRICE-PATH FORENSIC ANALYSIS
+      # ------------------------------------------------------------
+
+      - name: Run monthly trade forensic analysis
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          M5_FILE="normalized_m5/xauusd_m5_${AUDIT_MONTH}_normalized.csv"
+
+          test -s "${M5_FILE}"
+
+          python scripts/monthly_trade_forensic.py \
+            --audit audit_output/monthly_trade_audit.json \
+            --m5 "${M5_FILE}" \
+            --output "forensic_output/${AUDIT_MONTH}"
+
+      # ------------------------------------------------------------
+      # VALIDATE FORENSIC REPORT
+      # ------------------------------------------------------------
+
+      - name: Validate forensic report
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          month = os.environ["AUDIT_MONTH"]
+
+          path = (
+              f"forensic_output/{month}/"
+              "monthly_trade_forensic.json"
+          )
+
+          with open(path, "r", encoding="utf-8") as f:
+              report = json.load(f)
+
+          print("Forensic report type:", report.get("report_type"))
+          print("Version:", report.get("version"))
+          print("Month:", report.get("month"))
+          print("Research only:", report.get("research_only"))
+          print("Live trading changed:",
+                report.get("live_trading_changed"))
+          print("Strategy modified:",
+                report.get("strategy_modified"))
+          print("Positions modified:",
+                report.get("positions_modified"))
+          print("Orders created:",
+                report.get("orders_created"))
+          print("Candidates promoted:",
+                report.get("candidates_promoted"))
+
+          if report.get("report_type") != "RAYMOND_MONTHLY_TRADE_FORENSIC":
+              raise SystemExit(
+                  "ERROR: Unexpected forensic report type."
+              )
+
+          if report.get("month") != month:
+              raise SystemExit(
+                  "ERROR: Forensic report month mismatch."
+              )
+
+          required_safety = {
+              "research_only": True,
+              "live_trading_changed": False,
+              "strategy_modified": False,
+              "positions_modified": False,
+              "orders_created": False,
+              "candidates_promoted": False,
+          }
+
+          for key, expected in required_safety.items():
+              if report.get(key) is not expected:
+                  raise SystemExit(
+                      f"ERROR: Safety check failed: "
+                      f"{key}={report.get(key)!r}, "
+                      f"expected {expected!r}"
+                  )
+
+          print("Forensic safety validation PASSED.")
+          PY
+
+      # ------------------------------------------------------------
+      # PRINT SUMMARY
+      # ------------------------------------------------------------
+
+      - name: Print research summary
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          month = os.environ["AUDIT_MONTH"]
+
+          audit_path = "audit_output/monthly_trade_audit.json"
+
+          forensic_path = (
+              f"forensic_output/{month}/"
+              "monthly_trade_forensic.json"
+          )
+
+          with open(audit_path, "r", encoding="utf-8") as f:
+              audit = json.load(f)
+
+          with open(forensic_path, "r", encoding="utf-8") as f:
+              forensic = json.load(f)
+
+          performance = audit.get("performance", {})
+          summary = forensic.get("summary", {})
+
+          print("")
+          print("==================================================")
+          print("RAYMOND V2.8 MONTHLY RESEARCH AUDIT")
+          print("==================================================")
+          print(f"Month:              {month}")
+          print(f"Trades:             {performance.get('total_trades')}")
+          print(f"Wins:               {performance.get('wins')}")
+          print(f"Losses:             {performance.get('losses')}")
+          print(f"Win rate:           {performance.get('win_rate')}")
+          print(f"Total P/L:          {performance.get('total_pnl')}")
+          print(f"Profit factor:      {performance.get('profit_factor')}")
+          print("")
+          print("PRICE-PATH FORENSICS")
+          print(f"Losses:             {summary.get('loss_count')}")
+          print(
+              "Favorable-first:    "
+              f"{summary.get('losses_favorable_first')}"
+          )
+          print(
+              "MFE >= 0.25R:       "
+              f"{summary.get('losses_mfe_ge_0_25r')}"
+          )
+          print(
+              "MFE >= 0.50R:       "
+              f"{summary.get('losses_mfe_ge_0_5r')}"
+          )
+          print(
+              "MFE >= 0.75R:       "
+              f"{summary.get('losses_mfe_ge_0_75r')}"
+          )
+          print(
+              "MFE >= 1.00R:       "
+              f"{summary.get('losses_mfe_ge_1r')}"
+          )
+          print(
+              "MFE >= 1.50R:       "
+              f"{summary.get('losses_mfe_ge_1_5r')}"
+          )
+          print(
+              "MFE >= 2.00R:       "
+              f"{summary.get('losses_mfe_ge_2r')}"
+          )
+          print(
+              "Reached TP then lost:"
+              f" {summary.get('losses_reached_tp_then_lost')}"
+          )
+          print("")
+          print("SAFETY")
+          print("Research only:       ", forensic.get("research_only"))
+          print(
+              "Live changed:        ",
+              forensic.get("live_trading_changed"),
+          )
+          print(
+              "Strategy modified:  ",
+              forensic.get("strategy_modified"),
+          )
+          print(
+              "Positions modified: ",
+              forensic.get("positions_modified"),
+          )
+          print(
+              "Orders created:      ",
+              forensic.get("orders_created"),
+          )
+          print(
+              "Candidates promoted: ",
+              forensic.get("candidates_promoted"),
+          )
+          print("==================================================")
+          PY
+
+      # ------------------------------------------------------------
+      # UPLOAD COMPLETE RESEARCH ARTIFACT
+      # ------------------------------------------------------------
+
+      - name: Upload monthly audit and forensic artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-trade-audit-forensic-${{ inputs.month }}
+          if-no-files-found: error
+          path: |
+            audit_output/monthly_trade_audit.json
+            forensic_output/${{ inputs.month }}/monthly_trade_forensic.json
+            forensic_output/${{ inputs.month }}/monthly_trade_forensic.md
+            normalized_m5/xauusd_m5_${{ inputs.month }}_normalized.csv
+          retention-days: 90
