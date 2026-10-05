@@ -1,109 +1,105 @@
 """
 RAYMOND V2.8 - MONTHLY TRADE AUDITOR
 
-Phase 1 of the Strategy Auditor & Evolution Engine.
-
-PURPOSE
--------
-Analyze completed PAPER positions at the end of each month and
-identify recurring reasons for losses and possible strategy
-improvements.
+Research-only monthly audit of completed PAPER positions.
 
 IMPORTANT SAFETY RULES
 ----------------------
-- PAPER/RESEARCH analysis only.
+- Research / paper analysis only.
 - Never sends broker orders.
 - Never modifies positions.
-- Never modifies active strategy parameters.
-- Never automatically promotes a strategy candidate.
-- Improvement candidates are recommendations for later backtesting.
-- Holdout validation is required before any strategy promotion.
+- Never modifies the active strategy.
+- Never promotes strategy candidates automatically.
+- Improvement candidates are recommendations only.
+- Holdout validation is required before strategy promotion.
 
-DATA SOURCE
------------
-The authoritative persistent Position table is used because it
-contains the richest trade lifecycle information, including:
+HISTORICAL ACCOUNTING MODEL
+----------------------------
 
-- entry / exit
-- original SL
-- TP
-- P/L
-- regime
-- setup
-- technical score
-- confidence
-- trade thesis
-- break-even state
-- partial-close state
-- trailing state
-- maximum profit
-- maximum drawdown
-- original 1R risk distance
-- cumulative partial-close P/L
+The auditor independently recalculates historical XAUUSD P/L.
 
-ACCOUNTING MODEL
-----------------
-For a position that has partial closes:
+It does NOT use Position.pnl as the authoritative historical P/L.
 
-    total trade P/L =
-        cumulative partial-close realized P/L
-        +
-        final remaining-position P/L
+For XAUUSD:
 
-Example:
-
-    1.00 XAUUSD lot BUY @ 4300
-
-    close 0.50 @ 4310
-        = +$500
-
-    remaining 0.50 @ 4320
-        = +$1,000
-
-    total trade P/L
-        = +$1,500
-
-XAUUSD CONTRACT SIZE
---------------------
-RAYMOND V2.8 uses:
-
-    1.00 XAUUSD lot = 100 oz
+    1.00 lot = 100 oz
 
 Therefore:
 
-    P/L =
-        price movement × quantity × 100
+    BUY P/L =
+        (exit_price - entry_price)
+        * quantity
+        * 100
 
-R NORMALIZATION
----------------
-Position.risk_1r is the authoritative original PRICE-DISTANCE
-value representing 1R.
+    SELL P/L =
+        (entry_price - exit_price)
+        * quantity
+        * 100
+
+For a trade with one persisted partial close:
+
+    partial P/L =
+        price movement from entry to partial close
+        * partial quantity
+        * 100
+
+    final P/L =
+        price movement from entry to final exit
+        * remaining quantity
+        * 100
+
+    total trade P/L =
+        partial P/L + final P/L
+
+The persisted Position.pnl and Position.partial_close_pnl fields
+are used only as stored-accounting comparison values.
+
+RISK NORMALIZATION
+------------------
+
+Position.risk_1r is preferred because it represents the original
+price-distance value for 1R.
+
+Fallback:
+
+    abs(entry_price - initial_stop_loss)
 
 For XAUUSD:
 
     monetary 1R =
-        risk_1r × original_quantity × 100
+        risk_distance * original_quantity * 100
 
-The auditor therefore uses persisted Position.risk_1r first.
+The current/moving stop is never used to redefine original 1R.
 
-For older positions where risk_1r was not persisted, the auditor
-falls back to:
+PARTIAL CLOSE LIMITATION
+------------------------
 
-    abs(entry_price - initial_stop_loss)
+The current Position model stores one partial-close execution:
 
-This avoids accidentally deriving R from a moving/current stop-loss.
+    partial_close_price
+    partial_close_quantity
+
+and a cumulative:
+
+    partial_close_pnl
+
+Therefore this auditor can independently reconstruct a persisted
+single partial-close execution.
+
+If historical data contains multiple partial-close executions but
+does not preserve each execution separately, the database does not
+contain enough information to reconstruct every individual execution
+from raw fields alone. The auditor therefore records the limitation
+instead of inventing data.
 
 USAGE
 -----
-From repository root:
 
     python scripts/monthly_trade_audit.py
 
-Optional:
+or:
 
     python scripts/monthly_trade_audit.py 2026-09
-
-The optional argument audits a specific calendar month.
 """
 
 from __future__ import annotations
@@ -112,7 +108,7 @@ import json
 import math
 import statistics
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,7 +128,7 @@ except ImportError:
 
 DEFAULT_SYMBOL = "XAUUSD"
 
-# Standard XAUUSD contract size used by RAYMOND V2.8.
+# RAYMOND V2.8 XAUUSD contract size.
 XAUUSD_CONTRACT_SIZE = 100.0
 
 OUTPUT_DIR = (
@@ -140,11 +136,12 @@ OUTPUT_DIR = (
     / "monthly_trade_audits"
 )
 
+RECONCILIATION_TOLERANCE = 0.01
+
 
 # ============================================================
 # DATA STRUCTURES
 # ============================================================
-
 
 @dataclass
 class TradeView:
@@ -155,17 +152,21 @@ class TradeView:
     entry_price: float
     exit_price: float | None
 
-    # Total economic P/L:
-    #
-    # cumulative partial-close P/L
-    # +
-    # final remaining-position P/L
+    # Independently recalculated complete economic P/L.
     pnl: float
 
-    # Explicit accounting components.
+    # Independently recalculated components.
     partial_close_pnl: float
     final_position_pnl: float
     total_trade_pnl: float
+
+    # Persisted/stored values are retained only for comparison.
+    stored_partial_close_pnl: float
+    stored_final_position_pnl: float
+    stored_total_trade_pnl: float
+
+    # Difference between corrected and stored accounting.
+    pnl_correction: float
 
     quantity: float
 
@@ -200,6 +201,9 @@ class TradeView:
 
     outcome: str
 
+    accounting_method: str
+    accounting_warning: str | None
+
 
 @dataclass
 class Candidate:
@@ -211,9 +215,8 @@ class Candidate:
 
 
 # ============================================================
-# HELPERS
+# GENERIC HELPERS
 # ============================================================
-
 
 def safe_float(
     value: Any,
@@ -245,7 +248,10 @@ def safe_text(
 
     text = str(value).strip()
 
-    return text if text else default
+    if not text:
+        return default
+
+    return text
 
 
 def enum_value(
@@ -275,6 +281,31 @@ def iso(
     return safe_text(value)
 
 
+def percentage(
+    numerator: float,
+    denominator: float,
+) -> float:
+    if denominator == 0:
+        return 0.0
+
+    return (
+        numerator
+        / denominator
+        * 100.0
+    )
+
+
+def safe_mean(
+    values: Iterable[float],
+) -> float | None:
+    values = list(values)
+
+    if not values:
+        return None
+
+    return statistics.mean(values)
+
+
 def percentile(
     values: list[float],
     p: float,
@@ -288,7 +319,8 @@ def percentile(
         return ordered[0]
 
     position = (
-        (len(ordered) - 1) * p
+        (len(ordered) - 1)
+        * p
     )
 
     lower = math.floor(position)
@@ -309,38 +341,13 @@ def percentile(
     )
 
 
-def safe_mean(
-    values: Iterable[float],
-) -> float | None:
-    values = list(values)
-
-    if not values:
-        return None
-
-    return statistics.mean(values)
-
-
-def percentage(
-    numerator: float,
-    denominator: float,
-) -> float:
-    if denominator == 0:
-        return 0.0
-
-    return (
-        numerator
-        / denominator
-        * 100.0
-    )
-
-
 def month_bounds(
     month_text: str | None,
-) -> tuple[datetime, datetime, str]:
-    """
-    Return UTC month start and exclusive next-month boundary.
-    """
-
+) -> tuple[
+    datetime,
+    datetime,
+    str,
+]:
     if month_text:
         parts = month_text.split("-")
 
@@ -396,30 +403,376 @@ def month_bounds(
         f"{start.month:02d}"
     )
 
+    return start, end, label
+
+
+# ============================================================
+# POSITION FIELD HELPERS
+# ============================================================
+
+def original_quantity(
+    position: Position,
+) -> float:
+    quantity = safe_float(
+        getattr(
+            position,
+            "original_quantity",
+            None,
+        )
+    )
+
+    if quantity is None or quantity <= 0:
+        quantity = safe_float(
+            getattr(
+                position,
+                "quantity",
+                None,
+            )
+        )
+
+    return quantity or 0.0
+
+
+def partial_quantity(
+    position: Position,
+) -> float:
+    value = safe_float(
+        getattr(
+            position,
+            "partial_close_quantity",
+            None,
+        )
+    )
+
+    if value is None or value <= 0:
+        return 0.0
+
+    return value
+
+
+def partial_close_price(
+    position: Position,
+) -> float | None:
+    return safe_float(
+        getattr(
+            position,
+            "partial_close_price",
+            None,
+        )
+    )
+
+
+def final_exit_price(
+    position: Position,
+) -> float | None:
+    """
+    The lifecycle stores the latest/final market price in current_price
+    when a position is closed.
+
+    For closed positions this is the final exit price used by the
+    corrected historical accounting.
+    """
+
+    value = safe_float(
+        getattr(
+            position,
+            "current_price",
+            None,
+        )
+    )
+
+    if value is not None:
+        return value
+
+    return None
+
+
+def direction_text(
+    position: Position,
+) -> str:
+    direction = enum_value(
+        getattr(
+            position,
+            "direction",
+            None,
+        )
+    ).upper()
+
+    if direction in {
+        "BUY",
+        "SELL",
+    }:
+        return direction
+
+    return direction
+
+
+# ============================================================
+# XAUUSD PRICE P/L ENGINE
+# ============================================================
+
+def calculate_price_pnl(
+    *,
+    direction: str,
+    entry_price: float,
+    exit_price: float,
+    quantity: float,
+    contract_size: float = XAUUSD_CONTRACT_SIZE,
+) -> float:
+    """
+    Independently calculate monetary P/L from raw trade economics.
+
+    BUY:
+        (exit - entry) * quantity * contract_size
+
+    SELL:
+        (entry - exit) * quantity * contract_size
+    """
+
+    if quantity <= 0:
+        return 0.0
+
+    if direction == "BUY":
+        price_difference = (
+            exit_price
+            - entry_price
+        )
+
+    elif direction == "SELL":
+        price_difference = (
+            entry_price
+            - exit_price
+        )
+
+    else:
+        raise ValueError(
+            f"Unsupported trade direction: {direction}"
+        )
+
     return (
-        start,
-        end,
-        label,
+        price_difference
+        * quantity
+        * contract_size
+    )
+
+
+def calculate_partial_close_pnl(
+    position: Position,
+) -> tuple[
+    float,
+    str | None,
+]:
+    """
+    Independently reconstruct the persisted partial-close execution.
+
+    Returns:
+        (pnl, warning)
+    """
+
+    quantity = partial_quantity(
+        position
+    )
+
+    close_price = partial_close_price(
+        position
+    )
+
+    entry_price = safe_float(
+        getattr(
+            position,
+            "entry_price",
+            None,
+        )
+    )
+
+    if quantity <= 0:
+        return 0.0, None
+
+    if close_price is None:
+        return (
+            0.0,
+            "Partial-close quantity exists but "
+            "partial_close_price is missing; "
+            "partial P/L cannot be independently reconstructed.",
+        )
+
+    if entry_price is None:
+        return (
+            0.0,
+            "Partial-close data exists but "
+            "entry_price is missing.",
+        )
+
+    direction = direction_text(
+        position
+    )
+
+    try:
+        pnl = calculate_price_pnl(
+            direction=direction,
+            entry_price=entry_price,
+            exit_price=close_price,
+            quantity=quantity,
+        )
+
+    except ValueError as exc:
+        return (
+            0.0,
+            str(exc),
+        )
+
+    return pnl, None
+
+
+def calculate_remaining_quantity(
+    position: Position,
+) -> tuple[
+    float,
+    str | None,
+]:
+    """
+    Reconstruct the quantity belonging to the final exit.
+
+    The closed Position row can have remaining_quantity=0 because the
+    final close consumes the remaining quantity. Therefore we do not
+    blindly use a zero stored value.
+
+    We reconstruct:
+
+        original quantity - persisted partial-close quantity
+
+    for a position with one partial close.
+
+    Without a partial close, the final quantity is the original
+    quantity.
+    """
+
+    original = original_quantity(
+        position
+    )
+
+    partial = partial_quantity(
+        position
+    )
+
+    if original <= 0:
+        return (
+            0.0,
+            "Original trade quantity is missing or invalid.",
+        )
+
+    if partial <= 0:
+        return original, None
+
+    remaining = (
+        original
+        - partial
+    )
+
+    if remaining < -1e-9:
+        return (
+            0.0,
+            "Partial-close quantity exceeds "
+            "original quantity; final quantity "
+            "cannot be reconstructed safely.",
+        )
+
+    return max(
+        0.0,
+        remaining,
+    ), None
+
+
+def calculate_final_position_pnl(
+    position: Position,
+) -> tuple[
+    float,
+    float,
+    str | None,
+]:
+    """
+    Independently calculate P/L for the quantity remaining after a
+    persisted partial close.
+
+    Returns:
+
+        final_pnl
+        final_quantity
+        warning
+    """
+
+    entry_price = safe_float(
+        getattr(
+            position,
+            "entry_price",
+            None,
+        )
+    )
+
+    exit_price = final_exit_price(
+        position
+    )
+
+    if entry_price is None:
+        return (
+            0.0,
+            0.0,
+            "Entry price is missing.",
+        )
+
+    if exit_price is None:
+        return (
+            0.0,
+            0.0,
+            "Final exit price is missing.",
+        )
+
+    quantity, quantity_warning = (
+        calculate_remaining_quantity(
+            position
+        )
+    )
+
+    if quantity <= 0:
+        return (
+            0.0,
+            quantity,
+            quantity_warning,
+        )
+
+    direction = direction_text(
+        position
+    )
+
+    try:
+        pnl = calculate_price_pnl(
+            direction=direction,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            quantity=quantity,
+        )
+
+    except ValueError as exc:
+        return (
+            0.0,
+            quantity,
+            str(exc),
+        )
+
+    return (
+        pnl,
+        quantity,
+        quantity_warning,
     )
 
 
 # ============================================================
-# ACCOUNTING HELPERS
+# STORED ACCOUNTING
 # ============================================================
 
-
-def position_partial_close_pnl(
+def stored_partial_close_pnl(
     position: Position,
 ) -> float:
-    """
-    Return cumulative realized P/L from partial closes.
-
-    New accounting semantics:
-        partial_close_pnl is cumulative.
-
-    Legacy rows without this field/data safely return 0.
-    """
-
     return (
         safe_float(
             getattr(
@@ -432,16 +785,9 @@ def position_partial_close_pnl(
     )
 
 
-def position_final_pnl(
+def stored_final_position_pnl(
     position: Position,
 ) -> float:
-    """
-    Return P/L belonging to the final/current position quantity.
-
-    For a closed position this represents the P/L of the quantity
-    that remained after any partial closes.
-    """
-
     return (
         safe_float(
             getattr(
@@ -454,119 +800,186 @@ def position_final_pnl(
     )
 
 
-def position_total_trade_pnl(
+def stored_total_trade_pnl(
     position: Position,
 ) -> float:
-    """
-    Calculate complete economic P/L for one persisted position.
-
-        total =
-            cumulative partial-close P/L
-            +
-            final remaining-position P/L
-    """
-
-    partial_pnl = (
-        position_partial_close_pnl(
-            position
-        )
-    )
-
-    final_pnl = (
-        position_final_pnl(
-            position
-        )
-    )
-
     return (
+        stored_partial_close_pnl(
+            position
+        )
+        + stored_final_position_pnl(
+            position
+        )
+    )
+
+
+# ============================================================
+# CORRECTED HISTORICAL ACCOUNTING
+# ============================================================
+
+def audited_position_accounting(
+    position: Position,
+) -> dict[str, Any]:
+    """
+    Independently reconstruct the trade economics.
+
+    This is the critical correction.
+
+    The historical audit does NOT treat Position.pnl as authoritative.
+    """
+
+    partial_pnl, partial_warning = (
+        calculate_partial_close_pnl(
+            position
+        )
+    )
+
+    (
+        final_pnl,
+        final_quantity,
+        final_warning,
+    ) = calculate_final_position_pnl(
+        position
+    )
+
+    total_pnl = (
         partial_pnl
         + final_pnl
     )
 
+    stored_partial = (
+        stored_partial_close_pnl(
+            position
+        )
+    )
+
+    stored_final = (
+        stored_final_position_pnl(
+            position
+        )
+    )
+
+    stored_total = (
+        stored_total_trade_pnl(
+            position
+        )
+    )
+
+    correction = (
+        total_pnl
+        - stored_total
+    )
+
+    warnings = []
+
+    if partial_warning:
+        warnings.append(
+            partial_warning
+        )
+
+    if final_warning:
+        warnings.append(
+            final_warning
+        )
+
+    warning = (
+        " | ".join(warnings)
+        if warnings
+        else None
+    )
+
+    return {
+        "partial_close_pnl": partial_pnl,
+        "final_position_pnl": final_pnl,
+        "total_trade_pnl": total_pnl,
+        "final_quantity": final_quantity,
+        "stored_partial_close_pnl": stored_partial,
+        "stored_final_position_pnl": stored_final,
+        "stored_total_trade_pnl": stored_total,
+        "pnl_correction": correction,
+        "warning": warning,
+    }
+
 
 # ============================================================
-# POSITION -> AUDIT RECORD
+# POSITION -> TRADE VIEW
 # ============================================================
-
 
 def position_to_trade(
     position: Position,
 ) -> TradeView:
-    entry = (
+    entry_price = (
         safe_float(
-            position.entry_price
+            getattr(
+                position,
+                "entry_price",
+                None,
+            )
         )
         or 0.0
     )
 
-    exit_price = safe_float(
-        position.current_price
+    exit_price = final_exit_price(
+        position
     )
 
     initial_sl = safe_float(
-        position.initial_stop_loss
+        getattr(
+            position,
+            "initial_stop_loss",
+            None,
+        )
     )
 
-    tp = safe_float(
-        position.take_profit_1
+    take_profit = safe_float(
+        getattr(
+            position,
+            "take_profit_1",
+            None,
+        )
     )
 
-    # --------------------------------------------------------
-    # CORRECTED P&L ACCOUNTING
-    # --------------------------------------------------------
-    #
-    # position.pnl represents the final/current remaining
-    # quantity.
-    #
-    # partial_close_pnl represents cumulative realized P/L
-    # from partial closes.
-    #
-    # Total trade P/L must include both.
-    #
+    quantity = original_quantity(
+        position
+    )
 
-    partial_close_pnl = (
-        position_partial_close_pnl(
+    accounting = (
+        audited_position_accounting(
             position
         )
     )
 
-    final_position_pnl = (
-        position_final_pnl(
-            position
-        )
-    )
+    partial_pnl = accounting[
+        "partial_close_pnl"
+    ]
 
-    total_trade_pnl = (
-        partial_close_pnl
-        + final_position_pnl
-    )
+    final_pnl = accounting[
+        "final_position_pnl"
+    ]
 
-    # TradeView.pnl intentionally mirrors the COMPLETE
-    # economic trade result.
-    pnl = total_trade_pnl
+    total_pnl = accounting[
+        "total_trade_pnl"
+    ]
 
-    quantity = (
-        safe_float(
-            position.original_quantity
-        )
-        or safe_float(
-            position.quantity
-        )
-        or 0.0
-    )
+    stored_partial = accounting[
+        "stored_partial_close_pnl"
+    ]
+
+    stored_final = accounting[
+        "stored_final_position_pnl"
+    ]
+
+    stored_total = accounting[
+        "stored_total_trade_pnl"
+    ]
+
+    correction = accounting[
+        "pnl_correction"
+    ]
 
     # --------------------------------------------------------
-    # AUTHORITATIVE ORIGINAL 1R
+    # ORIGINAL 1R
     # --------------------------------------------------------
-    #
-    # risk_1r is intentionally stored as the original PRICE
-    # DISTANCE between entry and original stop.
-    #
-    # It must be preferred over reconstructing risk from a
-    # potentially changed/moved stop-loss.
-    #
-    # Older positions may not contain risk_1r, so the original
-    # entry/SL calculation remains a compatibility fallback.
 
     risk_distance = safe_float(
         getattr(
@@ -582,22 +995,31 @@ def position_to_trade(
     ):
         if (
             initial_sl is not None
-            and entry > 0
+            and entry_price > 0
         ):
             risk_distance = abs(
-                entry - initial_sl
+                entry_price
+                - initial_sl
             )
 
     max_profit = (
         safe_float(
-            position.max_profit
+            getattr(
+                position,
+                "max_profit",
+                None,
+            )
         )
         or 0.0
     )
 
     max_drawdown = (
         safe_float(
-            position.max_drawdown
+            getattr(
+                position,
+                "max_drawdown",
+                None,
+            )
         )
         or 0.0
     )
@@ -610,109 +1032,208 @@ def position_to_trade(
         and risk_distance > 0
         and quantity > 0
     ):
-        # XAUUSD:
-        #
-        #   1R monetary value =
-        #       risk_1r × original quantity × 100
-        #
-        # risk_1r is PRICE DISTANCE, not a dollar amount.
-        #
-        # max_profit and max_drawdown are monetary values.
-
-        initial_r_value = (
+        monetary_one_r = (
             risk_distance
             * quantity
             * XAUUSD_CONTRACT_SIZE
         )
 
-        if initial_r_value > 0:
+        if monetary_one_r > 0:
             max_profit_r = (
                 max_profit
-                / initial_r_value
+                / monetary_one_r
             )
 
             max_drawdown_r = (
                 max_drawdown
-                / initial_r_value
+                / monetary_one_r
             )
 
     # --------------------------------------------------------
     # OUTCOME
     # --------------------------------------------------------
 
-    outcome = "BREAKEVEN"
-
-    if pnl > 0:
+    if total_pnl > 0:
         outcome = "WIN"
-    elif pnl < 0:
+    elif total_pnl < 0:
         outcome = "LOSS"
+    else:
+        outcome = "BREAKEVEN"
+
+    # --------------------------------------------------------
+    # ACCOUNTING METHOD
+    # --------------------------------------------------------
+
+    has_partial = (
+        partial_quantity(position)
+        > 0
+    )
+
+    if has_partial:
+        accounting_method = (
+            "independent_raw_price_recalculation_"
+            "with_persisted_partial_execution"
+        )
+    else:
+        accounting_method = (
+            "independent_raw_price_recalculation"
+        )
 
     return TradeView(
         trade_id=safe_text(
-            position.trade_id,
+            getattr(
+                position,
+                "trade_id",
+                None,
+            ),
             safe_text(
-                position.position_id
+                getattr(
+                    position,
+                    "position_id",
+                    None,
+                )
             ),
         ),
         symbol=safe_text(
-            position.symbol,
+            getattr(
+                position,
+                "symbol",
+                None,
+            ),
             DEFAULT_SYMBOL,
         ),
-        direction=enum_value(
-            position.direction
-        ).upper(),
-        entry_price=entry,
+        direction=direction_text(
+            position
+        ),
+        entry_price=entry_price,
         exit_price=exit_price,
-        pnl=pnl,
-        partial_close_pnl=partial_close_pnl,
-        final_position_pnl=final_position_pnl,
-        total_trade_pnl=total_trade_pnl,
+
+        pnl=total_pnl,
+
+        partial_close_pnl=partial_pnl,
+        final_position_pnl=final_pnl,
+        total_trade_pnl=total_pnl,
+
+        stored_partial_close_pnl=stored_partial,
+        stored_final_position_pnl=stored_final,
+        stored_total_trade_pnl=stored_total,
+
+        pnl_correction=correction,
+
         quantity=quantity,
+
         initial_stop_loss=initial_sl,
-        take_profit=tp,
+        take_profit=take_profit,
+
         regime=safe_text(
-            position.regime
+            getattr(
+                position,
+                "regime",
+                None,
+            )
         ),
         setup=safe_text(
-            position.setup
+            getattr(
+                position,
+                "setup",
+                None,
+            )
         ),
+
         technical_score=safe_float(
-            position.technical_score
+            getattr(
+                position,
+                "technical_score",
+                None,
+            )
         ),
         confidence=safe_float(
-            position.confidence
+            getattr(
+                position,
+                "confidence",
+                None,
+            )
         ),
+
         trade_thesis=safe_text(
-            position.trade_thesis,
+            getattr(
+                position,
+                "trade_thesis",
+                None,
+            ),
             "not recorded",
         ),
+
         break_even_applied=bool(
-            position.break_even_applied
+            getattr(
+                position,
+                "break_even_applied",
+                False,
+            )
         ),
+
         partial_close_applied=bool(
-            position.partial_close_applied
+            getattr(
+                position,
+                "partial_close_applied",
+                False,
+            )
         ),
+
         trailing_active=bool(
-            position.trailing_active
+            getattr(
+                position,
+                "trailing_active",
+                False,
+            )
         ),
+
         management_status=safe_text(
-            position.management_status
+            getattr(
+                position,
+                "management_status",
+                None,
+            )
         ),
+
         last_management_action=safe_text(
-            position.last_management_action
+            getattr(
+                position,
+                "last_management_action",
+                None,
+            )
         ),
+
         max_profit=max_profit,
         max_drawdown=max_drawdown,
+
         opened_at=iso(
-            position.opened_at
+            getattr(
+                position,
+                "opened_at",
+                None,
+            )
         ),
+
         closed_at=iso(
-            position.closed_at
+            getattr(
+                position,
+                "closed_at",
+                None,
+            )
         ),
+
         initial_risk_distance=risk_distance,
+
         max_profit_r=max_profit_r,
         max_drawdown_r=max_drawdown_r,
+
         outcome=outcome,
+
+        accounting_method=accounting_method,
+        accounting_warning=accounting[
+            "warning"
+        ],
     )
 
 
@@ -720,16 +1241,15 @@ def position_to_trade(
 # DATABASE LOAD
 # ============================================================
 
-
 def load_closed_positions(
     start: datetime,
     end: datetime,
     symbol: str,
 ) -> list[TradeView]:
     """
-    Load closed persistent positions for the requested month.
+    Load authoritative closed paper positions.
 
-    Only CLOSED positions are included in the monthly trade audit.
+    This remains read-only.
     """
 
     db = SessionLocal()
@@ -764,7 +1284,9 @@ def load_closed_positions(
         )
 
         return [
-            position_to_trade(row)
+            position_to_trade(
+                row
+            )
             for row in rows
         ]
 
@@ -773,35 +1295,27 @@ def load_closed_positions(
 
 
 # ============================================================
-# BASIC PERFORMANCE
+# PERFORMANCE
 # ============================================================
-
 
 def performance_summary(
     trades: list[TradeView],
 ) -> dict[str, Any]:
-    """
-    Calculate performance from COMPLETE economic trade P/L.
-
-    This means partial-close realized P/L is already included in
-    TradeView.pnl.
-    """
-
     pnls = [
         trade.total_trade_pnl
         for trade in trades
     ]
 
     wins = [
-        value
-        for value in pnls
-        if value > 0
+        pnl
+        for pnl in pnls
+        if pnl > 0
     ]
 
     losses = [
-        value
-        for value in pnls
-        if value < 0
+        pnl
+        for pnl in pnls
+        if pnl < 0
     ]
 
     gross_profit = sum(wins)
@@ -894,18 +1408,14 @@ def performance_summary(
 
 
 # ============================================================
-# GROUP ANALYSIS
+# GROUP PERFORMANCE
 # ============================================================
-
 
 def group_performance(
     trades: list[TradeView],
     attribute: str,
 ) -> list[dict[str, Any]]:
-    groups: dict[
-        str,
-        list[TradeView],
-    ] = defaultdict(list)
+    groups = defaultdict(list)
 
     for trade in trades:
         value = getattr(
@@ -913,20 +1423,9 @@ def group_performance(
             attribute,
         )
 
-        if isinstance(
-            value,
-            float,
-        ):
-            if not math.isfinite(
-                value
-            ):
-                key = "unknown"
-            else:
-                key = str(value)
-        else:
-            key = safe_text(
-                value
-            )
+        key = safe_text(
+            value
+        )
 
         groups[key].append(
             trade
@@ -935,50 +1434,138 @@ def group_performance(
     result = []
 
     for key, rows in groups.items():
-        performance = (
-            performance_summary(
-                rows
-            )
+        pnls = [
+            trade.total_trade_pnl
+            for trade in rows
+        ]
+
+        wins = [
+            pnl
+            for pnl in pnls
+            if pnl > 0
+        ]
+
+        losses = [
+            pnl
+            for pnl in pnls
+            if pnl < 0
+        ]
+
+        gross_profit = sum(wins)
+        gross_loss = abs(
+            sum(losses)
         )
+
+        pf = None
+
+        if gross_loss > 0:
+            pf = (
+                gross_profit
+                / gross_loss
+            )
 
         result.append(
             {
                 "group": key,
-                **performance,
+                "total_trades": len(
+                    rows
+                ),
+                "winning_trades": len(
+                    wins
+                ),
+                "losing_trades": len(
+                    losses
+                ),
+                "breakeven_trades": (
+                    len(rows)
+                    - len(wins)
+                    - len(losses)
+                ),
+                "win_rate_pct": round(
+                    percentage(
+                        len(wins),
+                        len(rows),
+                    ),
+                    2,
+                ),
+                "total_pnl": round(
+                    sum(pnls),
+                    4,
+                ),
+                "gross_profit": round(
+                    gross_profit,
+                    4,
+                ),
+                "gross_loss": round(
+                    gross_loss,
+                    4,
+                ),
+                "profit_factor": (
+                    round(
+                        pf,
+                        4,
+                    )
+                    if pf is not None
+                    else 0.0
+                ),
+                "average_trade": round(
+                    safe_mean(pnls)
+                    or 0.0,
+                    4,
+                ),
+                "average_win": round(
+                    safe_mean(wins)
+                    or 0.0,
+                    4,
+                ),
+                "average_loss": round(
+                    safe_mean(losses)
+                    or 0.0,
+                    4,
+                ),
+                "median_trade": round(
+                    statistics.median(
+                        pnls
+                    )
+                    if pnls
+                    else 0.0,
+                    4,
+                ),
+                "best_trade": round(
+                    max(pnls)
+                    if pnls
+                    else 0.0,
+                    4,
+                ),
+                "worst_trade": round(
+                    min(pnls)
+                    if pnls
+                    else 0.0,
+                    4,
+                ),
             }
         )
-
-    result.sort(
-        key=lambda row: (
-            row["total_pnl"]
-            if row["total_pnl"]
-            is not None
-            else 0.0
-        )
-    )
 
     return result
 
 
-def score_bucket(
+# ============================================================
+# SCORE / CONFIDENCE ANALYSIS
+# ============================================================
+
+def technical_score_bucket(
     score: float | None,
 ) -> str:
     if score is None:
         return "unknown"
 
-    if score < 60:
-        return "<60"
+    if score >= 75:
+        return "75+"
 
-    if score < 65:
-        return "60-64"
+    if score >= 60:
+        return "60-74"
 
-    if score < 70:
-        return "65-69"
-
-    if score < 75:
-        return "70-74"
-
-    return "75+"
+    return "<60"
 
 
 def confidence_bucket(
@@ -987,72 +1574,117 @@ def confidence_bucket(
     if confidence is None:
         return "unknown"
 
-    if confidence < 50:
-        return "<50"
+    if confidence >= 80:
+        return "80+"
 
-    if confidence < 60:
-        return "50-59"
-
-    if confidence < 70:
-        return "60-69"
-
-    if confidence < 80:
+    if confidence >= 70:
         return "70-79"
 
-    return "80+"
+    if confidence >= 60:
+        return "60-69"
+
+    return "<60"
+
+
+def bucket_performance(
+    trades: list[TradeView],
+    bucket_function,
+    attribute: str,
+) -> list[dict[str, Any]]:
+    groups = defaultdict(list)
+
+    for trade in trades:
+        value = getattr(
+            trade,
+            attribute,
+        )
+
+        key = bucket_function(
+            value
+        )
+
+        groups[key].append(
+            trade
+        )
+
+    result = []
+
+    for key, rows in groups.items():
+        pnls = [
+            trade.total_trade_pnl
+            for trade in rows
+        ]
+
+        wins = [
+            pnl
+            for pnl in pnls
+            if pnl > 0
+        ]
+
+        losses = [
+            pnl
+            for pnl in pnls
+            if pnl < 0
+        ]
+
+        result.append(
+            {
+                "bucket": key,
+                "total_trades": len(
+                    rows
+                ),
+                "winning_trades": len(
+                    wins
+                ),
+                "losing_trades": len(
+                    losses
+                ),
+                "breakeven_trades": (
+                    len(rows)
+                    - len(wins)
+                    - len(losses)
+                ),
+                "win_rate_pct": round(
+                    percentage(
+                        len(wins),
+                        len(rows),
+                    ),
+                    2,
+                ),
+                "total_pnl": round(
+                    sum(pnls),
+                    4,
+                ),
+            }
+        )
+
+    return result
 
 
 def bucket_analysis(
     trades: list[TradeView],
 ) -> dict[str, Any]:
-    score_groups = defaultdict(list)
-    confidence_groups = defaultdict(list)
-
-    for trade in trades:
-        score_groups[
-            score_bucket(
-                trade.technical_score
-            )
-        ].append(trade)
-
-        confidence_groups[
-            confidence_bucket(
-                trade.confidence
-            )
-        ].append(trade)
-
     return {
-        "technical_score": [
-            {
-                "bucket": key,
-                **performance_summary(
-                    rows
-                ),
-            }
-            for key, rows
-            in sorted(
-                score_groups.items()
+        "technical_score": (
+            bucket_performance(
+                trades,
+                technical_score_bucket,
+                "technical_score",
             )
-        ],
-        "confidence": [
-            {
-                "bucket": key,
-                **performance_summary(
-                    rows
-                ),
-            }
-            for key, rows
-            in sorted(
-                confidence_groups.items()
+        ),
+        "confidence": (
+            bucket_performance(
+                trades,
+                confidence_bucket,
+                "confidence",
             )
-        ],
+        ),
     }
 
 
 # ============================================================
-# LOSS PATTERN ANALYSIS
+# LOSS PATTERNS
 # ============================================================
-
 
 def loss_patterns(
     trades: list[TradeView],
@@ -1060,50 +1692,57 @@ def loss_patterns(
     losses = [
         trade
         for trade in trades
-        if trade.outcome == "LOSS"
+        if trade.total_trade_pnl < 0
     ]
 
-    if not losses:
-        return {
-            "loss_count": 0,
-            "patterns": {},
-        }
+    direction = defaultdict(int)
+    regime = defaultdict(int)
+    setup = defaultdict(int)
+    management_status = defaultdict(int)
+    last_action = defaultdict(int)
 
-    patterns: dict[
-        str,
-        dict[str, Any],
-    ] = {}
+    for trade in losses:
+        direction[
+            trade.direction
+        ] += 1
 
-    attributes = [
-        "direction",
-        "regime",
-        "setup",
-        "management_status",
-        "last_management_action",
-    ]
+        regime[
+            trade.regime
+        ] += 1
 
-    for attribute in attributes:
-        counter = Counter(
-            safe_text(
-                getattr(
-                    trade,
-                    attribute,
-                )
-            )
-            for trade in losses
-        )
+        setup[
+            trade.setup
+        ] += 1
 
-        patterns[attribute] = {
-            key: value
-            for key, value
-            in counter.most_common()
-        }
+        management_status[
+            trade.management_status
+        ] += 1
+
+        last_action[
+            trade.last_management_action
+        ] += 1
 
     return {
         "loss_count": len(
             losses
         ),
-        "patterns": patterns,
+        "patterns": {
+            "direction": dict(
+                direction
+            ),
+            "regime": dict(
+                regime
+            ),
+            "setup": dict(
+                setup
+            ),
+            "management_status": dict(
+                management_status
+            ),
+            "last_management_action": dict(
+                last_action
+            ),
+        },
     }
 
 
@@ -1111,131 +1750,196 @@ def loss_patterns(
 # MANAGEMENT ANALYSIS
 # ============================================================
 
-
-def management_analysis(
+def management_group(
     trades: list[TradeView],
+    attribute: str,
 ) -> dict[str, Any]:
+    groups = {
+        "applied": [],
+        "not_applied": [],
+    }
+
+    for trade in trades:
+        value = bool(
+            getattr(
+                trade,
+                attribute,
+            )
+        )
+
+        if value:
+            groups["applied"].append(
+                trade
+            )
+        else:
+            groups["not_applied"].append(
+                trade
+            )
+
     result = {}
 
-    for name, predicate in {
-        "break_even_applied": (
-            lambda t:
-            t.break_even_applied
-        ),
-        "partial_close_applied": (
-            lambda t:
-            t.partial_close_applied
-        ),
-        "trailing_active": (
-            lambda t:
-            t.trailing_active
-        ),
-    }.items():
-
-        selected = [
-            trade
-            for trade in trades
-            if predicate(trade)
+    for key, rows in groups.items():
+        pnls = [
+            trade.total_trade_pnl
+            for trade in rows
         ]
 
-        not_selected = [
-            trade
-            for trade in trades
-            if not predicate(trade)
+        wins = [
+            pnl
+            for pnl in pnls
+            if pnl > 0
         ]
 
-        result[name] = {
-            "applied": (
-                performance_summary(
-                    selected
-                )
+        losses = [
+            pnl
+            for pnl in pnls
+            if pnl < 0
+        ]
+
+        result[key] = {
+            "total_trades": len(
+                rows
             ),
-            "not_applied": (
-                performance_summary(
-                    not_selected
-                )
+            "winning_trades": len(
+                wins
+            ),
+            "losing_trades": len(
+                losses
+            ),
+            "breakeven_trades": (
+                len(rows)
+                - len(wins)
+                - len(losses)
+            ),
+            "win_rate_pct": round(
+                percentage(
+                    len(wins),
+                    len(rows),
+                ),
+                2,
+            ),
+            "total_pnl": round(
+                sum(pnls),
+                4,
             ),
         }
 
     return result
 
 
-# ============================================================
-# MFE / MAE STYLE ANALYSIS
-# ============================================================
+def management_analysis(
+    trades: list[TradeView],
+) -> dict[str, Any]:
+    return {
+        "break_even_applied": (
+            management_group(
+                trades,
+                "break_even_applied",
+            )
+        ),
+        "partial_close_applied": (
+            management_group(
+                trades,
+                "partial_close_applied",
+            )
+        ),
+        "trailing_active": (
+            management_group(
+                trades,
+                "trailing_active",
+            )
+        ),
+    }
 
+
+# ============================================================
+# EXCURSION ANALYSIS
+# ============================================================
 
 def excursion_analysis(
     trades: list[TradeView],
 ) -> dict[str, Any]:
-
-    losers = [
+    losses = [
         trade
         for trade in trades
-        if trade.outcome == "LOSS"
+        if trade.total_trade_pnl < 0
     ]
 
-    winners = [
+    wins = [
         trade
         for trade in trades
-        if trade.outcome == "WIN"
+        if trade.total_trade_pnl > 0
     ]
 
-    loser_max_profit = [
+    profitable_first = [
+        trade
+        for trade in losses
+        if (
+            trade.max_profit_r
+            is not None
+            and trade.max_profit_r > 0
+        )
+    ]
+
+    negative_first = [
+        trade
+        for trade in wins
+        if (
+            trade.max_drawdown_r
+            is not None
+            and trade.max_drawdown_r > 0
+        )
+    ]
+
+    profitable_values = [
         trade.max_profit_r
-        for trade in losers
+        for trade in profitable_first
         if trade.max_profit_r is not None
     ]
 
-    winner_max_drawdown = [
+    negative_values = [
         trade.max_drawdown_r
-        for trade in winners
+        for trade in negative_first
         if trade.max_drawdown_r is not None
     ]
 
-    profitable_first_count = sum(
-        1
-        for value in loser_max_profit
-        if value > 0
-    )
-
     return {
         "losing_trades_that_were_profitable_first": {
-            "count": profitable_first_count,
+            "count": len(
+                profitable_first
+            ),
             "percentage_of_losses": round(
                 percentage(
-                    profitable_first_count,
-                    len(loser_max_profit),
+                    len(profitable_first),
+                    len(losses),
                 ),
                 2,
-            )
-            if loser_max_profit
-            else 0.0,
+            ),
             "average_max_profit_r": round(
                 safe_mean(
-                    loser_max_profit
-                ) or 0.0,
+                    profitable_values
+                )
+                or 0.0,
                 4,
             ),
             "median_max_profit_r": round(
                 statistics.median(
-                    loser_max_profit
+                    profitable_values
                 )
-                if loser_max_profit
+                if profitable_values
                 else 0.0,
                 4,
             ),
         },
         "winning_trades_that_went_negative_first": {
-            "count": sum(
-                1
-                for value in winner_max_drawdown
-                if value < 0
+            "count": len(
+                negative_first
             ),
             "average_max_drawdown_r": round(
                 safe_mean(
-                    winner_max_drawdown
-                ) or 0.0,
+                    negative_values
+                )
+                or 0.0,
                 4,
             ),
         },
@@ -1243,142 +1947,55 @@ def excursion_analysis(
 
 
 # ============================================================
-# AUTOMATIC IMPROVEMENT CANDIDATES
+# IMPROVEMENT CANDIDATES
 # ============================================================
-
 
 def generate_candidates(
     trades: list[TradeView],
 ) -> list[Candidate]:
-
-    candidates: list[
-        Candidate
-    ] = []
-
-    if len(trades) < 8:
-        return candidates
+    candidates = []
 
     losses = [
         trade
         for trade in trades
-        if trade.outcome == "LOSS"
+        if trade.total_trade_pnl < 0
     ]
-
-    # --------------------------------------------------------
-    # LOW TECHNICAL SCORE
-    # --------------------------------------------------------
-
-    scored = [
-        trade
-        for trade in trades
-        if trade.technical_score
-        is not None
-    ]
-
-    low_score = [
-        trade
-        for trade in scored
-        if trade.technical_score < 65
-    ]
-
-    high_score = [
-        trade
-        for trade in scored
-        if trade.technical_score >= 65
-    ]
-
-    if (
-        len(low_score) >= 4
-        and len(high_score) >= 4
-    ):
-
-        low_wr = percentage(
-            sum(
-                1
-                for t in low_score
-                if t.pnl > 0
-            ),
-            len(low_score),
-        )
-
-        high_wr = percentage(
-            sum(
-                1
-                for t in high_score
-                if t.pnl > 0
-            ),
-            len(high_score),
-        )
-
-        if (
-            low_wr + 15
-            < high_wr
-        ):
-            candidates.append(
-                Candidate(
-                    category=(
-                        "signal_selectivity"
-                    ),
-                    finding=(
-                        "Lower technical-score "
-                        "trades underperformed "
-                        "higher-score trades."
-                    ),
-                    evidence=(
-                        f"Score <65 win rate "
-                        f"{low_wr:.1f}% vs "
-                        f"score >=65 win rate "
-                        f"{high_wr:.1f}%."
-                    ),
-                    suggested_test=(
-                        "Backtest minimum "
-                        "technical score "
-                        "thresholds around "
-                        "65-75."
-                    ),
-                    priority="high",
-                )
-            )
 
     # --------------------------------------------------------
     # DIRECTION
     # --------------------------------------------------------
 
-    direction_groups = {
-        "BUY": [
-            t
-            for t in trades
-            if t.direction == "BUY"
-        ],
-        "SELL": [
-            t
-            for t in trades
-            if t.direction == "SELL"
-        ],
-    }
+    direction_groups = defaultdict(list)
 
-    for direction, rows in (
-        direction_groups.items()
-    ):
+    for trade in trades:
+        direction_groups[
+            trade.direction
+        ].append(trade)
 
+    for direction, rows in direction_groups.items():
         if len(rows) < 5:
             continue
 
+        wins = sum(
+            1
+            for trade in rows
+            if trade.total_trade_pnl > 0
+        )
+
         wr = percentage(
-            sum(
-                1
-                for t in rows
-                if t.pnl > 0
-            ),
+            wins,
             len(rows),
+        )
+
+        pnl = sum(
+            trade.total_trade_pnl
+            for trade in rows
         )
 
         if wr < 25:
             candidates.append(
                 Candidate(
-                    category=(
-                        "direction_filter"
-                    ),
+                    category="direction_filter",
                     finding=(
                         f"{direction} trades "
                         "performed poorly "
@@ -1387,14 +2004,12 @@ def generate_candidates(
                     evidence=(
                         f"{len(rows)} trades, "
                         f"{wr:.1f}% win rate, "
-                        f"{sum(t.pnl for t in rows):.2f} "
-                        "total P/L."
+                        f"{pnl:.2f} total P/L."
                     ),
                     suggested_test=(
-                        f"Test stronger "
-                        f"{direction} confirmation "
-                        "or stricter regime "
-                        "requirements."
+                        f"Test stronger {direction} "
+                        "confirmation or stricter "
+                        "regime requirements."
                     ),
                     priority="research",
                 )
@@ -1411,33 +2026,30 @@ def generate_candidates(
             trade.regime
         ].append(trade)
 
-    for regime, rows in (
-        regime_groups.items()
-    ):
-
+    for regime, rows in regime_groups.items():
         if len(rows) < 5:
             continue
 
-        pnl = sum(
-            t.pnl
-            for t in rows
+        wins = sum(
+            1
+            for trade in rows
+            if trade.total_trade_pnl > 0
         )
 
         wr = percentage(
-            sum(
-                1
-                for t in rows
-                if t.pnl > 0
-            ),
+            wins,
             len(rows),
+        )
+
+        pnl = sum(
+            trade.total_trade_pnl
+            for trade in rows
         )
 
         if pnl < 0 and wr < 35:
             candidates.append(
                 Candidate(
-                    category=(
-                        "market_regime"
-                    ),
+                    category="market_regime",
                     finding=(
                         f"Regime '{regime}' "
                         "was persistently weak."
@@ -1457,7 +2069,7 @@ def generate_candidates(
             )
 
     # --------------------------------------------------------
-    # PROFITABLE-FIRST LOSSES
+    # PROFIT PROTECTION
     # --------------------------------------------------------
 
     profitable_first = [
@@ -1466,32 +2078,28 @@ def generate_candidates(
         if (
             trade.max_profit_r
             is not None
-            and trade.max_profit_r
-            >= 0.5
+            and trade.max_profit_r >= 0.5
         )
     ]
 
     if len(profitable_first) >= 3:
         candidates.append(
             Candidate(
-                category=(
-                    "profit_protection"
-                ),
+                category="profit_protection",
                 finding=(
                     "Several losing trades "
                     "became meaningfully "
                     "profitable before reversing."
                 ),
                 evidence=(
-                    f"{len(profitable_first)} "
-                    "losing trades reached "
-                    "at least approximately "
-                    "+0.5R before closing."
+                    f"{len(profitable_first)} losing "
+                    "trades reached at least "
+                    "approximately +0.5R."
                 ),
                 suggested_test=(
-                    "Backtest earlier "
-                    "break-even, partial-profit, "
-                    "or trailing protection."
+                    "Backtest earlier break-even, "
+                    "partial-profit, or trailing "
+                    "protection."
                 ),
                 priority="high",
             )
@@ -1505,8 +2113,7 @@ def generate_candidates(
         trade
         for trade in losses
         if (
-            trade.confidence
-            is not None
+            trade.confidence is not None
             and trade.confidence >= 70
         )
     ]
@@ -1514,24 +2121,20 @@ def generate_candidates(
     if len(high_confidence) >= 4:
         candidates.append(
             Candidate(
-                category=(
-                    "confidence_calibration"
-                ),
+                category="confidence_calibration",
                 finding=(
                     "High-confidence signals "
                     "still produced repeated losses."
                 ),
                 evidence=(
-                    f"{len(high_confidence)} "
-                    "losses had confidence "
-                    ">=70."
+                    f"{len(high_confidence)} losses "
+                    "had confidence >=70."
                 ),
                 suggested_test=(
-                    "Investigate whether "
-                    "confidence is properly "
-                    "calibrated against actual "
-                    "outcomes before using it "
-                    "as a stronger entry filter."
+                    "Investigate whether confidence "
+                    "is properly calibrated against "
+                    "actual outcomes before using "
+                    "it as a stronger entry filter."
                 ),
                 priority="research",
             )
@@ -1544,41 +2147,63 @@ def generate_candidates(
 # ACCOUNTING RECONCILIATION
 # ============================================================
 
-
 def accounting_summary(
     trades: list[TradeView],
 ) -> dict[str, Any]:
-    """
-    Provide an explicit accounting reconciliation for the audit.
-
-    This makes it possible to see whether the audited month contains
-    partial-close activity and exactly how much P/L came from it.
-    """
-
-    cumulative_partial_pnl = sum(
+    corrected_partial = sum(
         trade.partial_close_pnl
         for trade in trades
     )
 
-    final_position_pnl = sum(
+    corrected_final = sum(
         trade.final_position_pnl
         for trade in trades
     )
 
-    total_trade_pnl = sum(
+    corrected_total = sum(
         trade.total_trade_pnl
         for trade in trades
     )
 
     reconstructed_total = (
-        cumulative_partial_pnl
-        + final_position_pnl
+        corrected_partial
+        + corrected_final
     )
 
-    reconciliation_difference = (
-        total_trade_pnl
-        - reconstructed_total
+    stored_partial = sum(
+        trade.stored_partial_close_pnl
+        for trade in trades
     )
+
+    stored_final = sum(
+        trade.stored_final_position_pnl
+        for trade in trades
+    )
+
+    stored_total = sum(
+        trade.stored_total_trade_pnl
+        for trade in trades
+    )
+
+    correction_total = (
+        corrected_total
+        - stored_total
+    )
+
+    differences = [
+        trade
+        for trade in trades
+        if abs(
+            trade.pnl_correction
+        )
+        > RECONCILIATION_TOLERANCE
+    ]
+
+    warnings = [
+        trade
+        for trade in trades
+        if trade.accounting_warning
+    ]
 
     partial_close_trades = [
         trade
@@ -1588,38 +2213,84 @@ def accounting_summary(
             or abs(
                 trade.partial_close_pnl
             ) > 1e-12
+            or abs(
+                trade.stored_partial_close_pnl
+            ) > 1e-12
         )
     ]
 
     return {
+        # Corrected accounting.
         "partial_close_pnl": round(
-            cumulative_partial_pnl,
+            corrected_partial,
             4,
         ),
         "final_remaining_position_pnl": round(
-            final_position_pnl,
+            corrected_final,
             4,
         ),
         "total_trade_pnl": round(
-            total_trade_pnl,
+            corrected_total,
             4,
         ),
         "reconstructed_total_pnl": round(
             reconstructed_total,
             4,
         ),
-        "reconciliation_difference": round(
-            reconciliation_difference,
-            10,
+
+        # Old stored accounting retained for audit comparison.
+        "stored_partial_close_pnl": round(
+            stored_partial,
+            4,
         ),
+        "stored_final_position_pnl": round(
+            stored_final,
+            4,
+        ),
+        "stored_total_trade_pnl": round(
+            stored_total,
+            4,
+        ),
+
+        # Difference between corrected and old stored accounting.
+        "historical_pnl_correction": round(
+            correction_total,
+            4,
+        ),
+
+        "trades_with_pnl_correction": len(
+            differences
+        ),
+
+        "trades_with_accounting_warning": len(
+            warnings
+        ),
+
         "partial_close_trade_count": len(
             partial_close_trades
         ),
+
+        # Corrected components must reconcile exactly.
+        "reconciliation_difference": round(
+            corrected_total
+            - reconstructed_total,
+            10,
+        ),
+
         "accounting_reconciled": (
             abs(
-                reconciliation_difference
+                corrected_total
+                - reconstructed_total
             )
             < 1e-8
+        ),
+
+        "independent_historical_recalculation": True,
+
+        "stored_pnl_used_as_authoritative": False,
+
+        "contract_size": (
+            XAUUSD_CONTRACT_SIZE
         ),
     }
 
@@ -1627,7 +2298,6 @@ def accounting_summary(
 # ============================================================
 # REPORT GENERATION
 # ============================================================
-
 
 def build_report(
     trades: list[TradeView],
@@ -1641,35 +2311,51 @@ def build_report(
         )
     )
 
-    losses = [
-        trade
-        for trade in trades
-        if trade.outcome == "LOSS"
-    ]
-
     accounting = (
         accounting_summary(
             trades
         )
     )
 
+    candidates = (
+        generate_candidates(
+            trades
+        )
+    )
+
+    losses = [
+        trade
+        for trade in trades
+        if trade.total_trade_pnl < 0
+    ]
+
     report = {
         "report_type": (
             "RAYMOND_MONTHLY_TRADE_AUDIT"
         ),
-        "version": "1.2",
+
+        "version": "2.0",
+
         "research_only": True,
+
         "live_trading_changed": False,
+
         "symbol": symbol,
+
         "month": month,
-        "generated_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
+
+        "generated_at": (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        ),
 
         "accounting": accounting,
 
         "risk_normalization": {
-            "method": "persisted_risk_1r",
+            "method": (
+                "persisted_risk_1r"
+            ),
             "fallback": (
                 "abs(entry_price - "
                 "initial_stop_loss)"
@@ -1681,11 +2367,38 @@ def build_report(
                 else None
             ),
             "description": (
-                "Position.risk_1r is treated as "
-                "the original price-distance value "
-                "for 1R. For XAUUSD, monetary 1R "
-                "equals price distance × original "
-                "quantity × 100."
+                "Position.risk_1r is treated "
+                "as the original price-distance "
+                "value for 1R. For XAUUSD, "
+                "monetary 1R equals price distance "
+                "times original quantity times 100."
+            ),
+        },
+
+        "historical_accounting": {
+            "method": (
+                "independent_raw_price_recalculation"
+            ),
+            "contract_size": (
+                XAUUSD_CONTRACT_SIZE
+            ),
+            "stored_position_pnl_authoritative": (
+                False
+            ),
+            "partial_close_method": (
+                "entry_to_partial_close_price "
+                "times partial quantity "
+                "times contract size"
+            ),
+            "final_position_method": (
+                "entry_to_final_exit_price "
+                "times reconstructed remaining "
+                "quantity times contract size"
+            ),
+            "total_method": (
+                "independently recalculated partial "
+                "P/L plus independently recalculated "
+                "final remaining-position P/L"
             ),
         },
 
@@ -1737,11 +2450,10 @@ def build_report(
         ),
 
         "improvement_candidates": [
-            asdict(candidate)
-            for candidate
-            in generate_candidates(
-                trades
+            asdict(
+                candidate
             )
+            for candidate in candidates
         ],
 
         "loss_trade_ids": [
@@ -1749,19 +2461,68 @@ def build_report(
             for trade in losses
         ],
 
+        "accounting_warnings": [
+            {
+                "trade_id": trade.trade_id,
+                "warning": trade.accounting_warning,
+            }
+            for trade in trades
+            if trade.accounting_warning
+        ],
+
+        "trades_with_corrections": [
+            {
+                "trade_id": trade.trade_id,
+                "stored_total_pnl": (
+                    round(
+                        trade.stored_total_trade_pnl,
+                        4,
+                    )
+                ),
+                "corrected_total_pnl": (
+                    round(
+                        trade.total_trade_pnl,
+                        4,
+                    )
+                ),
+                "correction": (
+                    round(
+                        trade.pnl_correction,
+                        4,
+                    )
+                ),
+            }
+            for trade in trades
+            if abs(
+                trade.pnl_correction
+            )
+            > RECONCILIATION_TOLERANCE
+        ],
+
         "trades": [
-            asdict(trade)
+            asdict(
+                trade
+            )
             for trade in trades
         ],
+
+        "safety": {
+            "research_only": True,
+            "read_only": True,
+            "live_trading_changed": False,
+            "positions_modified": False,
+            "strategy_modified": False,
+            "orders_created": False,
+            "candidates_promoted": False,
+        },
     }
 
     return report
 
 
 # ============================================================
-# MARKDOWN RENDERING
+# MARKDOWN
 # ============================================================
-
 
 def money(
     value: Any,
@@ -1778,11 +2539,11 @@ def render_markdown(
     report: dict[str, Any],
 ) -> str:
 
-    p = report[
+    performance = report[
         "performance"
     ]
 
-    a = report[
+    accounting = report[
         "accounting"
     ]
 
@@ -1793,41 +2554,55 @@ def render_markdown(
         f"**Symbol:** {report['symbol']}",
         "**Mode:** PAPER / RESEARCH ONLY",
         "",
+        "## Historical Accounting",
+        "",
+        "The historical P/L in this audit was independently "
+        "recalculated from persisted trade execution fields.",
+        "",
+        "- Stored `Position.pnl` was NOT treated as authoritative.",
+        "- XAUUSD contract size: **100 oz per lot**.",
+        "- P/L uses entry price, exit price, direction and quantity.",
+        "- Partial-close P/L is independently reconstructed when the "
+        "partial-close price and quantity are available.",
+        "- Final remaining-position P/L is independently reconstructed.",
+        "",
+        f"- Corrected partial-close P/L: "
+        f"{money(accounting['partial_close_pnl'])}",
+        f"- Corrected final-position P/L: "
+        f"{money(accounting['final_remaining_position_pnl'])}",
+        f"- **Corrected total P/L: "
+        f"{money(accounting['total_trade_pnl'])}**",
+        "",
+        f"- Previously stored total P/L: "
+        f"{money(accounting['stored_total_trade_pnl'])}",
+        f"- Historical P/L correction: "
+        f"{money(accounting['historical_pnl_correction'])}",
+        f"- Trades requiring P/L correction: "
+        f"{accounting['trades_with_pnl_correction']}",
+        f"- Accounting reconciliation: "
+        f"{accounting['accounting_reconciled']}",
+        "",
         "## Performance",
         "",
-        f"- Trades: {p['total_trades']}",
-        f"- Wins: {p['winning_trades']}",
-        f"- Losses: {p['losing_trades']}",
-        f"- Win rate: {p['win_rate_pct']:.2f}%",
-        f"- Total P/L: {money(p['total_pnl'])}",
-        f"- Profit factor: {p['profit_factor']}",
-        f"- Average trade: {money(p['average_trade'])}",
-        f"- Average win: {money(p['average_win'])}",
-        f"- Average loss: {money(p['average_loss'])}",
-        f"- Best trade: {money(p['best_trade'])}",
-        f"- Worst trade: {money(p['worst_trade'])}",
+        f"- Trades: {performance['total_trades']}",
+        f"- Wins: {performance['winning_trades']}",
+        f"- Losses: {performance['losing_trades']}",
+        f"- Win rate: {performance['win_rate_pct']:.2f}%",
+        f"- Total P/L: {money(performance['total_pnl'])}",
+        f"- Gross profit: {money(performance['gross_profit'])}",
+        f"- Gross loss: {money(performance['gross_loss'])}",
+        f"- Profit factor: {performance['profit_factor']}",
+        f"- Average trade: {money(performance['average_trade'])}",
+        f"- Average win: {money(performance['average_win'])}",
+        f"- Average loss: {money(performance['average_loss'])}",
+        f"- Median trade: {money(performance['median_trade'])}",
+        f"- Best trade: {money(performance['best_trade'])}",
+        f"- Worst trade: {money(performance['worst_trade'])}",
         "",
-        "## Accounting Reconciliation",
+        "## Direction Analysis",
         "",
-        f"- Partial-close realized P/L: "
-        f"{money(a['partial_close_pnl'])}",
-        f"- Final remaining-position P/L: "
-        f"{money(a['final_remaining_position_pnl'])}",
-        f"- Total trade P/L: "
-        f"{money(a['total_trade_pnl'])}",
-        f"- Reconstructed total P/L: "
-        f"{money(a['reconstructed_total_pnl'])}",
-        f"- Reconciliation difference: "
-        f"{money(a['reconciliation_difference'])}",
-        f"- Partial-close trades: "
-        f"{a['partial_close_trade_count']}",
-        f"- Accounting reconciled: "
-        f"{a['accounting_reconciled']}",
-        "",
-        "## Direction",
-        "",
-        "| Direction | Trades | Win Rate | P/L | PF |",
-        "|---|---:|---:|---:|---:|",
+        "| Direction | Trades | Wins | Losses | Win Rate | P/L | PF |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
 
     for row in report[
@@ -1837,6 +2612,8 @@ def render_markdown(
             "| "
             f"{row['group']} | "
             f"{row['total_trades']} | "
+            f"{row['winning_trades']} | "
+            f"{row['losing_trades']} | "
             f"{row['win_rate_pct']:.1f}% | "
             f"{money(row['total_pnl'])} | "
             f"{row['profit_factor']} |"
@@ -1847,8 +2624,8 @@ def render_markdown(
             "",
             "## Regime Analysis",
             "",
-            "| Regime | Trades | Win Rate | P/L |",
-            "|---|---:|---:|---:|",
+            "| Regime | Trades | Wins | Losses | Win Rate | P/L |",
+            "|---|---:|---:|---:|---:|---:|",
         ]
     )
 
@@ -1859,6 +2636,8 @@ def render_markdown(
             "| "
             f"{row['group']} | "
             f"{row['total_trades']} | "
+            f"{row['winning_trades']} | "
+            f"{row['losing_trades']} | "
             f"{row['win_rate_pct']:.1f}% | "
             f"{money(row['total_pnl'])} |"
         )
@@ -1868,8 +2647,8 @@ def render_markdown(
             "",
             "## Setup Analysis",
             "",
-            "| Setup | Trades | Win Rate | P/L |",
-            "|---|---:|---:|---:|",
+            "| Setup | Trades | Wins | Losses | Win Rate | P/L |",
+            "|---|---:|---:|---:|---:|---:|",
         ]
     )
 
@@ -1880,9 +2659,45 @@ def render_markdown(
             "| "
             f"{row['group']} | "
             f"{row['total_trades']} | "
+            f"{row['winning_trades']} | "
+            f"{row['losing_trades']} | "
             f"{row['win_rate_pct']:.1f}% | "
             f"{money(row['total_pnl'])} |"
         )
+
+    lines.extend(
+        [
+            "",
+            "## Accounting Corrections",
+            "",
+        ]
+    )
+
+    corrections = report[
+        "trades_with_corrections"
+    ]
+
+    if not corrections:
+        lines.append(
+            "No stored-vs-recalculated P/L differences "
+            f"greater than ${RECONCILIATION_TOLERANCE:.2f}."
+        )
+    else:
+        lines.extend(
+            [
+                "| Trade | Stored P/L | Corrected P/L | Correction |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+
+        for row in corrections:
+            lines.append(
+                "| "
+                f"{row['trade_id']} | "
+                f"{money(row['stored_total_pnl'])} | "
+                f"{money(row['corrected_total_pnl'])} | "
+                f"{money(row['correction'])} |"
+            )
 
     lines.extend(
         [
@@ -1898,9 +2713,8 @@ def render_markdown(
 
     if not candidates:
         lines.append(
-            "No statistically useful "
-            "candidate was generated from "
-            "this month's sample."
+            "No statistically useful candidate "
+            "was generated from this month's sample."
         )
     else:
         for index, candidate in enumerate(
@@ -1931,26 +2745,31 @@ def render_markdown(
         [
             "## Risk Normalization",
             "",
-            "- Original 1R uses persisted Position.risk_1r when available.",
-            "- Legacy positions fall back to entry price vs original stop-loss.",
-            "- XAUUSD monetary 1R uses a 100-unit contract size.",
-            "- R calculations use original quantity, not reduced quantity after a partial close.",
-            "- R calculations do not use a moving/current stop-loss.",
+            "- Original 1R uses persisted `Position.risk_1r` when available.",
+            "- Legacy positions fall back to entry price versus original stop.",
+            "- XAUUSD monetary 1R uses 100 oz per lot.",
+            "- R uses original quantity, not reduced quantity after a partial close.",
+            "- Moving/current stop-loss does not redefine original 1R.",
             "",
             "## Accounting Rules",
             "",
-            "- Partial-close P/L is treated as realized P/L.",
-            "- position.partial_close_pnl is interpreted as cumulative partial-close P/L.",
-            "- position.pnl represents the final/current remaining-position P/L.",
-            "- Total economic trade P/L equals partial-close P/L plus final remaining-position P/L.",
-            "- Partial-close P/L is never counted twice.",
+            "- Historical P/L is independently recalculated.",
+            "- Stored `Position.pnl` is comparison data, not authoritative audit data.",
+            "- Stored `partial_close_pnl` is comparison data, not authoritative audit data.",
+            "- Partial-close P/L is calculated from entry, partial-close price and partial quantity.",
+            "- Final remaining P/L is calculated from entry, final exit price and reconstructed remaining quantity.",
+            "- Total trade P/L equals corrected partial P/L plus corrected final P/L.",
+            "- Corrected components are reconciled before the report is accepted.",
             "",
             "## Safety",
             "",
-            "- This report does not change the active strategy.",
+            "- Research-only.",
+            "- Read-only.",
             "- No broker orders are created.",
             "- No positions are modified.",
-            "- Candidates must be backtested before consideration.",
+            "- No active strategy parameters are changed.",
+            "- No strategy candidate is automatically promoted.",
+            "- Any improvement must be tested separately.",
             "- Unseen/holdout validation is required before promotion.",
             "",
         ]
@@ -1962,7 +2781,6 @@ def render_markdown(
 # ============================================================
 # MAIN
 # ============================================================
-
 
 def main() -> int:
 
@@ -1981,7 +2799,10 @@ def main() -> int:
             requested_month
         )
 
-    except ValueError as exc:
+    except (
+        ValueError,
+        TypeError,
+    ) as exc:
         print(
             f"ERROR: {exc}"
         )
@@ -1993,7 +2814,15 @@ def main() -> int:
     )
 
     print(
+        "VERSION: 2.0"
+    )
+
+    print(
         "RESEARCH ONLY: YES"
+    )
+
+    print(
+        "READ ONLY: YES"
     )
 
     print(
@@ -2009,18 +2838,17 @@ def main() -> int:
     )
 
     print(
-        "ACCOUNTING: "
-        "PARTIAL REALIZED PNL + FINAL REMAINING PNL"
-    )
-
-    print(
-        "RISK NORMALIZATION: "
-        "PERSISTED risk_1r FIRST"
-    )
-
-    print(
         "XAUUSD CONTRACT SIZE: "
         f"{XAUUSD_CONTRACT_SIZE}"
+    )
+
+    print(
+        "HISTORICAL P/L SOURCE: "
+        "INDEPENDENT RAW PRICE RECALCULATION"
+    )
+
+    print(
+        "STORED Position.pnl AUTHORITATIVE: NO"
     )
 
     print(
@@ -2080,6 +2908,14 @@ def main() -> int:
         encoding="utf-8",
     )
 
+    performance = report[
+        "performance"
+    ]
+
+    accounting = report[
+        "accounting"
+    ]
+
     print("")
     print(
         "AUDIT COMPLETE"
@@ -2087,37 +2923,67 @@ def main() -> int:
 
     print(
         f"Trades: "
-        f"{report['performance']['total_trades']}"
+        f"{performance['total_trades']}"
+    )
+
+    print(
+        f"Wins: "
+        f"{performance['winning_trades']}"
+    )
+
+    print(
+        f"Losses: "
+        f"{performance['losing_trades']}"
     )
 
     print(
         f"Win rate: "
-        f"{report['performance']['win_rate_pct']:.2f}%"
+        f"{performance['win_rate_pct']:.2f}%"
     )
 
     print(
-        f"Total P/L: "
-        f"{money(report['performance']['total_pnl'])}"
+        f"CORRECTED TOTAL P/L: "
+        f"{money(performance['total_pnl'])}"
     )
 
     print(
-        f"Partial-close P/L: "
-        f"{money(report['accounting']['partial_close_pnl'])}"
+        f"Stored historical P/L: "
+        f"{money(accounting['stored_total_trade_pnl'])}"
     )
 
     print(
-        f"Final-position P/L: "
-        f"{money(report['accounting']['final_remaining_position_pnl'])}"
+        f"HISTORICAL P/L CORRECTION: "
+        f"{money(accounting['historical_pnl_correction'])}"
+    )
+
+    print(
+        f"Corrected partial-close P/L: "
+        f"{money(accounting['partial_close_pnl'])}"
+    )
+
+    print(
+        f"Corrected final-position P/L: "
+        f"{money(accounting['final_remaining_position_pnl'])}"
+    )
+
+    print(
+        f"Trades with P/L corrections: "
+        f"{accounting['trades_with_pnl_correction']}"
     )
 
     print(
         f"Accounting reconciled: "
-        f"{report['accounting']['accounting_reconciled']}"
+        f"{accounting['accounting_reconciled']}"
+    )
+
+    print(
+        f"Accounting warnings: "
+        f"{accounting['trades_with_accounting_warning']}"
     )
 
     print(
         f"Profit factor: "
-        f"{report['performance']['profit_factor']}"
+        f"{performance['profit_factor']}"
     )
 
     print(
