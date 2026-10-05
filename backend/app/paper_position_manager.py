@@ -4,6 +4,9 @@ RAYMOND v2.8 - Paper Position Management Integration
 Stage 17
 Advanced Trade Management Integration
 
+Stage 18
+Exact Partial-Close Accounting
+
 Responsibilities:
 - Load open persistent paper positions.
 - Update current market prices.
@@ -11,6 +14,7 @@ Responsibilities:
 - Ask AdvancedTradeManager for a management decision.
 - Persist safe management state changes.
 - Prevent repeated management actions after restart.
+- Persist exact partial-close execution details.
 - Remain completely paper/read-only.
 
 This module NEVER:
@@ -27,7 +31,6 @@ This module is the integration layer between them.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 from sqlalchemy.orm import Session
@@ -38,7 +41,6 @@ try:
         ManagementAction,
         PositionSnapshot,
         TradeDirection,
-        management_decision_to_dict,
     )
     from .position_repository import PositionRepository
     from .models import PositionStatus
@@ -48,7 +50,6 @@ except ImportError:
         ManagementAction,
         PositionSnapshot,
         TradeDirection,
-        management_decision_to_dict,
     )
     from position_repository import PositionRepository
     from models import PositionStatus
@@ -465,7 +466,6 @@ class PaperPositionManager:
                     "Break-even decision is missing new_stop_loss."
                 )
 
-            # Re-read the position after price persistence.
             refreshed = PositionRepository.get_by_position_id(
                 self.db,
                 self._position_id(updated),
@@ -646,19 +646,29 @@ class PaperPositionManager:
                     ),
                 )
 
-            remaining = self._quantity(
+            available_quantity = self._quantity(
                 refreshed
-            ) - quantity
+            )
 
-            if remaining <= 0:
+            if quantity >= available_quantity:
                 raise PaperPositionManagementError(
                     "Partial close would close the entire position."
                 )
 
+            remaining = available_quantity - quantity
+
+            # Stage 18:
+            # Persist the exact paper execution price and the exact
+            # quantity closed so realized partial P/L can be
+            # reconciled later without guessing.
             PositionRepository.mark_partial_close(
                 self.db,
                 self._position_id(refreshed),
                 remaining,
+                execution_price=float(
+                    snapshot.current_price
+                ),
+                closed_quantity=quantity,
             )
 
             persisted = True
@@ -838,5 +848,3 @@ def manage_paper_positions(
     return manager.results_to_dict(
         results
     )
-
-
