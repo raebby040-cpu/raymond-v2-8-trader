@@ -1,8 +1,17 @@
 """
-RAYMOND v2.8 - Stage 16.2 Persistent Position Tests
+RAYMOND v2.8 - Persistent Position Repository Tests
 
-These tests verify the persistent position state independently of the
-live application database and without contacting MT5 or a broker.
+These tests verify persistent paper-position state independently of the
+live application database and without contacting MT5, a broker, or live
+trading services.
+
+Accounting rules tested here:
+
+- XAUUSD uses a 100 oz contract size.
+- PnL = price movement × lots × 100 for XAUUSD.
+- partial_close_pnl is cumulative.
+- final remaining-position PnL is separate from realized partial PnL.
+- total economic trade PnL = cumulative partial PnL + final PnL.
 """
 
 from datetime import datetime
@@ -177,8 +186,14 @@ def test_original_stop_is_preserved_when_current_stop_moves(db_session):
     assert updated.last_management_action == "MOVE_TO_BREAK_EVEN"
 
 
-def test_price_update_persists_pnl_and_extremes(db_session):
-    """Price updates persist current price, PnL, and profit extremes."""
+def test_price_update_persists_xauusd_pnl_and_extremes(db_session):
+    """
+    XAUUSD PnL must use the 100 oz contract size.
+
+    1.00 lot:
+        4300 -> 4310 = +$1,000
+        4300 -> 4295 = -$500
+    """
 
     position = PositionRepository.create(
         db_session,
@@ -200,9 +215,6 @@ def test_price_update_persists_pnl_and_extremes(db_session):
 
     assert updated is not None
     assert updated.current_price == 4310.0
-
-    # XAUUSD uses a 100 oz contract size:
-    # (4310 - 4300) × 1.00 lot × 100 = $1,000.
     assert updated.pnl == 1000.0
     assert updated.max_profit == 1000.0
     assert updated.max_drawdown == 0.0
@@ -213,14 +225,58 @@ def test_price_update_persists_pnl_and_extremes(db_session):
         4295.0,
     )
 
-    # (4295 - 4300) × 1.00 lot × 100 = -$500.
+    assert updated.pnl == -500.0
+    assert updated.max_profit == 1000.0
+    assert updated.max_drawdown == 500.0
+
+
+def test_sell_xauusd_pnl_uses_100_oz_contract_size(db_session):
+    """
+    SELL PnL must use the same 100 oz contract size.
+
+    1.00 lot:
+        4300 -> 4290 = +$1,000
+        4300 -> 4305 = -$500
+    """
+
+    position = PositionRepository.create(
+        db_session,
+        position_id="POS-TEST-SELL-PNL",
+        trade_id="PAPER-SELL-PNL-001",
+        symbol="XAUUSD",
+        direction=TradeDirection.SELL,
+        entry_price=4300.0,
+        original_quantity=1.0,
+        initial_stop_loss=4310.0,
+        take_profit_1=4280.0,
+    )
+
+    updated = PositionRepository.update_price(
+        db_session,
+        position.position_id,
+        4290.0,
+    )
+
+    assert updated is not None
+    assert updated.pnl == 1000.0
+    assert updated.max_profit == 1000.0
+    assert updated.max_drawdown == 0.0
+
+    updated = PositionRepository.update_price(
+        db_session,
+        position.position_id,
+        4305.0,
+    )
+
     assert updated.pnl == -500.0
     assert updated.max_profit == 1000.0
     assert updated.max_drawdown == 500.0
 
 
 def test_break_even_and_partial_close_state_persist(db_session):
-    """Management flags survive reload and prevent state loss on restart."""
+    """
+    Management flags and partial-close accounting survive persistence.
+    """
 
     position = PositionRepository.create(
         db_session,
@@ -249,12 +305,19 @@ def test_break_even_and_partial_close_state_persist(db_session):
         db_session,
         position.position_id,
         0.50,
+        execution_price=4310.0,
+        closed_quantity=0.50,
     )
 
     assert reduced is not None
     assert reduced.partial_close_applied == 1
     assert reduced.remaining_quantity == 0.50
     assert reduced.quantity == 0.50
+
+    # 0.50 × $10 × 100 = $500 realized.
+    assert reduced.partial_close_pnl == 500.0
+    assert reduced.partial_close_price == 4310.0
+    assert reduced.partial_close_quantity == 0.50
 
     reloaded = PositionRepository.get_by_position_id(
         db_session,
@@ -266,6 +329,142 @@ def test_break_even_and_partial_close_state_persist(db_session):
     assert reloaded.partial_close_applied == 1
     assert reloaded.remaining_quantity == 0.50
     assert reloaded.current_stop_loss == 4300.0
+    assert reloaded.partial_close_pnl == 500.0
+
+
+def test_multiple_partial_closes_accumulate_realized_pnl(db_session):
+    """
+    Multiple partial closes must accumulate realized PnL.
+
+    1.00 lot BUY @ 4300:
+
+        close 0.30 @ 4310:
+            +$300
+
+        close 0.30 @ 4320:
+            +$600
+
+        cumulative partial PnL:
+            +$900
+
+        remaining:
+            0.40 lot
+    """
+
+    position = PositionRepository.create(
+        db_session,
+        position_id="POS-TEST-MULTI-PARTIAL",
+        trade_id="PAPER-MULTI-PARTIAL-001",
+        symbol="XAUUSD",
+        direction=TradeDirection.BUY,
+        entry_price=4300.0,
+        original_quantity=1.0,
+        initial_stop_loss=4290.0,
+        take_profit_1=4340.0,
+    )
+
+    first = PositionRepository.mark_partial_close(
+        db_session,
+        position.position_id,
+        0.70,
+        execution_price=4310.0,
+        closed_quantity=0.30,
+    )
+
+    assert first is not None
+    assert first.remaining_quantity == 0.70
+    assert first.partial_close_pnl == pytest.approx(300.0)
+
+    second = PositionRepository.mark_partial_close(
+        db_session,
+        position.position_id,
+        0.40,
+        execution_price=4320.0,
+        closed_quantity=0.30,
+    )
+
+    assert second is not None
+    assert second.remaining_quantity == 0.40
+
+    # $300 + $600 = $900.
+    assert second.partial_close_pnl == pytest.approx(900.0)
+
+    reloaded = PositionRepository.get_by_position_id(
+        db_session,
+        position.position_id,
+    )
+
+    assert reloaded is not None
+    assert reloaded.remaining_quantity == pytest.approx(0.40)
+    assert reloaded.quantity == pytest.approx(0.40)
+    assert reloaded.partial_close_pnl == pytest.approx(900.0)
+
+
+def test_partial_close_plus_final_close_reconciles_total_trade_pnl(
+    db_session,
+):
+    """
+    Total economic PnL must equal:
+
+        cumulative partial PnL
+        +
+        final remaining-position PnL
+
+    Example:
+
+        1.00 BUY @ 4300
+        close 0.50 @ 4310 = +$500
+        remaining 0.50 close @ 4320 = +$1,000
+
+        total = +$1,500
+    """
+
+    position = PositionRepository.create(
+        db_session,
+        position_id="POS-TEST-FINAL-RECON",
+        trade_id="PAPER-FINAL-RECON-001",
+        symbol="XAUUSD",
+        direction=TradeDirection.BUY,
+        entry_price=4300.0,
+        original_quantity=1.0,
+        initial_stop_loss=4290.0,
+        take_profit_1=4330.0,
+    )
+
+    reduced = PositionRepository.mark_partial_close(
+        db_session,
+        position.position_id,
+        0.50,
+        execution_price=4310.0,
+        closed_quantity=0.50,
+    )
+
+    assert reduced is not None
+    assert reduced.partial_close_pnl == pytest.approx(500.0)
+
+    closed = PositionRepository.close(
+        db_session,
+        position.position_id,
+        exit_price=4320.0,
+    )
+
+    assert closed is not None
+    assert closed.status == PositionStatus.CLOSED
+
+    # Final remaining 0.50 lot:
+    # (4320 - 4300) × 0.50 × 100 = $1,000.
+    assert closed.pnl == pytest.approx(1000.0)
+
+    # Total:
+    # $500 partial + $1,000 final = $1,500.
+    assert closed.partial_close_pnl == pytest.approx(500.0)
+
+    total_trade_pnl = (
+        float(closed.partial_close_pnl or 0.0)
+        + float(closed.pnl or 0.0)
+    )
+
+    assert total_trade_pnl == pytest.approx(1500.0)
 
 
 def test_stage_16_2_migration_is_idempotent(monkeypatch, db_session):
