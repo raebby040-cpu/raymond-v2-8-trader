@@ -5,6 +5,7 @@ Stages started here:
 - 17.5 automatic paper trade management
 - 17.6 automatic paper entry worker
 - 17.6 automatic-entry read-only telemetry
+- Phase 1 read-only monthly trade audit API
 
 SAFETY:
 - Paper trading only.
@@ -14,45 +15,71 @@ SAFETY:
 - Stage 17.6 delegates risk, sizing, execution and persistence to the
   existing TradingPipelineService / Step 14 path.
 - Telemetry is read-only and cannot execute trades.
+- Monthly audit is research-only and read-only.
 """
 
 from datetime import datetime, timezone
 import asyncio
+from typing import Any
+
+from fastapi import Query
 
 from app.main import (
     app,
     build_symbol_specification,
     get_paper_equity,
 )
+
 from app.persistent_paper_risk import (
     build_persistent_paper_risk_state,
 )
+
 from app.online_market_api import (
     router as online_market_router,
     _fetch_price,
 )
-from app.advisory_api import router as advisory_analysis_router
+
+from app.advisory_api import (
+    router as advisory_analysis_router,
+)
+
 from app.paper_position_management_api import (
     router as paper_position_management_router,
 )
+
 from app.paper_position_lifecycle_market_loop import (
     LifecycleAwarePaperPositionMarketLoop,
 )
+
 from app.paper_position_market_loop import (
     PaperPositionMarketLoopConfig,
 )
+
 from app.automatic_trade_management_service import (
     AutomaticTradeManagementService,
     AutomaticTradeManagementServiceConfig,
 )
+
 from app.automatic_entry_worker import (
     AutomaticEntryWorkerConfig,
 )
+
 from app.automatic_entry_telemetry import (
     TelemetryAutomaticEntryWorker,
     router as automatic_entry_telemetry_router,
 )
+
 from app.database import SessionLocal
+
+# Phase 1 research auditor.
+# IMPORTANT:
+# These functions only read closed Position records and build a report.
+from scripts.monthly_trade_audit import (
+    DEFAULT_SYMBOL,
+    build_report,
+    load_closed_positions,
+    month_bounds,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +90,112 @@ app.include_router(online_market_router)
 app.include_router(advisory_analysis_router)
 app.include_router(paper_position_management_router)
 app.include_router(automatic_entry_telemetry_router)
+
+
+# ---------------------------------------------------------------------------
+# PHASE 1 - READ-ONLY MONTHLY TRADE AUDIT
+# ---------------------------------------------------------------------------
+#
+# This endpoint:
+#
+# - reads CLOSED paper positions;
+# - runs the existing Phase 1 monthly auditor;
+# - returns aggregated research findings;
+# - never modifies positions;
+# - never modifies strategy parameters;
+# - never places orders;
+# - never contacts MT5 for execution;
+# - never promotes a research candidate.
+#
+# Example:
+#
+#   /api/research/monthly-audit?month=2026-09
+#
+# If month is omitted, the current UTC month is audited.
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/api/research/monthly-audit",
+    tags=["Research Audit"],
+)
+def monthly_trade_audit(
+    month: str | None = Query(
+        None,
+        description=(
+            "Calendar month in YYYY-MM format. "
+            "Defaults to the current UTC month."
+        ),
+        pattern=r"^\d{4}-\d{2}$",
+    ),
+) -> dict[str, Any]:
+    """
+    Run the existing Phase 1 monthly trade auditor.
+
+    READ-ONLY RESEARCH ENDPOINT.
+
+    It reads the authoritative persistent Position table through the
+    existing monthly_trade_audit module.
+
+    It does NOT:
+    - create trades;
+    - close trades;
+    - modify positions;
+    - modify strategy parameters;
+    - promote strategy candidates;
+    - contact a broker;
+    - enable live trading.
+    """
+
+    try:
+        start, end, label = month_bounds(month)
+
+        trades = load_closed_positions(
+            start=start,
+            end=end,
+            symbol=DEFAULT_SYMBOL,
+        )
+
+        report = build_report(
+            trades=trades,
+            month=label,
+            symbol=DEFAULT_SYMBOL,
+        )
+
+        # Do not expose individual trade records through this API.
+        # The audit itself still uses every closed trade internally.
+        report.pop("trades", None)
+        report.pop("loss_trade_ids", None)
+
+        return {
+            **report,
+            "safety": {
+                "research_only": True,
+                "read_only": True,
+                "live_trading_changed": False,
+                "positions_modified": False,
+                "strategy_modified": False,
+                "orders_created": False,
+                "candidates_promoted": False,
+            },
+        }
+
+    except ValueError as exc:
+        return {
+            "accepted": False,
+            "error": str(exc),
+            "research_only": True,
+            "read_only": True,
+        }
+
+    except Exception as exc:
+        return {
+            "accepted": False,
+            "error": "Monthly trade audit failed",
+            "message": str(exc),
+            "research_only": True,
+            "read_only": True,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +245,9 @@ async def _paper_market_price_provider(symbol: str) -> float:
     price = market_data.get("price")
 
     if price is None:
-        raise RuntimeError("Online market feed returned no usable price")
+        raise RuntimeError(
+            "Online market feed returned no usable price"
+        )
 
     return float(price)
 
@@ -161,7 +296,8 @@ async def _automatic_trade_management_worker():
                 if result.error:
                     print(
                         "RAYMOND Stage 17.5 ERROR: "
-                        f"position={result.position_id} {result.error}"
+                        f"position={result.position_id} "
+                        f"{result.error}"
                     )
 
         except asyncio.CancelledError:
@@ -321,7 +457,10 @@ async def start_paper_position_market_loop():
     # STAGE 17.6 AUTOMATIC ENTRY
     # ---------------------------------------------------------------
 
-    if _automatic_entry_task is None or _automatic_entry_task.done():
+    if (
+        _automatic_entry_task is None
+        or _automatic_entry_task.done()
+    ):
         _automatic_entry_task = asyncio.create_task(
             _automatic_entry_worker_task()
         )
@@ -398,7 +537,9 @@ async def stop_paper_position_market_loop():
         _paper_market_loop_db.close()
         _paper_market_loop_db = None
 
-    print("RAYMOND: paper-position and paper-entry workers stopped")
+    print(
+        "RAYMOND: paper-position and paper-entry workers stopped"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +597,16 @@ async def health():
             "enabled": True,
             "endpoint": "/api/online/automatic-entry-status",
             "read_only": True,
+        },
+
+        "monthly_trade_audit": {
+            "enabled": True,
+            "endpoint": "/api/research/monthly-audit",
+            "research_only": True,
+            "read_only": True,
+            "strategy_modification": False,
+            "position_modification": False,
+            "order_creation": False,
         },
 
         "safety": {
