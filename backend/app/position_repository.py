@@ -7,6 +7,9 @@ Persistent Position State
 Stage 16.3
 Persistent Trade Thesis
 
+Stage 18
+Persistent Partial-Close Accounting
+
 This repository provides the single persistence layer for the
 authoritative Position model.
 
@@ -21,6 +24,7 @@ Responsibilities:
 - Keep database transactions atomic.
 - Work with both SQLite and PostgreSQL.
 - Calculate XAUUSD paper PnL using the correct contract size.
+- Persist exact partial-close execution accounting.
 
 This module does NOT:
 - place broker orders,
@@ -73,11 +77,13 @@ class PositionRepository:
     # 1.00 lot = 100 troy ounces.
     #
     # Therefore:
-    #   $1.00 gold price movement × 0.01 lot = $1.00
-    #   $1.00 gold price movement × 0.02 lot = $2.00
-    #   $6.00 gold price movement × 0.02 lot = $12.00
+    #
+    #   $1.00 gold movement × 0.01 lot = $1.00
+    #   $1.00 gold movement × 0.02 lot = $2.00
+    #   $6.00 gold movement × 0.02 lot = $12.00
     #
     # Example:
+    #
     #   BUY 2056 -> 2050 at 0.02 lot = -$12
     #   SELL 2056 -> 2050 at 0.02 lot = +$12
     XAUUSD_CONTRACT_SIZE = 100.0
@@ -183,6 +189,12 @@ class PositionRepository:
                 × lot quantity
                 × 100
 
+        BUY:
+            (current - entry) × quantity × contract_size
+
+        SELL:
+            (entry - current) × quantity × contract_size
+
         Example:
 
             BUY 2056 -> 2050 at 0.02 lot:
@@ -194,12 +206,6 @@ class PositionRepository:
 
                 (2056 - 2050) × 0.02 × 100
                 = +$12
-
-        BUY:
-            (current - entry) × quantity × contract_size
-
-        SELL:
-            (entry - current) × quantity × contract_size
 
         IMPORTANT:
         initial_stop_loss and risk_1r are not modified here.
@@ -387,10 +393,6 @@ class PositionRepository:
         direction_enum = PositionRepository._direction_enum(
             direction
         )
-
-        # ----------------------------------------------------
-        # Validate immutable opening risk BEFORE persistence.
-        # ----------------------------------------------------
 
         entry = float(entry_price)
         quantity = float(original_quantity)
@@ -744,9 +746,6 @@ class PositionRepository:
         Persist a new current stop-loss.
 
         initial_stop_loss is NEVER changed.
-
-        This distinction is critical because risk 1R must remain
-        based on the original trade risk, not a later moved stop.
         """
 
         position = PositionRepository.get_by_position_id(
@@ -847,7 +846,7 @@ class PositionRepository:
             raise
 
     # ========================================================
-    # PARTIAL CLOSE STATE
+    # PARTIAL CLOSE STATE + ACCOUNTING
     # ========================================================
 
     @staticmethod
@@ -855,12 +854,25 @@ class PositionRepository:
         db: Session,
         position_id: str,
         remaining_quantity: float,
+        *,
+        execution_price: float,
+        closed_quantity: Optional[float] = None,
     ) -> Optional[Position]:
         """
-        Mark TP1/partial reduction as completed.
+        Persist a partial-close event with complete accounting data.
 
-        The remaining quantity is persisted so the same partial
-        close cannot be accidentally applied twice after restart.
+        Stage 18 records:
+
+        - exact partial-close execution price
+        - exact quantity removed
+        - realized partial P/L
+
+        This makes it possible to reconstruct the complete
+        historical trade P/L after a restart.
+
+        IMPORTANT:
+        This is still a PAPER/database-state operation.
+        It does NOT send a broker order.
         """
 
         position = PositionRepository.get_by_position_id(
@@ -875,16 +887,101 @@ class PositionRepository:
             return position
 
         remaining = float(remaining_quantity)
+        price = float(execution_price)
 
         if remaining < 0:
             raise ValueError(
                 "remaining_quantity cannot be negative"
             )
 
+        if price <= 0:
+            raise ValueError(
+                "execution_price must be greater than zero"
+            )
+
+        current_quantity = float(
+            position.remaining_quantity
+            if position.remaining_quantity is not None
+            else position.quantity
+        )
+
+        if closed_quantity is None:
+            closed = current_quantity - remaining
+        else:
+            closed = float(closed_quantity)
+
+        if closed <= 0:
+            raise ValueError(
+                "closed_quantity must be greater than zero"
+            )
+
+        if closed > current_quantity + 1e-12:
+            raise ValueError(
+                "closed_quantity cannot exceed current remaining quantity"
+            )
+
+        expected_remaining = (
+            current_quantity - closed
+        )
+
+        if abs(expected_remaining - remaining) > 1e-9:
+            raise ValueError(
+                "remaining_quantity and closed_quantity are inconsistent"
+            )
+
+        direction = PositionRepository._direction_value(
+            position.direction
+        )
+
+        entry_price = float(
+            position.entry_price
+        )
+
+        if direction == TradeDirection.BUY.value:
+            price_move = (
+                price - entry_price
+            )
+
+        elif direction == TradeDirection.SELL.value:
+            price_move = (
+                entry_price - price
+            )
+
+        else:
+            raise ValueError(
+                f"Unsupported position direction: {position.direction}"
+            )
+
+        contract_size = PositionRepository._contract_size(
+            position.symbol
+        )
+
+        realized_partial_pnl = (
+            price_move
+            * closed
+            * contract_size
+        )
+
+        # ----------------------------------------------------
+        # Persist the remaining live position.
+        # ----------------------------------------------------
+
         position.remaining_quantity = remaining
         position.quantity = remaining
 
+        # ----------------------------------------------------
+        # Persist exact partial-close accounting.
+        # ----------------------------------------------------
+
         position.partial_close_applied = 1
+
+        position.partial_close_price = price
+
+        position.partial_close_quantity = closed
+
+        position.partial_close_pnl = (
+            realized_partial_pnl
+        )
 
         position.management_status = "reduced"
 
@@ -1327,6 +1424,24 @@ class PositionRepository:
 
             "partial_close_applied": bool(
                 position.partial_close_applied
+            ),
+
+            "partial_close_price": getattr(
+                position,
+                "partial_close_price",
+                None,
+            ),
+
+            "partial_close_quantity": getattr(
+                position,
+                "partial_close_quantity",
+                None,
+            ),
+
+            "partial_close_pnl": getattr(
+                position,
+                "partial_close_pnl",
+                None,
             ),
 
             "trailing_active": bool(
