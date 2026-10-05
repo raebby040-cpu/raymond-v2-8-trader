@@ -39,21 +39,43 @@ contains the richest trade lifecycle information, including:
 - maximum profit
 - maximum drawdown
 - original 1R risk distance
+- cumulative partial-close P/L
 
-USAGE
------
-From repository root:
+ACCOUNTING MODEL
+----------------
+For a position that has partial closes:
 
-    python scripts/monthly_trade_audit.py
+    total trade P/L =
+        cumulative partial-close realized P/L
+        +
+        final remaining-position P/L
 
-Optional:
+Example:
 
-    python scripts/monthly_trade_audit.py 2026-09
+    1.00 XAUUSD lot BUY @ 4300
 
-The optional argument audits a specific calendar month.
+    close 0.50 @ 4310
+        = +$500
 
-IMPORTANT R NORMALIZATION
--------------------------
+    remaining 0.50 @ 4320
+        = +$1,000
+
+    total trade P/L
+        = +$1,500
+
+XAUUSD CONTRACT SIZE
+--------------------
+RAYMOND V2.8 uses:
+
+    1.00 XAUUSD lot = 100 oz
+
+Therefore:
+
+    P/L =
+        price movement × quantity × 100
+
+R NORMALIZATION
+---------------
 Position.risk_1r is the authoritative original PRICE-DISTANCE
 value representing 1R.
 
@@ -70,6 +92,18 @@ falls back to:
     abs(entry_price - initial_stop_loss)
 
 This avoids accidentally deriving R from a moving/current stop-loss.
+
+USAGE
+-----
+From repository root:
+
+    python scripts/monthly_trade_audit.py
+
+Optional:
+
+    python scripts/monthly_trade_audit.py 2026-09
+
+The optional argument audits a specific calendar month.
 """
 
 from __future__ import annotations
@@ -101,9 +135,10 @@ DEFAULT_SYMBOL = "XAUUSD"
 # Standard XAUUSD contract size used by RAYMOND V2.8.
 XAUUSD_CONTRACT_SIZE = 100.0
 
-OUTPUT_DIR = Path(
-    "backtest_results"
-) / "monthly_trade_audits"
+OUTPUT_DIR = (
+    Path("backtest_results")
+    / "monthly_trade_audits"
+)
 
 
 # ============================================================
@@ -120,7 +155,18 @@ class TradeView:
     entry_price: float
     exit_price: float | None
 
+    # Total economic P/L:
+    #
+    # cumulative partial-close P/L
+    # +
+    # final remaining-position P/L
     pnl: float
+
+    # Explicit accounting components.
+    partial_close_pnl: float
+    final_position_pnl: float
+    total_trade_pnl: float
+
     quantity: float
 
     initial_stop_loss: float | None
@@ -358,6 +404,87 @@ def month_bounds(
 
 
 # ============================================================
+# ACCOUNTING HELPERS
+# ============================================================
+
+
+def position_partial_close_pnl(
+    position: Position,
+) -> float:
+    """
+    Return cumulative realized P/L from partial closes.
+
+    New accounting semantics:
+        partial_close_pnl is cumulative.
+
+    Legacy rows without this field/data safely return 0.
+    """
+
+    return (
+        safe_float(
+            getattr(
+                position,
+                "partial_close_pnl",
+                None,
+            )
+        )
+        or 0.0
+    )
+
+
+def position_final_pnl(
+    position: Position,
+) -> float:
+    """
+    Return P/L belonging to the final/current position quantity.
+
+    For a closed position this represents the P/L of the quantity
+    that remained after any partial closes.
+    """
+
+    return (
+        safe_float(
+            getattr(
+                position,
+                "pnl",
+                None,
+            )
+        )
+        or 0.0
+    )
+
+
+def position_total_trade_pnl(
+    position: Position,
+) -> float:
+    """
+    Calculate complete economic P/L for one persisted position.
+
+        total =
+            cumulative partial-close P/L
+            +
+            final remaining-position P/L
+    """
+
+    partial_pnl = (
+        position_partial_close_pnl(
+            position
+        )
+    )
+
+    final_pnl = (
+        position_final_pnl(
+            position
+        )
+    )
+
+    return (
+        partial_pnl
+        + final_pnl
+    )
+
+
+# ============================================================
 # POSITION -> AUDIT RECORD
 # ============================================================
 
@@ -384,12 +511,39 @@ def position_to_trade(
         position.take_profit_1
     )
 
-    pnl = (
-        safe_float(
-            position.pnl
+    # --------------------------------------------------------
+    # CORRECTED P&L ACCOUNTING
+    # --------------------------------------------------------
+    #
+    # position.pnl represents the final/current remaining
+    # quantity.
+    #
+    # partial_close_pnl represents cumulative realized P/L
+    # from partial closes.
+    #
+    # Total trade P/L must include both.
+    #
+
+    partial_close_pnl = (
+        position_partial_close_pnl(
+            position
         )
-        or 0.0
     )
+
+    final_position_pnl = (
+        position_final_pnl(
+            position
+        )
+    )
+
+    total_trade_pnl = (
+        partial_close_pnl
+        + final_position_pnl
+    )
+
+    # TradeView.pnl intentionally mirrors the COMPLETE
+    # economic trade result.
+    pnl = total_trade_pnl
 
     quantity = (
         safe_float(
@@ -406,13 +560,13 @@ def position_to_trade(
     # --------------------------------------------------------
     #
     # risk_1r is intentionally stored as the original PRICE
-    # DISTANCE between entry and the original stop.
+    # DISTANCE between entry and original stop.
     #
     # It must be preferred over reconstructing risk from a
     # potentially changed/moved stop-loss.
     #
     # Older positions may not contain risk_1r, so the original
-    # entry/SL calculation remains as a compatibility fallback.
+    # entry/SL calculation remains a compatibility fallback.
 
     risk_distance = safe_float(
         getattr(
@@ -459,7 +613,7 @@ def position_to_trade(
         # XAUUSD:
         #
         #   1R monetary value =
-        #       risk_1r × quantity × 100
+        #       risk_1r × original quantity × 100
         #
         # risk_1r is PRICE DISTANCE, not a dollar amount.
         #
@@ -481,6 +635,10 @@ def position_to_trade(
                 max_drawdown
                 / initial_r_value
             )
+
+    # --------------------------------------------------------
+    # OUTCOME
+    # --------------------------------------------------------
 
     outcome = "BREAKEVEN"
 
@@ -506,6 +664,9 @@ def position_to_trade(
         entry_price=entry,
         exit_price=exit_price,
         pnl=pnl,
+        partial_close_pnl=partial_close_pnl,
+        final_position_pnl=final_position_pnl,
+        total_trade_pnl=total_trade_pnl,
         quantity=quantity,
         initial_stop_loss=initial_sl,
         take_profit=tp,
@@ -565,6 +726,12 @@ def load_closed_positions(
     end: datetime,
     symbol: str,
 ) -> list[TradeView]:
+    """
+    Load closed persistent positions for the requested month.
+
+    Only CLOSED positions are included in the monthly trade audit.
+    """
+
     db = SessionLocal()
 
     try:
@@ -613,8 +780,15 @@ def load_closed_positions(
 def performance_summary(
     trades: list[TradeView],
 ) -> dict[str, Any]:
+    """
+    Calculate performance from COMPLETE economic trade P/L.
+
+    This means partial-close realized P/L is already included in
+    TradeView.pnl.
+    """
+
     pnls = [
-        trade.pnl
+        trade.total_trade_pnl
         for trade in trades
     ]
 
@@ -730,7 +904,7 @@ def group_performance(
 ) -> list[dict[str, Any]]:
     groups: dict[
         str,
-        list[TradeView]
+        list[TradeView],
     ] = defaultdict(list)
 
     for trade in trades:
@@ -762,7 +936,9 @@ def group_performance(
 
     for key, rows in groups.items():
         performance = (
-            performance_summary(rows)
+            performance_summary(
+                rows
+            )
         )
 
         result.append(
@@ -895,7 +1071,7 @@ def loss_patterns(
 
     patterns: dict[
         str,
-        dict[str, Any]
+        dict[str, Any],
     ] = {}
 
     attributes = [
@@ -955,6 +1131,7 @@ def management_analysis(
             t.trailing_active
         ),
     }.items():
+
         selected = [
             trade
             for trade in trades
@@ -991,6 +1168,7 @@ def management_analysis(
 def excursion_analysis(
     trades: list[TradeView],
 ) -> dict[str, Any]:
+
     losers = [
         trade
         for trade in trades
@@ -1072,6 +1250,7 @@ def excursion_analysis(
 def generate_candidates(
     trades: list[TradeView],
 ) -> list[Candidate]:
+
     candidates: list[
         Candidate
     ] = []
@@ -1112,6 +1291,7 @@ def generate_candidates(
         len(low_score) >= 4
         and len(high_score) >= 4
     ):
+
         low_wr = percentage(
             sum(
                 1
@@ -1166,11 +1346,13 @@ def generate_candidates(
 
     direction_groups = {
         "BUY": [
-            t for t in trades
+            t
+            for t in trades
             if t.direction == "BUY"
         ],
         "SELL": [
-            t for t in trades
+            t
+            for t in trades
             if t.direction == "SELL"
         ],
     }
@@ -1178,6 +1360,7 @@ def generate_candidates(
     for direction, rows in (
         direction_groups.items()
     ):
+
         if len(rows) < 5:
             continue
 
@@ -1231,6 +1414,7 @@ def generate_candidates(
     for regime, rows in (
         regime_groups.items()
     ):
+
         if len(rows) < 5:
             continue
 
@@ -1287,9 +1471,7 @@ def generate_candidates(
         )
     ]
 
-    if (
-        len(profitable_first) >= 3
-    ):
+    if len(profitable_first) >= 3:
         candidates.append(
             Candidate(
                 category=(
@@ -1329,9 +1511,7 @@ def generate_candidates(
         )
     ]
 
-    if (
-        len(high_confidence) >= 4
-    ):
+    if len(high_confidence) >= 4:
         candidates.append(
             Candidate(
                 category=(
@@ -1361,6 +1541,90 @@ def generate_candidates(
 
 
 # ============================================================
+# ACCOUNTING RECONCILIATION
+# ============================================================
+
+
+def accounting_summary(
+    trades: list[TradeView],
+) -> dict[str, Any]:
+    """
+    Provide an explicit accounting reconciliation for the audit.
+
+    This makes it possible to see whether the audited month contains
+    partial-close activity and exactly how much P/L came from it.
+    """
+
+    cumulative_partial_pnl = sum(
+        trade.partial_close_pnl
+        for trade in trades
+    )
+
+    final_position_pnl = sum(
+        trade.final_position_pnl
+        for trade in trades
+    )
+
+    total_trade_pnl = sum(
+        trade.total_trade_pnl
+        for trade in trades
+    )
+
+    reconstructed_total = (
+        cumulative_partial_pnl
+        + final_position_pnl
+    )
+
+    reconciliation_difference = (
+        total_trade_pnl
+        - reconstructed_total
+    )
+
+    partial_close_trades = [
+        trade
+        for trade in trades
+        if (
+            trade.partial_close_applied
+            or abs(
+                trade.partial_close_pnl
+            ) > 1e-12
+        )
+    ]
+
+    return {
+        "partial_close_pnl": round(
+            cumulative_partial_pnl,
+            4,
+        ),
+        "final_remaining_position_pnl": round(
+            final_position_pnl,
+            4,
+        ),
+        "total_trade_pnl": round(
+            total_trade_pnl,
+            4,
+        ),
+        "reconstructed_total_pnl": round(
+            reconstructed_total,
+            4,
+        ),
+        "reconciliation_difference": round(
+            reconciliation_difference,
+            10,
+        ),
+        "partial_close_trade_count": len(
+            partial_close_trades
+        ),
+        "accounting_reconciled": (
+            abs(
+                reconciliation_difference
+            )
+            < 1e-8
+        ),
+    }
+
+
+# ============================================================
 # REPORT GENERATION
 # ============================================================
 
@@ -1370,6 +1634,7 @@ def build_report(
     month: str,
     symbol: str,
 ) -> dict[str, Any]:
+
     performance = (
         performance_summary(
             trades
@@ -1382,11 +1647,17 @@ def build_report(
         if trade.outcome == "LOSS"
     ]
 
+    accounting = (
+        accounting_summary(
+            trades
+        )
+    )
+
     report = {
         "report_type": (
             "RAYMOND_MONTHLY_TRADE_AUDIT"
         ),
-        "version": "1.1",
+        "version": "1.2",
         "research_only": True,
         "live_trading_changed": False,
         "symbol": symbol,
@@ -1394,6 +1665,9 @@ def build_report(
         "generated_at": datetime.now(
             timezone.utc
         ).isoformat(),
+
+        "accounting": accounting,
+
         "risk_normalization": {
             "method": "persisted_risk_1r",
             "fallback": (
@@ -1402,55 +1676,66 @@ def build_report(
             ),
             "contract_size": (
                 XAUUSD_CONTRACT_SIZE
-                if symbol.upper() == "XAUUSD"
+                if symbol.upper()
+                == "XAUUSD"
                 else None
             ),
             "description": (
                 "Position.risk_1r is treated as "
                 "the original price-distance value "
                 "for 1R. For XAUUSD, monetary 1R "
-                "equals price distance × quantity × 100."
+                "equals price distance × original "
+                "quantity × 100."
             ),
         },
+
         "performance": performance,
+
         "direction_analysis": (
             group_performance(
                 trades,
                 "direction",
             )
         ),
+
         "regime_analysis": (
             group_performance(
                 trades,
                 "regime",
             )
         ),
+
         "setup_analysis": (
             group_performance(
                 trades,
                 "setup",
             )
         ),
+
         "score_and_confidence": (
             bucket_analysis(
                 trades
             )
         ),
+
         "loss_patterns": (
             loss_patterns(
                 trades
             )
         ),
+
         "management_analysis": (
             management_analysis(
                 trades
             )
         ),
+
         "excursion_analysis": (
             excursion_analysis(
                 trades
             )
         ),
+
         "improvement_candidates": [
             asdict(candidate)
             for candidate
@@ -1458,10 +1743,12 @@ def build_report(
                 trades
             )
         ],
+
         "loss_trade_ids": [
             trade.trade_id
             for trade in losses
         ],
+
         "trades": [
             asdict(trade)
             for trade in trades
@@ -1469,6 +1756,11 @@ def build_report(
     }
 
     return report
+
+
+# ============================================================
+# MARKDOWN RENDERING
+# ============================================================
 
 
 def money(
@@ -1485,8 +1777,13 @@ def money(
 def render_markdown(
     report: dict[str, Any],
 ) -> str:
+
     p = report[
         "performance"
+    ]
+
+    a = report[
+        "accounting"
     ]
 
     lines = [
@@ -1509,6 +1806,23 @@ def render_markdown(
         f"- Average loss: {money(p['average_loss'])}",
         f"- Best trade: {money(p['best_trade'])}",
         f"- Worst trade: {money(p['worst_trade'])}",
+        "",
+        "## Accounting Reconciliation",
+        "",
+        f"- Partial-close realized P/L: "
+        f"{money(a['partial_close_pnl'])}",
+        f"- Final remaining-position P/L: "
+        f"{money(a['final_remaining_position_pnl'])}",
+        f"- Total trade P/L: "
+        f"{money(a['total_trade_pnl'])}",
+        f"- Reconstructed total P/L: "
+        f"{money(a['reconstructed_total_pnl'])}",
+        f"- Reconciliation difference: "
+        f"{money(a['reconciliation_difference'])}",
+        f"- Partial-close trades: "
+        f"{a['partial_close_trade_count']}",
+        f"- Accounting reconciled: "
+        f"{a['accounting_reconciled']}",
         "",
         "## Direction",
         "",
@@ -1620,7 +1934,16 @@ def render_markdown(
             "- Original 1R uses persisted Position.risk_1r when available.",
             "- Legacy positions fall back to entry price vs original stop-loss.",
             "- XAUUSD monetary 1R uses a 100-unit contract size.",
+            "- R calculations use original quantity, not reduced quantity after a partial close.",
             "- R calculations do not use a moving/current stop-loss.",
+            "",
+            "## Accounting Rules",
+            "",
+            "- Partial-close P/L is treated as realized P/L.",
+            "- position.partial_close_pnl is interpreted as cumulative partial-close P/L.",
+            "- position.pnl represents the final/current remaining-position P/L.",
+            "- Total economic trade P/L equals partial-close P/L plus final remaining-position P/L.",
+            "- Partial-close P/L is never counted twice.",
             "",
             "## Safety",
             "",
@@ -1642,6 +1965,7 @@ def render_markdown(
 
 
 def main() -> int:
+
     requested_month = (
         sys.argv[1]
         if len(sys.argv) > 1
@@ -1682,6 +2006,11 @@ def main() -> int:
 
     print(
         f"MONTH: {month}"
+    )
+
+    print(
+        "ACCOUNTING: "
+        "PARTIAL REALIZED PNL + FINAL REMAINING PNL"
     )
 
     print(
@@ -1769,6 +2098,21 @@ def main() -> int:
     print(
         f"Total P/L: "
         f"{money(report['performance']['total_pnl'])}"
+    )
+
+    print(
+        f"Partial-close P/L: "
+        f"{money(report['accounting']['partial_close_pnl'])}"
+    )
+
+    print(
+        f"Final-position P/L: "
+        f"{money(report['accounting']['final_remaining_position_pnl'])}"
+    )
+
+    print(
+        f"Accounting reconciled: "
+        f"{report['accounting']['accounting_reconciled']}"
     )
 
     print(
