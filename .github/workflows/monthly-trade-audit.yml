@@ -10,7 +10,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   monthly-trade-audit:
@@ -36,9 +36,15 @@ jobs:
           elif [ -f backend/requirements.txt ]; then
             pip install -r backend/requirements.txt
           else
-            echo "No requirements.txt found."
+            echo "ERROR: No requirements.txt found."
             exit 1
           fi
+
+      - name: Configure Python path
+        run: |
+          echo "PYTHONPATH=$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/backend" >> "$GITHUB_ENV"
+          export PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/backend"
+          python -c "import sys; print('Repository root:', sys.path[0]); import backend; print('backend import: OK')"
 
       - name: Validate month
         env:
@@ -62,17 +68,13 @@ jobs:
                   f"Invalid month: {month}. Month must be between 01 and 12."
               )
 
-          if not 2000 <= year <= 2100:
-              raise SystemExit(
-                  f"Invalid year: {year}."
-              )
-
           print(f"Auditing month: {month}")
           PY
 
-      - name: Run September/monthly trade audit
+      - name: Run monthly trade audit
         env:
           AUDIT_MONTH: ${{ inputs.month }}
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/backend
         run: |
           python scripts/monthly_trade_audit.py "$AUDIT_MONTH"
 
@@ -82,17 +84,17 @@ jobs:
         run: |
           AUDIT_DIR="backtest_results/monthly_trade_audits/$AUDIT_MONTH"
 
-          if [ ! -f "$AUDIT_DIR/audit.json" ]; then
+          test -f "$AUDIT_DIR/audit.json" || {
             echo "ERROR: audit.json was not generated."
             exit 1
-          fi
+          }
 
-          if [ ! -f "$AUDIT_DIR/audit.md" ]; then
+          test -f "$AUDIT_DIR/audit.md" || {
             echo "ERROR: audit.md was not generated."
             exit 1
-          fi
+          }
 
-          echo "Audit files generated successfully:"
+          echo "Audit files generated successfully."
           ls -lh "$AUDIT_DIR"
 
       - name: Validate research-only safety
@@ -105,6 +107,7 @@ jobs:
           from pathlib import Path
 
           month = os.environ["AUDIT_MONTH"]
+
           path = Path(
               "backtest_results",
               "monthly_trade_audits",
@@ -117,7 +120,7 @@ jobs:
 
           if report.get("research_only") is not True:
               raise SystemExit(
-                  "SAFETY CHECK FAILED: report is not marked research_only=true."
+                  "SAFETY CHECK FAILED: research_only is not true."
               )
 
           if report.get("live_trading_changed") is not False:
@@ -161,14 +164,14 @@ jobs:
           print("==========================================")
           print(f" RAYMOND MONTHLY TRADE AUDIT - {month}")
           print("==========================================")
-          print(f"Trades:       {performance.get('trades')}")
-          print(f"Wins:         {performance.get('wins')}")
-          print(f"Losses:       {performance.get('losses')}")
-          print(f"Win rate:     {performance.get('win_rate')}")
-          print(f"Total PnL:    {performance.get('total_pnl')}")
-          print(f"Gross profit: {performance.get('gross_profit')}")
-          print(f"Gross loss:   {performance.get('gross_loss')}")
-          print(f"Profit factor:{performance.get('profit_factor')}")
+          print(f"Trades:        {performance.get('trades')}")
+          print(f"Wins:          {performance.get('wins')}")
+          print(f"Losses:        {performance.get('losses')}")
+          print(f"Win rate:      {performance.get('win_rate')}")
+          print(f"Total PnL:     {performance.get('total_pnl')}")
+          print(f"Gross profit:  {performance.get('gross_profit')}")
+          print(f"Gross loss:    {performance.get('gross_loss')}")
+          print(f"Profit factor: {performance.get('profit_factor')}")
           print("")
           print(
               "Accounting reconciled: "
