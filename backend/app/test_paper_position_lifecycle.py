@@ -5,6 +5,10 @@ Automatic paper-position TP/SL lifecycle tests.
 
 These tests use the real Position model with an isolated in-memory
 SQLite database. They never contact MT5, a broker, or live execution.
+
+XAUUSD accounting:
+    1.00 lot = 100 oz
+    PnL = price movement × lots × 100
 """
 
 from datetime import datetime
@@ -129,7 +133,11 @@ def test_buy_stop_loss_closes_and_persists(db):
     assert position.status == PositionStatus.CLOSED
     assert position.closed_at is not None
     assert position.current_price == 95.0
-    assert position.pnl == -5.0
+
+    # XAUUSD:
+    # $5 movement × 1 lot × 100 oz = -$500
+    assert position.pnl == -500.0
+
     assert position.quantity == 0.0
     assert position.remaining_quantity == 0.0
 
@@ -152,7 +160,9 @@ def test_buy_tp1_closes_and_persists(db):
     assert result.persisted is True
 
     assert position.status == PositionStatus.CLOSED
-    assert position.pnl == 10.0
+
+    # $10 × 1 lot × 100 oz = $1,000
+    assert position.pnl == 1000.0
 
 
 def test_buy_tp2_closes_and_persists(db):
@@ -173,7 +183,9 @@ def test_buy_tp2_closes_and_persists(db):
     assert result.persisted is True
 
     assert position.status == PositionStatus.CLOSED
-    assert position.pnl == 20.0
+
+    # $20 × 1 lot × 100 oz = $2,000
+    assert position.pnl == 2000.0
 
 
 def test_buy_holds_and_persists_mark_to_market(db):
@@ -195,7 +207,10 @@ def test_buy_holds_and_persists_mark_to_market(db):
 
     assert position.status == PositionStatus.OPEN
     assert position.current_price == 105.0
-    assert position.pnl == 5.0
+
+    # $5 × 1 lot × 100 oz = $500
+    assert position.pnl == 500.0
+
     assert position.remaining_quantity == 1.0
 
 
@@ -227,7 +242,10 @@ def test_sell_stop_loss_closes_and_persists(db):
     assert result.persisted is True
 
     assert position.status == PositionStatus.CLOSED
-    assert position.pnl == -5.0
+
+    # SELL loses $5 × 1 lot × 100 oz.
+    assert position.pnl == -500.0
+
     assert position.closed_at is not None
 
 
@@ -254,7 +272,9 @@ def test_sell_tp1_closes_and_persists(db):
     assert result.persisted is True
 
     assert position.status == PositionStatus.CLOSED
-    assert position.pnl == 10.0
+
+    # $10 × 1 lot × 100 oz = $1,000
+    assert position.pnl == 1000.0
 
 
 def test_sell_tp2_closes_and_persists(db):
@@ -280,7 +300,9 @@ def test_sell_tp2_closes_and_persists(db):
     assert result.persisted is True
 
     assert position.status == PositionStatus.CLOSED
-    assert position.pnl == 20.0
+
+    # $20 × 1 lot × 100 oz = $2,000
+    assert position.pnl == 2000.0
 
 
 def test_sell_holds_and_marks_to_market(db):
@@ -307,7 +329,9 @@ def test_sell_holds_and_marks_to_market(db):
 
     assert position.status == PositionStatus.OPEN
     assert position.current_price == 95.0
-    assert position.pnl == 5.0
+
+    # $5 × 1 lot × 100 oz = $500
+    assert position.pnl == 500.0
 
 
 # ============================================================
@@ -326,7 +350,10 @@ def test_closed_position_is_not_processed_again(db):
     position.closed_at = datetime.utcnow()
     position.last_management_action = "STOP_LOSS_HIT"
     position.current_price = 95.0
-    position.pnl = -5.0
+
+    # The stored final PnL for a 1-lot XAUUSD position
+    # losing $5 is -$500.
+    position.pnl = -500.0
     position.pnl_percent = -5.0
     position.quantity = 0.0
     position.remaining_quantity = 0.0
@@ -346,7 +373,7 @@ def test_closed_position_is_not_processed_again(db):
 
     assert position.status == PositionStatus.CLOSED
     assert position.current_price == 95.0
-    assert position.pnl == -5.0
+    assert position.pnl == -500.0
 
 
 # ============================================================
@@ -448,11 +475,14 @@ def test_evaluate_symbol_processes_all_open_positions(db):
     assert len(results) == 2
 
     assert first.status == PositionStatus.CLOSED
-    assert first.pnl == 10.0
+    assert first.pnl == 1000.0
 
     assert second.status == PositionStatus.OPEN
     assert second.current_price == 110.0
-    assert second.pnl == -90.0
+
+    # SELL/BUY direction is BUY here:
+    # (110 - 200) × 1 × 100 = -$9,000
+    assert second.pnl == -9000.0
 
 
 # ============================================================
@@ -478,7 +508,11 @@ def test_pnl_percent_uses_entry_notional(db):
     )
 
     assert result.action == "HOLD"
-    assert position.pnl == 10.0
+
+    # $5 × 2 lots × 100 oz = $1,000
+    assert position.pnl == 1000.0
+
+    # $1,000 / ($100 × 2 × 100) = 5%
     assert position.pnl_percent == 5.0
 
 
