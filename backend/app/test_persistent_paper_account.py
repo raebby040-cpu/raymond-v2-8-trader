@@ -62,10 +62,13 @@ def test_persistent_account_uses_closed_position_pnl(
     account = build_persistent_paper_account()
 
     assert account["starting_balance"] == PAPER_STARTING_BALANCE
-    assert account["realized_pnl"] == 5.0
-    assert account["balance"] == 10005.0
+
+    # XAUUSD:
+    # (4305 - 4300) × 1.00 lot × 100 = $500.
+    assert account["realized_pnl"] == 500.0
+    assert account["balance"] == 10500.0
     assert account["unrealized_pnl"] == 0.0
-    assert account["equity"] == 10005.0
+    assert account["equity"] == 10500.0
 
 
 def test_persistent_account_includes_open_pnl_in_equity(
@@ -75,7 +78,11 @@ def test_persistent_account_includes_open_pnl_in_equity(
 
     position = _position(db, "ACC-OPEN", "ACC-TRADE-OPEN")
     position.current_price = 4310.0
+
+    # This test intentionally assigns the PnL manually because it is
+    # testing account aggregation, not PositionRepository price calculation.
     position.pnl = 10.0
+
     db.commit()
 
     account = build_persistent_paper_account()
