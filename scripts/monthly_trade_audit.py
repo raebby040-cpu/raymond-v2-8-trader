@@ -17,6 +17,7 @@ IMPORTANT SAFETY RULES
 - Never modifies active strategy parameters.
 - Never automatically promotes a strategy candidate.
 - Improvement candidates are recommendations for later backtesting.
+- Holdout validation is required before any strategy promotion.
 
 DATA SOURCE
 -----------
@@ -37,6 +38,7 @@ contains the richest trade lifecycle information, including:
 - trailing state
 - maximum profit
 - maximum drawdown
+- original 1R risk distance
 
 USAGE
 -----
@@ -50,9 +52,24 @@ Optional:
 
 The optional argument audits a specific calendar month.
 
-Example:
+IMPORTANT R NORMALIZATION
+-------------------------
+Position.risk_1r is the authoritative original PRICE-DISTANCE
+value representing 1R.
 
-    python scripts/monthly_trade_audit.py 2026-09
+For XAUUSD:
+
+    monetary 1R =
+        risk_1r × original_quantity × 100
+
+The auditor therefore uses persisted Position.risk_1r first.
+
+For older positions where risk_1r was not persisted, the auditor
+falls back to:
+
+    abs(entry_price - initial_stop_loss)
+
+This avoids accidentally deriving R from a moving/current stop-loss.
 """
 
 from __future__ import annotations
@@ -80,6 +97,9 @@ except ImportError:
 # ============================================================
 
 DEFAULT_SYMBOL = "XAUUSD"
+
+# Standard XAUUSD contract size used by RAYMOND V2.8.
+XAUUSD_CONTRACT_SIZE = 100.0
 
 OUTPUT_DIR = Path(
     "backtest_results"
@@ -381,15 +401,38 @@ def position_to_trade(
         or 0.0
     )
 
-    risk_distance = None
+    # --------------------------------------------------------
+    # AUTHORITATIVE ORIGINAL 1R
+    # --------------------------------------------------------
+    #
+    # risk_1r is intentionally stored as the original PRICE
+    # DISTANCE between entry and the original stop.
+    #
+    # It must be preferred over reconstructing risk from a
+    # potentially changed/moved stop-loss.
+    #
+    # Older positions may not contain risk_1r, so the original
+    # entry/SL calculation remains as a compatibility fallback.
+
+    risk_distance = safe_float(
+        getattr(
+            position,
+            "risk_1r",
+            None,
+        )
+    )
 
     if (
-        initial_sl is not None
-        and entry > 0
+        risk_distance is None
+        or risk_distance <= 0
     ):
-        risk_distance = abs(
-            entry - initial_sl
-        )
+        if (
+            initial_sl is not None
+            and entry > 0
+        ):
+            risk_distance = abs(
+                entry - initial_sl
+            )
 
     max_profit = (
         safe_float(
@@ -413,15 +456,19 @@ def position_to_trade(
         and risk_distance > 0
         and quantity > 0
     ):
-        # P/L and max profit are monetary values.
-        # The exact contract specification may differ between
-        # brokers, so this is deliberately labelled as an
-        # approximate lifecycle-R diagnostic rather than a
-        # broker-exact R calculation.
+        # XAUUSD:
+        #
+        #   1R monetary value =
+        #       risk_1r × quantity × 100
+        #
+        # risk_1r is PRICE DISTANCE, not a dollar amount.
+        #
+        # max_profit and max_drawdown are monetary values.
+
         initial_r_value = (
             risk_distance
             * quantity
-            * 100.0
+            * XAUUSD_CONTRACT_SIZE
         )
 
         if initial_r_value > 0:
@@ -968,23 +1015,19 @@ def excursion_analysis(
         if trade.max_drawdown_r is not None
     ]
 
+    profitable_first_count = sum(
+        1
+        for value in loser_max_profit
+        if value > 0
+    )
+
     return {
         "losing_trades_that_were_profitable_first": {
-            "count": sum(
-                1
-                for value
-                in loser_max_profit
-                if value > 0
-            ),
+            "count": profitable_first_count,
             "percentage_of_losses": round(
                 percentage(
-                    sum(
-                        1
-                        for value
-                        in loser_max_profit
-                        if value > 0
-                    ),
-                    len(losses := loser_max_profit),
+                    profitable_first_count,
+                    len(loser_max_profit),
                 ),
                 2,
             )
@@ -1008,8 +1051,7 @@ def excursion_analysis(
         "winning_trades_that_went_negative_first": {
             "count": sum(
                 1
-                for value
-                in winner_max_drawdown
+                for value in winner_max_drawdown
                 if value < 0
             ),
             "average_max_drawdown_r": round(
@@ -1041,12 +1083,6 @@ def generate_candidates(
         trade
         for trade in trades
         if trade.outcome == "LOSS"
-    ]
-
-    wins = [
-        trade
-        for trade in trades
-        if trade.outcome == "WIN"
     ]
 
     # --------------------------------------------------------
@@ -1350,7 +1386,7 @@ def build_report(
         "report_type": (
             "RAYMOND_MONTHLY_TRADE_AUDIT"
         ),
-        "version": "1.0",
+        "version": "1.1",
         "research_only": True,
         "live_trading_changed": False,
         "symbol": symbol,
@@ -1358,6 +1394,24 @@ def build_report(
         "generated_at": datetime.now(
             timezone.utc
         ).isoformat(),
+        "risk_normalization": {
+            "method": "persisted_risk_1r",
+            "fallback": (
+                "abs(entry_price - "
+                "initial_stop_loss)"
+            ),
+            "contract_size": (
+                XAUUSD_CONTRACT_SIZE
+                if symbol.upper() == "XAUUSD"
+                else None
+            ),
+            "description": (
+                "Position.risk_1r is treated as "
+                "the original price-distance value "
+                "for 1R. For XAUUSD, monetary 1R "
+                "equals price distance × quantity × 100."
+            ),
+        },
         "performance": performance,
         "direction_analysis": (
             group_performance(
@@ -1561,6 +1615,13 @@ def render_markdown(
 
     lines.extend(
         [
+            "## Risk Normalization",
+            "",
+            "- Original 1R uses persisted Position.risk_1r when available.",
+            "- Legacy positions fall back to entry price vs original stop-loss.",
+            "- XAUUSD monetary 1R uses a 100-unit contract size.",
+            "- R calculations do not use a moving/current stop-loss.",
+            "",
             "## Safety",
             "",
             "- This report does not change the active strategy.",
@@ -1621,6 +1682,16 @@ def main() -> int:
 
     print(
         f"MONTH: {month}"
+    )
+
+    print(
+        "RISK NORMALIZATION: "
+        "PERSISTED risk_1r FIRST"
+    )
+
+    print(
+        "XAUUSD CONTRACT SIZE: "
+        f"{XAUUSD_CONTRACT_SIZE}"
     )
 
     print(
