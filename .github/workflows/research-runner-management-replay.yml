@@ -1,0 +1,710 @@
+name: Research - Runner Management Replay
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Month to replay (YYYY-MM)"
+        required: true
+        default: "2026-09"
+
+permissions:
+  contents: read
+
+jobs:
+
+  runner-replay:
+
+    name: Runner Management Research Replay
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 60
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas
+
+      - name: Prepare directories
+        run: |
+          mkdir -p audit_output
+          mkdir -p raw_m5
+          mkdir -p normalized_m5
+          mkdir -p runner_output
+
+      - name: Verify research-only environment
+        run: |
+          echo "=============================================="
+          echo "RAYMOND V2.8 RUNNER MANAGEMENT RESEARCH"
+          echo "=============================================="
+          echo "LIVE TRADING: DISABLED"
+          echo "PRODUCTION STRATEGY: UNCHANGED"
+          echo "PRODUCTION POSITIONS: UNCHANGED"
+          echo "BROKER ORDERS: NONE"
+          echo "CANDIDATE PROMOTION: DISABLED"
+          echo "=============================================="
+
+      - name: Download monthly audit
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+          RENDER_URL: "https://raymond-v2-8-trader.onrender.com"
+        run: |
+
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --retry 5 \
+            --retry-delay 5 \
+            --max-time 180 \
+            "${RENDER_URL}/api/research/monthly-audit?month=${AUDIT_MONTH}&include_trades=true" \
+            -o audit_output/monthly_trade_audit.json
+
+          test -s audit_output/monthly_trade_audit.json
+
+      - name: Validate audit
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+
+          python - <<'PY'
+
+          import json
+          import os
+
+          path = (
+              "audit_output/"
+              "monthly_trade_audit.json"
+          )
+
+          with open(
+              path,
+              encoding="utf-8",
+          ) as f:
+              report = json.load(f)
+
+          if report.get(
+              "month"
+          ) != os.environ[
+              "AUDIT_MONTH"
+          ]:
+              raise SystemExit(
+                  "ERROR: audit month mismatch"
+              )
+
+          if report.get(
+              "research_only"
+          ) is not True:
+              raise SystemExit(
+                  "ERROR: audit is not research-only"
+              )
+
+          if report.get(
+              "live_trading_changed"
+          ) is not False:
+              raise SystemExit(
+                  "ERROR: audit reports live changes"
+              )
+
+          if report.get(
+              "accounting",
+              {}
+          ).get(
+              "accounting_reconciled"
+          ) is not True:
+              raise SystemExit(
+                  "ERROR: accounting is not reconciled"
+              )
+
+          trades = report.get(
+              "trades"
+          )
+
+          if not isinstance(
+              trades,
+              list
+          ) or not trades:
+              raise SystemExit(
+                  "ERROR: no audit trades returned"
+              )
+
+          print(
+              "Audit month:",
+              report["month"],
+          )
+
+          print(
+              "Trades:",
+              len(trades),
+          )
+
+          print(
+              "Actual audited P/L:",
+              report[
+                  "performance"
+              ].get(
+                  "total_pnl"
+              ),
+          )
+
+          PY
+
+      - name: Calculate M5 dates
+        id: dates
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+
+          python - <<'PY'
+
+          import os
+
+          from datetime import datetime
+
+          start = datetime.strptime(
+              os.environ[
+                  "AUDIT_MONTH"
+              ] + "-01",
+              "%Y-%m-%d",
+          )
+
+          if start.month == 12:
+
+              end = datetime(
+                  start.year + 1,
+                  1,
+                  1,
+              )
+
+          else:
+
+              end = datetime(
+                  start.year,
+                  start.month + 1,
+                  1,
+              )
+
+          with open(
+              os.environ[
+                  "GITHUB_OUTPUT"
+              ],
+              "a",
+          ) as f:
+
+              f.write(
+                  f"start="
+                  f"{start:%Y-%m-%d}\n"
+              )
+
+              f.write(
+                  f"end="
+                  f"{end:%Y-%m-%d}\n"
+              )
+
+          PY
+
+      - name: Download XAUUSD M5 data
+        env:
+          START_DATE: ${{ steps.dates.outputs.start }}
+          END_DATE: ${{ steps.dates.outputs.end }}
+        run: |
+
+          npx --yes dukascopy-node \
+            -i xauusd \
+            -from "${START_DATE}" \
+            -to "${END_DATE}" \
+            -t m5 \
+            -f csv \
+            -dir raw_m5 \
+            -bs 5 \
+            -bp 1000
+
+      - name: Normalize M5 data
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+
+          python - <<'PY'
+
+          import os
+
+          from pathlib import Path
+
+          import pandas as pd
+
+          files = sorted(
+              Path(
+                  "raw_m5"
+              ).rglob(
+                  "*.csv"
+              )
+          )
+
+          if not files:
+              raise SystemExit(
+                  "ERROR: no M5 files downloaded"
+              )
+
+          frames = []
+
+          for file in files:
+
+              df = pd.read_csv(
+                  file
+              )
+
+              if df.empty:
+                  continue
+
+              rename = {}
+
+              for column in df.columns:
+
+                  key = (
+                      str(column)
+                      .strip()
+                      .lower()
+                      .replace(
+                          " ",
+                          "_",
+                      )
+                      .replace(
+                          "-",
+                          "_",
+                      )
+                  )
+
+                  rename[
+                      column
+                  ] = key
+
+              df = df.rename(
+                  columns=rename
+              )
+
+              timestamp_column = next(
+                  (
+                      c
+                      for c in (
+                          "timestamp",
+                          "time",
+                          "datetime",
+                          "date",
+                          "timestamp_utc",
+                      )
+                      if c in df.columns
+                  ),
+                  None,
+              )
+
+              if timestamp_column is None:
+                  continue
+
+              aliases = {
+                  "open": (
+                      "open",
+                      "o",
+                  ),
+                  "high": (
+                      "high",
+                      "h",
+                  ),
+                  "low": (
+                      "low",
+                      "l",
+                  ),
+                  "close": (
+                      "close",
+                      "c",
+                  ),
+              }
+
+              for target, candidates in aliases.items():
+
+                  for candidate in candidates:
+
+                      if candidate in df.columns:
+
+                          df = df.rename(
+                              columns={
+                                  candidate:
+                                      target
+                              }
+                          )
+
+                          break
+
+              required = (
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              )
+
+              if not all(
+                  field in df.columns
+                  for field in required
+              ):
+                  continue
+
+              raw = pd.to_numeric(
+                  df[
+                      timestamp_column
+                  ],
+                  errors="coerce",
+              )
+
+              values = (
+                  raw.dropna()
+                  .abs()
+              )
+
+              if values.empty:
+
+                  parsed = pd.to_datetime(
+                      df[
+                          timestamp_column
+                      ],
+                      utc=True,
+                      errors="coerce",
+                  )
+
+              else:
+
+                  median = float(
+                      values.median()
+                  )
+
+                  if median >= 1e17:
+                      unit = "ns"
+
+                  elif median >= 1e14:
+                      unit = "us"
+
+                  elif median >= 1e11:
+                      unit = "ms"
+
+                  elif median >= 1e9:
+                      unit = "s"
+
+                  else:
+                      unit = None
+
+                  if unit:
+
+                      parsed = pd.to_datetime(
+                          raw,
+                          unit=unit,
+                          utc=True,
+                          errors="coerce",
+                      )
+
+                  else:
+
+                      parsed = pd.to_datetime(
+                          df[
+                              timestamp_column
+                          ],
+                          utc=True,
+                          errors="coerce",
+                      )
+
+              df["timestamp"] = parsed
+
+              frames.append(
+                  df[
+                      [
+                          "timestamp",
+                          "open",
+                          "high",
+                          "low",
+                          "close",
+                      ]
+                  ]
+              )
+
+          if not frames:
+              raise SystemExit(
+                  "ERROR: no usable M5 frames"
+              )
+
+          combined = pd.concat(
+              frames,
+              ignore_index=True,
+          )
+
+          combined = combined.dropna(
+              subset=[
+                  "timestamp",
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              ]
+          )
+
+          combined = combined.drop_duplicates(
+              subset=[
+                  "timestamp"
+              ]
+          )
+
+          combined = combined.sort_values(
+              "timestamp"
+          )
+
+          if combined.empty:
+              raise SystemExit(
+                  "ERROR: normalized M5 data is empty"
+              )
+
+          if (
+              combined["high"]
+              < combined["low"]
+          ).any():
+              raise SystemExit(
+                  "ERROR: high < low"
+              )
+
+          for field in (
+              "open",
+              "close",
+          ):
+
+              if (
+                  combined["high"]
+                  < combined[field]
+              ).any():
+
+                  raise SystemExit(
+                      f"ERROR: high < {field}"
+                  )
+
+              if (
+                  combined["low"]
+                  > combined[field]
+              ).any():
+
+                  raise SystemExit(
+                      f"ERROR: low > {field}"
+                  )
+
+          output = Path(
+              "normalized_m5/"
+              "xauusd_m5_"
+              + os.environ[
+                  "AUDIT_MONTH"
+              ]
+              + "_normalized.csv"
+          )
+
+          combined.to_csv(
+              output,
+              index=False,
+          )
+
+          print(
+              "Rows:",
+              len(combined),
+          )
+
+          print(
+              "Start:",
+              combined[
+                  "timestamp"
+              ].min(),
+          )
+
+          print(
+              "End:",
+              combined[
+                  "timestamp"
+              ].max(),
+          )
+
+          PY
+
+      - name: Run runner management replay
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+
+          export PYTHONPATH="${GITHUB_WORKSPACE}/scripts/research"
+
+          python \
+            scripts/research/run_runner_management_replay.py \
+            --audit \
+              audit_output/monthly_trade_audit.json \
+            --m5 \
+              "normalized_m5/xauusd_m5_${AUDIT_MONTH}_normalized.csv" \
+            --output \
+              runner_output/runner_management_replay.json
+
+      - name: Validate and print runner result
+        run: |
+
+          python - <<'PY'
+
+          import json
+
+          path = (
+              "runner_output/"
+              "runner_management_replay.json"
+          )
+
+          with open(
+              path,
+              encoding="utf-8",
+          ) as f:
+
+              report = json.load(f)
+
+          safety_requirements = {
+              "research_only": True,
+              "live_trading_changed": False,
+              "strategy_modified": False,
+              "positions_modified": False,
+              "orders_created": False,
+              "candidates_promoted": False,
+              "accounting_reconciled": True,
+          }
+
+          for key, expected in (
+              safety_requirements.items()
+          ):
+
+              if report.get(
+                  key
+              ) is not expected:
+
+                  raise SystemExit(
+                      "ERROR: safety failure: "
+                      + key
+                  )
+
+          print(
+              "=============================================="
+          )
+
+          print(
+              "RAYMOND V2.8 RUNNER MANAGEMENT REPLAY"
+          )
+
+          print(
+              "=============================================="
+          )
+
+          print(
+              "Month:",
+              report["month"],
+          )
+
+          print(
+              "Trades:",
+              report[
+                  "trade_count"
+              ],
+          )
+
+          print(
+              "Replayed:",
+              report[
+                  "replayed_trade_count"
+              ],
+          )
+
+          print(
+              "Skipped:",
+              report[
+                  "skipped_trade_count"
+              ],
+          )
+
+          print(
+              "Actual audited P/L:",
+              report[
+                  "actual_audited_pnl"
+              ],
+          )
+
+          print(
+              "Simulated runner P/L:",
+              report[
+                  "simulated_runner_pnl"
+              ],
+          )
+
+          print(
+              "Difference:",
+              report[
+                  "difference_vs_actual"
+              ],
+          )
+
+          print(
+              "Improved:",
+              report[
+                  "improved_trade_count"
+              ],
+          )
+
+          print(
+              "Worsened:",
+              report[
+                  "worsened_trade_count"
+              ],
+          )
+
+          print(
+              "Unchanged:",
+              report[
+                  "unchanged_trade_count"
+              ],
+          )
+
+          print(
+              "Accounting reconciled:",
+              report[
+                  "accounting_reconciled"
+              ],
+          )
+
+          print(
+              "Configuration:",
+              report[
+                  "configuration"
+              ],
+          )
+
+          print(
+              "=============================================="
+          )
+
+          PY
+
+      - name: Upload runner research artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-runner-management-replay-${{ inputs.month }}
+          if-no-files-found: error
+          path: |
+            audit_output/monthly_trade_audit.json
+            runner_output/runner_management_replay.json
+            normalized_m5/xauusd_m5_${{ inputs.month }}_normalized.csv
+          retention-days: 90
