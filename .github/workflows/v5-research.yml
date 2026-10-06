@@ -28,14 +28,14 @@ on:
 jobs:
 
   # ========================================================================
-  # 1. PREPARE DATA
+  # 1. PREPARE XAUUSD DATA
   # ========================================================================
 
   prepare-data:
     name: Prepare XAUUSD H1 Data
     runs-on: ubuntu-latest
 
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     outputs:
       dataset: ${{ steps.prepare.outputs.dataset }}
@@ -57,47 +57,374 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -e
+
           python -m pip install --upgrade pip
           pip install pandas numpy
+
           npm install -g dukascopy-node
 
       - name: Show dukascopy-node version
         run: |
+          set -e
+
+          echo "============================================================"
+          echo "DUKASCOPY-NODE VERSION"
+          echo "============================================================"
+
           dukascopy-node --help
+
           npm list -g dukascopy-node --depth=0
 
       - name: Create directories
         run: |
+          set -e
+
           mkdir -p data/historical
+          mkdir -p data/historical/chunks
           mkdir -p backtest_results/weekly_growth_v5
 
-      # IMPORTANT:
-      # dukascopy-node uses -dir / --directory.
-      # It does NOT use -o.
+      # --------------------------------------------------------------------
+      # IMPORTANT
       #
-      # -fn forces a safe filename and avoids date-generated filenames
-      # containing characters that can cause file/path problems.
-      - name: Download XAUUSD H1 data
+      # The previous workflow requested nearly 3 years in ONE request.
+      # Dukascopy returned HTTP 429 rate limiting.
+      #
+      # This version downloads one calendar month at a time.
+      #
+      # Each request:
+      #   - uses the correct -dir option
+      #   - uses a unique filename
+      #   - uses a small batch size
+      #   - pauses between batches
+      #   - retries failed downloads
+      #   - retries empty responses
+      #
+      # There is also a pause between monthly requests.
+      # --------------------------------------------------------------------
+
+      - name: Download XAUUSD H1 data in monthly chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          START_DATE="${{ inputs.start_date }}"
+          END_DATE="${{ inputs.end_date }}"
+
+          CHUNK_DIR="data/historical/chunks"
+
+          mkdir -p "$CHUNK_DIR"
+
+          echo ""
+          echo "============================================================"
+          echo "XAUUSD H1 CHUNKED DOWNLOAD"
+          echo "============================================================"
+          echo "Start: $START_DATE"
+          echo "End:   $END_DATE"
+          echo "============================================================"
+          echo ""
+
+          python - "$START_DATE" "$END_DATE" <<'PY'
+          import sys
+          import subprocess
+          import time
+          from datetime import date, timedelta
+          from pathlib import Path
+
+          start_text = sys.argv[1]
+          end_text = sys.argv[2]
+
+          start = date.fromisoformat(start_text)
+          end = date.fromisoformat(end_text)
+
+          if end <= start:
+              raise SystemExit(
+                  "End date must be after start date."
+              )
+
+          chunk_dir = Path(
+              "data/historical/chunks"
+          )
+
+          chunk_dir.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          def next_month(d):
+              if d.month == 12:
+                  return date(
+                      d.year + 1,
+                      1,
+                      1,
+                  )
+
+              return date(
+                  d.year,
+                  d.month + 1,
+                  1,
+              )
+
+          current = date(
+              start.year,
+              start.month,
+              1,
+          )
+
+          chunk_number = 0
+
+          while current < end:
+
+              month_end = next_month(current)
+
+              chunk_from = max(
+                  current,
+                  start,
+              )
+
+              chunk_to = min(
+                  month_end,
+                  end,
+              )
+
+              if chunk_to <= chunk_from:
+                  break
+
+              chunk_number += 1
+
+              from_text = chunk_from.isoformat()
+              to_text = chunk_to.isoformat()
+
+              filename = (
+                  "xauusd_h1_"
+                  f"{from_text}_"
+                  f"{to_text}.csv"
+              )
+
+              output_path = (
+                  chunk_dir /
+                  filename
+              )
+
+              print("")
+              print("=" * 60)
+              print(
+                  f"MONTHLY CHUNK {chunk_number}"
+              )
+              print("=" * 60)
+              print(
+                  f"From: {from_text}"
+              )
+              print(
+                  f"To:   {to_text}"
+              )
+              print(
+                  f"File: {output_path}"
+              )
+              print("=" * 60)
+
+              # If a valid chunk already exists, do not download it again.
+              if output_path.exists() and output_path.stat().st_size > 100:
+                  print(
+                      "Existing non-empty chunk found. "
+                      "Skipping download."
+                  )
+
+                  current = month_end
+                  continue
+
+              command = [
+                  "dukascopy-node",
+
+                  "-i",
+                  "xauusd",
+
+                  "-from",
+                  from_text,
+
+                  "-to",
+                  to_text,
+
+                  "-t",
+                  "h1",
+
+                  "-f",
+                  "csv",
+
+                  "-dir",
+                  str(chunk_dir),
+
+                  "-fn",
+                  filename,
+
+                  # Keep the internal request batch small.
+                  "-bs",
+                  "2",
+
+                  # Pause between internal batches.
+                  "-bp",
+                  "3000",
+
+                  # Retry failed artifacts.
+                  "-r",
+                  "8",
+
+                  # Five seconds between retries.
+                  "-rp",
+                  "5000",
+
+                  # Retry successful-but-empty responses.
+                  "-re",
+              ]
+
+              print(
+                  "Running:",
+                  " ".join(command),
+              )
+
+              successful = False
+
+              # Additional outer retry protection.
+              # This is intentionally slower to avoid repeatedly
+              # hitting the remote server after a 429.
+              for attempt in range(1, 4):
+
+                  print("")
+                  print(
+                      f"Outer attempt "
+                      f"{attempt}/3"
+                  )
+
+                  result = subprocess.run(
+                      command,
+                      check=False,
+                  )
+
+                  if (
+                      result.returncode == 0
+                      and output_path.exists()
+                      and output_path.stat().st_size > 100
+                  ):
+                      successful = True
+                      break
+
+                  print(
+                      "Chunk download did not produce "
+                      "a valid file."
+                  )
+
+                  if attempt < 3:
+                      wait_seconds = 30 * attempt
+
+                      print(
+                          f"Waiting "
+                          f"{wait_seconds} seconds "
+                          f"before retry..."
+                      )
+
+                      time.sleep(
+                          wait_seconds
+                      )
+
+              if not successful:
+                  raise SystemExit(
+                      "Failed to download "
+                      f"XAUUSD chunk "
+                      f"{from_text} -> {to_text}"
+                  )
+
+              print(
+                  f"Chunk {chunk_number} "
+                  "downloaded successfully."
+              )
+
+              # Deliberate pause between monthly requests.
+              print(
+                  "Waiting 15 seconds "
+                  "before next chunk..."
+              )
+
+              time.sleep(15)
+
+              current = month_end
+
+          print("")
+          print("=" * 60)
+          print(
+              "ALL MONTHLY DOWNLOADS COMPLETED"
+          )
+          print("=" * 60)
+          print("")
+
+          files = sorted(
+              chunk_dir.glob("*.csv")
+          )
+
+          if not files:
+              raise SystemExit(
+                  "No monthly XAUUSD CSV files found."
+              )
+
+          total_bytes = 0
+
+          for path in files:
+              size = path.stat().st_size
+              total_bytes += size
+
+              print(
+                  f"{path.name}: "
+                  f"{size:,} bytes"
+              )
+
+          print("")
+          print(
+              f"Chunk files: {len(files)}"
+          )
+
+          print(
+              f"Total size: "
+              f"{total_bytes:,} bytes"
+          )
+          PY
+
+      - name: Inspect downloaded chunks
+        shell: bash
         run: |
           set -e
 
-          dukascopy-node \
-            -i xauusd \
-            -from "${{ inputs.start_date }}" \
-            -to "${{ inputs.end_date }}" \
-            -t h1 \
-            -f csv \
-            -dir data/historical \
-            -fn xauusd_h1_download.csv \
-            -r 5 \
-            -re
+          echo ""
+          echo "============================================================"
+          echo "DOWNLOADED XAUUSD CHUNKS"
+          echo "============================================================"
 
-      - name: Inspect downloaded files
-        run: |
-          echo "Downloaded files:"
-          find data/historical -maxdepth 2 -type f -print -exec ls -lh {} \;
+          find data/historical/chunks \
+            -maxdepth 1 \
+            -type f \
+            -name "*.csv" \
+            -print \
+            -exec ls -lh {} \;
 
-      - name: Normalize XAUUSD H1
+          COUNT="$(find data/historical/chunks \
+            -maxdepth 1 \
+            -type f \
+            -name "*.csv" | wc -l)"
+
+          echo ""
+          echo "Chunk count: $COUNT"
+
+          if [ "$COUNT" -lt 1 ]; then
+            echo "No chunk files were downloaded."
+            exit 1
+          fi
+
+      # --------------------------------------------------------------------
+      # Combine all monthly chunks.
+      #
+      # The output is the SAME normalized filename expected by the
+      # existing V5 strategy/optimizer/walk-forward scripts.
+      # --------------------------------------------------------------------
+
+      - name: Normalize and combine XAUUSD H1 chunks
         id: prepare
         shell: bash
         run: |
@@ -107,51 +434,91 @@ jobs:
           from pathlib import Path
           import pandas as pd
 
-          root = Path("data/historical")
+          chunk_dir = Path(
+              "data/historical/chunks"
+          )
 
-          files = [
-              p for p in root.glob("*.csv")
-              if p.name != "xauusd_h1_2024_2026_normalized.csv"
-          ]
+          output = Path(
+              "data/historical/"
+              "xauusd_h1_2024_2026_normalized.csv"
+          )
+
+          files = sorted(
+              chunk_dir.glob("*.csv")
+          )
 
           if not files:
               raise SystemExit(
-                  "No XAUUSD CSV file was downloaded."
+                  "No XAUUSD chunk CSV files found."
               )
 
-          print("CSV files found:")
+          print("")
+          print("============================================================")
+          print("COMBINING XAUUSD H1 CHUNKS")
+          print("============================================================")
+          print(
+              f"Chunk files: {len(files)}"
+          )
+
+          frames = []
+
           for path in files:
-              print(f"  - {path}")
 
-          selected = None
+              print(
+                  f"Reading: {path}"
+              )
 
-          preferred = root / "xauusd_h1_download.csv"
+              try:
+                  frame = pd.read_csv(
+                      path
+                  )
+              except Exception as exc:
+                  raise SystemExit(
+                      f"Could not read {path}: "
+                      f"{exc}"
+                  )
 
-          if preferred.exists():
-              selected = preferred
-          else:
-              for path in files:
-                  name = path.name.lower()
+              if frame.empty:
+                  print(
+                      f"WARNING: {path} is empty."
+                  )
+                  continue
 
-                  if "xauusd" in name or "xau" in name:
-                      selected = path
-                      break
+              print(
+                  f"  Rows: {len(frame):,}"
+              )
 
-          if selected is None:
-              selected = files[0]
+              frames.append(frame)
 
-          print(f"Using source file: {selected}")
+          if not frames:
+              raise SystemExit(
+                  "All downloaded chunks were empty."
+              )
 
-          df = pd.read_csv(selected)
+          df = pd.concat(
+              frames,
+              ignore_index=True,
+          )
 
-          print("Original columns:")
-          print(list(df.columns))
+          print("")
+          print(
+              f"Combined raw rows: "
+              f"{len(df):,}"
+          )
+
+          # ---------------------------------------------------------------
+          # Normalize column names.
+          # ---------------------------------------------------------------
 
           rename = {}
 
           for column in df.columns:
 
-              key = str(column).lower().strip()
+              key = (
+                  str(column)
+                  .strip()
+                  .lower()
+              )
 
               if key in {
                   "time",
@@ -192,7 +559,9 @@ jobs:
               }:
                   rename[column] = "volume"
 
-          df = df.rename(columns=rename)
+          df = df.rename(
+              columns=rename
+          )
 
           required = [
               "timestamp",
@@ -210,31 +579,46 @@ jobs:
 
           if missing:
               raise SystemExit(
-                  f"Missing required columns: {missing}"
+                  "Missing required columns: "
+                  f"{missing}"
               )
 
-          # Dukascopy CSV timestamps may be Unix milliseconds.
-          # Convert them safely to UTC.
+          # ---------------------------------------------------------------
+          # Timestamp conversion.
+          #
+          # Dukascopy CSV output normally uses Unix milliseconds.
+          # We also support textual timestamps defensively.
+          # ---------------------------------------------------------------
+
           timestamp_numeric = pd.to_numeric(
               df["timestamp"],
               errors="coerce",
           )
 
-          numeric_ratio = timestamp_numeric.notna().mean()
+          numeric_ratio = (
+              timestamp_numeric.notna().mean()
+          )
 
           if numeric_ratio > 0.95:
+
               df["timestamp"] = pd.to_datetime(
                   timestamp_numeric,
                   unit="ms",
                   utc=True,
                   errors="coerce",
               )
+
           else:
+
               df["timestamp"] = pd.to_datetime(
                   df["timestamp"],
                   utc=True,
                   errors="coerce",
               )
+
+          # ---------------------------------------------------------------
+          # Numeric OHLC conversion.
+          # ---------------------------------------------------------------
 
           for column in [
               "open",
@@ -242,39 +626,76 @@ jobs:
               "low",
               "close",
           ]:
+
               df[column] = pd.to_numeric(
                   df[column],
                   errors="coerce",
               )
 
           if "volume" not in df.columns:
+
               df["volume"] = 0.0
 
-          df["volume"] = pd.to_numeric(
-              df["volume"],
-              errors="coerce",
-          ).fillna(0.0)
+          else:
 
+              df["volume"] = pd.to_numeric(
+                  df["volume"],
+                  errors="coerce",
+              ).fillna(0.0)
+
+          # ---------------------------------------------------------------
           # Remove invalid rows.
+          # ---------------------------------------------------------------
+
+          before_drop = len(df)
+
           df = df.dropna(
               subset=required
           )
 
-          # Sort chronologically.
+          removed = (
+              before_drop -
+              len(df)
+          )
+
+          print(
+              f"Invalid rows removed: "
+              f"{removed:,}"
+          )
+
+          # ---------------------------------------------------------------
+          # Sort and deduplicate.
+          # ---------------------------------------------------------------
+
           df = df.sort_values(
               "timestamp"
           )
 
-          # Remove duplicate candles.
+          before_duplicates = len(df)
+
           df = df.drop_duplicates(
-              "timestamp"
+              subset=["timestamp"],
+              keep="first",
+          )
+
+          duplicate_count = (
+              before_duplicates -
+              len(df)
+          )
+
+          print(
+              f"Duplicate candles removed: "
+              f"{duplicate_count:,}"
           )
 
           df = df.reset_index(
               drop=True
           )
 
-          # Validate OHLC relationships.
+          # ---------------------------------------------------------------
+          # OHLC integrity checks.
+          # ---------------------------------------------------------------
+
           invalid_high_low = (
               df["high"] < df["low"]
           )
@@ -290,24 +711,92 @@ jobs:
           )
 
           if invalid_high_low.any():
+
+              count = int(
+                  invalid_high_low.sum()
+              )
+
               raise SystemExit(
-                  "Found candles where High < Low."
+                  f"Found {count} candles "
+                  "where High < Low."
               )
 
           if invalid_open.any():
+
+              count = int(
+                  invalid_open.sum()
+              )
+
               raise SystemExit(
-                  "Found candles where Open is outside High/Low."
+                  f"Found {count} candles "
+                  "where Open is outside "
+                  "High/Low."
               )
 
           if invalid_close.any():
-              raise SystemExit(
-                  "Found candles where Close is outside High/Low."
+
+              count = int(
+                  invalid_close.sum()
               )
 
-          output = (
-              root /
-              "xauusd_h1_2024_2026_normalized.csv"
-          )
+              raise SystemExit(
+                  f"Found {count} candles "
+                  "where Close is outside "
+                  "High/Low."
+              )
+
+          # ---------------------------------------------------------------
+          # Timestamp integrity.
+          # ---------------------------------------------------------------
+
+          if df["timestamp"].isna().any():
+
+              raise SystemExit(
+                  "Invalid timestamps remain "
+                  "after normalization."
+              )
+
+          if not df[
+              "timestamp"
+          ].is_monotonic_increasing:
+
+              raise SystemExit(
+                  "Timestamps are not "
+                  "monotonic increasing."
+              )
+
+          if df[
+              "timestamp"
+          ].duplicated().any():
+
+              raise SystemExit(
+                  "Duplicate timestamps remain "
+                  "after deduplication."
+              )
+
+          # ---------------------------------------------------------------
+          # Positive prices.
+          # ---------------------------------------------------------------
+
+          for column in [
+              "open",
+              "high",
+              "low",
+              "close",
+          ]:
+
+              if (
+                  df[column] <= 0
+              ).any():
+
+                  raise SystemExit(
+                      f"Non-positive {column} "
+                      "values detected."
+                  )
+
+          # ---------------------------------------------------------------
+          # Save normalized dataset.
+          # ---------------------------------------------------------------
 
           df.to_csv(
               output,
@@ -315,37 +804,59 @@ jobs:
           )
 
           print("")
-          print("==============================================")
-          print("NORMALIZED XAUUSD DATA")
-          print("==============================================")
-          print(f"Rows: {len(df):,}")
-          print(f"Start: {df['timestamp'].min()}")
-          print(f"End:   {df['timestamp'].max()}")
-          print(f"Output: {output}")
-          print("==============================================")
+          print("============================================================")
+          print("NORMALIZED XAUUSD H1 DATASET")
+          print("============================================================")
+          print(
+              f"Rows:       {len(df):,}"
+          )
+          print(
+              f"Start:      {df['timestamp'].min()}"
+          )
+          print(
+              f"End:        {df['timestamp'].max()}"
+          )
+          print(
+              f"Output:     {output}"
+          )
+          print("OHLC:       VALID")
+          print("Timestamps: VALID")
+          print("Duplicates: NONE")
+          print("============================================================")
 
           if len(df) < 5000:
+
               raise SystemExit(
-                  "Dataset has fewer than 5,000 H1 candles."
+                  "Dataset contains fewer "
+                  "than 5,000 H1 candles."
               )
 
           print("")
-          print("First 5 rows:")
-          print(df.head().to_string())
+          print("First 5 candles:")
+          print(
+              df.head().to_string(
+                  index=False
+              )
+          )
 
           print("")
-          print("Last 5 rows:")
-          print(df.tail().to_string())
+          print("Last 5 candles:")
+          print(
+              df.tail().to_string(
+                  index=False
+              )
+          )
 
-          print("")
-          print("Dataset normalization completed successfully.")
           PY
 
           echo "dataset=data/historical/xauusd_h1_2024_2026_normalized.csv" \
             >> "$GITHUB_OUTPUT"
 
-      - name: Validate market data
+      - name: Validate final market dataset
+        shell: bash
         run: |
+          set -e
+
           python - <<'PY'
           import pandas as pd
 
@@ -354,7 +865,9 @@ jobs:
               "xauusd_h1_2024_2026_normalized.csv"
           )
 
-          df = pd.read_csv(path)
+          df = pd.read_csv(
+              path
+          )
 
           required = [
               "timestamp",
@@ -364,11 +877,16 @@ jobs:
               "close",
           ]
 
-          for column in required:
-              if column not in df.columns:
-                  raise SystemExit(
-                      f"Missing column: {column}"
-                  )
+          missing = [
+              column
+              for column in required
+              if column not in df.columns
+          ]
+
+          if missing:
+              raise SystemExit(
+                  f"Missing columns: {missing}"
+              )
 
           df["timestamp"] = pd.to_datetime(
               df["timestamp"],
@@ -376,17 +894,27 @@ jobs:
               errors="coerce",
           )
 
-          if df["timestamp"].isna().any():
+          if df[
+              "timestamp"
+          ].isna().any():
+
               raise SystemExit(
                   "Invalid timestamps detected."
               )
 
-          if not df["timestamp"].is_monotonic_increasing:
+          if not df[
+              "timestamp"
+          ].is_monotonic_increasing:
+
               raise SystemExit(
-                  "Timestamps are not monotonic increasing."
+                  "Timestamps are not "
+                  "monotonic increasing."
               )
 
-          if df["timestamp"].duplicated().any():
+          if df[
+              "timestamp"
+          ].duplicated().any():
+
               raise SystemExit(
                   "Duplicate timestamps detected."
               )
@@ -404,46 +932,63 @@ jobs:
               )
 
               if df[column].isna().any():
+
                   raise SystemExit(
-                      f"Invalid {column} values detected."
+                      f"Invalid {column} values."
                   )
 
-              if (df[column] <= 0).any():
+              if (
+                  df[column] <= 0
+              ).any():
+
                   raise SystemExit(
-                      f"Non-positive {column} values detected."
+                      f"Non-positive {column} values."
                   )
 
-          if (df["high"] < df["low"]).any():
+          if (
+              df["high"] <
+              df["low"]
+          ).any():
+
               raise SystemExit(
-                  "Found High < Low candle."
+                  "High < Low detected."
               )
 
           if (
               (df["open"] > df["high"]) |
               (df["open"] < df["low"])
           ).any():
+
               raise SystemExit(
-                  "Found Open outside candle range."
+                  "Open outside candle range."
               )
 
           if (
               (df["close"] > df["high"]) |
               (df["close"] < df["low"])
           ).any():
+
               raise SystemExit(
-                  "Found Close outside candle range."
+                  "Close outside candle range."
               )
 
           print("")
-          print("==============================================")
-          print("MARKET DATA VALIDATION")
-          print("==============================================")
-          print(f"Validated {len(df):,} XAUUSD H1 candles.")
-          print(f"First candle: {df['timestamp'].min()}")
-          print(f"Last candle:  {df['timestamp'].max()}")
+          print("============================================================")
+          print("FINAL MARKET DATA VALIDATION: PASS")
+          print("============================================================")
+          print(
+              f"Rows:  {len(df):,}"
+          )
+          print(
+              f"Start: {df['timestamp'].min()}"
+          )
+          print(
+              f"End:   {df['timestamp'].max()}"
+          )
           print("OHLC integrity: PASS")
           print("Timestamp integrity: PASS")
-          print("==============================================")
+          print("Duplicate timestamps: NONE")
+          print("============================================================")
           PY
 
       - name: Upload prepared data
@@ -623,7 +1168,6 @@ jobs:
   robustness:
     name: V5 Robustness Analysis
     needs: walk-forward
-
     runs-on: ubuntu-latest
 
     timeout-minutes: 30
@@ -825,6 +1369,12 @@ jobs:
           Symbol: XAUUSD
           Timeframe: H1
 
+          DATA DOWNLOAD
+          -------------
+          Historical XAUUSD H1 data is downloaded in monthly chunks
+          to reduce the likelihood of external data-server rate
+          limiting.
+
           XAUUSD CONTRACT MODEL
           ---------------------
           1.00 lot = 100 ounces.
@@ -854,8 +1404,8 @@ jobs:
 
           RESEARCH PRINCIPLES
           -------------------
-          The system must not judge the strategy using
-          headline return alone.
+          The system must not judge the strategy using headline
+          return alone.
 
           Important measurements include:
 
@@ -873,18 +1423,6 @@ jobs:
 
           A very high backtest return without out-of-sample
           stability is not considered a validated edge.
-
-          IMPORTANT FILES
-          ---------------
-          validation/summary.txt
-
-          validation/v5_results_validation.json
-
-          robustness/summary.txt
-
-          walk_forward/v5_walk_forward_windows.csv
-
-          optimizer/
 
           FINAL DECISION
           --------------
