@@ -24,10 +24,11 @@ on:
         default: "2026-10-02"
         type: string
 
+
 jobs:
 
   # ========================================================================
-  # JOB 1 — PREPARE DATA
+  # 1. PREPARE DATA
   # ========================================================================
 
   prepare-data:
@@ -89,29 +90,22 @@ jobs:
 
           if not files:
               raise SystemExit(
-                  "No XAUUSD data file was downloaded."
+                  "No XAUUSD CSV file was downloaded."
               )
-
-          print("Downloaded files:")
-          for path in files:
-              print(f"  {path}")
 
           selected = None
 
           for path in files:
               name = path.name.lower()
 
-              if (
-                  "xauusd" in name
-                  or "xau" in name
-              ):
+              if "xauusd" in name or "xau" in name:
                   selected = path
                   break
 
           if selected is None:
               selected = files[0]
 
-          print(f"Selected file: {selected}")
+          print(f"Using source file: {selected}")
 
           df = pd.read_csv(selected)
 
@@ -129,35 +123,19 @@ jobs:
               }:
                   rename[column] = "timestamp"
 
-              elif key in {
-                  "open",
-                  "o",
-              }:
+              elif key in {"open", "o"}:
                   rename[column] = "open"
 
-              elif key in {
-                  "high",
-                  "h",
-              }:
+              elif key in {"high", "h"}:
                   rename[column] = "high"
 
-              elif key in {
-                  "low",
-                  "l",
-              }:
+              elif key in {"low", "l"}:
                   rename[column] = "low"
 
-              elif key in {
-                  "close",
-                  "c",
-              }:
+              elif key in {"close", "c"}:
                   rename[column] = "close"
 
-              elif key in {
-                  "volume",
-                  "vol",
-                  "v",
-              }:
+              elif key in {"volume", "vol", "v"}:
                   rename[column] = "volume"
 
           df = df.rename(columns=rename)
@@ -178,7 +156,7 @@ jobs:
 
           if missing:
               raise SystemExit(
-                  f"Missing columns: {missing}"
+                  f"Missing required columns: {missing}"
               )
 
           df["timestamp"] = pd.to_datetime(
@@ -233,7 +211,7 @@ jobs:
           )
 
           print(
-              f"Normalized rows: {len(df):,}"
+              f"Rows: {len(df):,}"
           )
 
           print(
@@ -246,14 +224,14 @@ jobs:
 
           if len(df) < 5000:
               raise SystemExit(
-                  "Dataset contains fewer than 5,000 H1 candles."
+                  "Dataset has fewer than 5,000 H1 candles."
               )
           PY
 
           echo "dataset=data/historical/xauusd_h1_2024_2026_normalized.csv" \
             >> "$GITHUB_OUTPUT"
 
-      - name: Validate data
+      - name: Validate market data
         run: |
           python - <<'PY'
           import pandas as pd
@@ -287,17 +265,17 @@ jobs:
 
           if df["timestamp"].isna().any():
               raise SystemExit(
-                  "Invalid timestamps found."
+                  "Invalid timestamps detected."
               )
 
           if not df["timestamp"].is_monotonic_increasing:
               raise SystemExit(
-                  "Timestamps are not increasing."
+                  "Timestamps are not monotonic."
               )
 
           if df["timestamp"].duplicated().any():
               raise SystemExit(
-                  "Duplicate timestamps found."
+                  "Duplicate timestamps detected."
               )
 
           for column in [
@@ -306,26 +284,33 @@ jobs:
               "low",
               "close",
           ]:
-              if (
-                  df[column] <= 0
-              ).any():
+
+              df[column] = pd.to_numeric(
+                  df[column],
+                  errors="coerce",
+              )
+
+              if df[column].isna().any():
                   raise SystemExit(
-                      f"Invalid {column} prices found."
+                      f"Invalid {column} values detected."
                   )
 
-          if (
-              df["high"] < df["low"]
-          ).any():
+              if (df[column] <= 0).any():
+                  raise SystemExit(
+                      f"Non-positive {column} values detected."
+                  )
+
+          if (df["high"] < df["low"]).any():
               raise SystemExit(
-                  "Found candles where High < Low."
+                  "Found High < Low candle."
               )
 
           print(
-              f"Validated {len(df):,} H1 candles."
+              f"Validated {len(df):,} XAUUSD H1 candles."
           )
           PY
 
-      - name: Upload prepared dataset
+      - name: Upload prepared data
         uses: actions/upload-artifact@v4
         with:
           name: v5-prepared-xauusd-data
@@ -334,7 +319,7 @@ jobs:
 
 
   # ========================================================================
-  # JOB 2 — V5 STRATEGY ENGINE
+  # 2. STRATEGY ENGINE
   # ========================================================================
 
   strategy-engine:
@@ -359,29 +344,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy
 
-      - name: Download prepared dataset
+      - name: Download prepared data
         uses: actions/download-artifact@v4
         with:
           name: v5-prepared-xauusd-data
           path: data/historical
 
-      - name: Run V5 strategy engine
+      - name: Run strategy engine
         run: |
           python scripts/v5_strategy_engine.py \
             --data data/historical/xauusd_h1_2024_2026_normalized.csv \
             --output backtest_results/weekly_growth_v5/strategy_engine
 
-      - name: Display strategy summary
-        if: always()
-        run: |
-          if [ -f \
-            backtest_results/weekly_growth_v5/strategy_engine/summary.txt
-          ]; then
-            cat \
-              backtest_results/weekly_growth_v5/strategy_engine/summary.txt
-          fi
-
-      - name: Upload strategy engine results
+      - name: Upload strategy results
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -391,81 +366,12 @@ jobs:
 
 
   # ========================================================================
-  # JOB 3 — V5 OPTIMIZER
+  # 3. OPTIMIZER
   # ========================================================================
 
   optimizer:
-    name: V5 Multi-Objective Optimizer
+    name: V5 Multi Objective Optimizer
     needs: prepare-data
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 120
-
-    steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy
-
-      - name: Download prepared dataset
-        uses: actions/download-artifact@v4
-        with:
-          name: v5-prepared-xauusd-data
-          path: data/historical
-
-      - name: Run quick V5 optimizer
-        if: inputs.mode == 'quick'
-        run: |
-          python scripts/v5_optimizer.py \
-            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
-            --output backtest_results/weekly_growth_v5/optimizer \
-            --max-candidates 250
-
-      - name: Run full V5 optimizer
-        if: inputs.mode == 'full'
-        run: |
-          python scripts/v5_optimizer.py \
-            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
-            --output backtest_results/weekly_growth_v5/optimizer
-
-      - name: Display optimizer summary
-        if: always()
-        run: |
-          if [ -f \
-            backtest_results/weekly_growth_v5/optimizer/summary.txt
-          ]; then
-            cat \
-              backtest_results/weekly_growth_v5/optimizer/summary.txt
-          fi
-
-      - name: Upload optimizer results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: v5-optimizer-results
-          path: backtest_results/weekly_growth_v5/optimizer
-          retention-days: 30
-
-
-  # ========================================================================
-  # JOB 4 — WALK-FORWARD VALIDATION
-  # ========================================================================
-
-  walk-forward:
-    name: V5 Walk-Forward Validation
-    needs:
-      - prepare-data
-      - optimizer
-
     runs-on: ubuntu-latest
 
     timeout-minutes: 180
@@ -485,13 +391,71 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy
 
-      - name: Download prepared dataset
+      - name: Download prepared data
         uses: actions/download-artifact@v4
         with:
           name: v5-prepared-xauusd-data
           path: data/historical
 
-      - name: Run quick walk-forward
+      - name: Run quick optimizer
+        if: inputs.mode == 'quick'
+        run: |
+          python scripts/v5_optimizer.py \
+            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output backtest_results/weekly_growth_v5/optimizer \
+            --max-candidates 250
+
+      - name: Run full optimizer
+        if: inputs.mode == 'full'
+        run: |
+          python scripts/v5_optimizer.py \
+            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output backtest_results/weekly_growth_v5/optimizer
+
+      - name: Upload optimizer results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-optimizer-results
+          path: backtest_results/weekly_growth_v5/optimizer
+          retention-days: 30
+
+
+  # ========================================================================
+  # 4. WALK FORWARD
+  # ========================================================================
+
+  walk-forward:
+    name: V5 Walk Forward
+    needs:
+      - prepare-data
+      - optimizer
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 240
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Download prepared data
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-prepared-xauusd-data
+          path: data/historical
+
+      - name: Run quick walk forward
         if: inputs.mode == 'quick'
         run: |
           python scripts/v5_walk_forward.py \
@@ -499,24 +463,14 @@ jobs:
             --output backtest_results/weekly_growth_v5/walk_forward \
             --max-candidates 250
 
-      - name: Run full walk-forward
+      - name: Run full walk forward
         if: inputs.mode == 'full'
         run: |
           python scripts/v5_walk_forward.py \
             --data data/historical/xauusd_h1_2024_2026_normalized.csv \
             --output backtest_results/weekly_growth_v5/walk_forward
 
-      - name: Display walk-forward summary
-        if: always()
-        run: |
-          if [ -f \
-            backtest_results/weekly_growth_v5/walk_forward/summary.txt
-          ]; then
-            cat \
-              backtest_results/weekly_growth_v5/walk_forward/summary.txt
-          fi
-
-      - name: Upload walk-forward results
+      - name: Upload walk forward results
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -526,7 +480,7 @@ jobs:
 
 
   # ========================================================================
-  # JOB 5 — ROBUSTNESS ANALYSIS
+  # 5. ROBUSTNESS
   # ========================================================================
 
   robustness:
@@ -551,7 +505,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy
 
-      - name: Download walk-forward results
+      - name: Download walk forward results
         uses: actions/download-artifact@v4
         with:
           name: v5-walk-forward-results
@@ -563,24 +517,6 @@ jobs:
             --input backtest_results/weekly_growth_v5/walk_forward \
             --output backtest_results/weekly_growth_v5/robustness
 
-      - name: Display final V5 verdict
-        if: always()
-        run: |
-          echo ""
-          echo "============================================================"
-          echo "RAYMOND V2.8 V5 FINAL ROBUSTNESS VERDICT"
-          echo "============================================================"
-          echo ""
-
-          if [ -f \
-            backtest_results/weekly_growth_v5/robustness/summary.txt
-          ]; then
-            cat \
-              backtest_results/weekly_growth_v5/robustness/summary.txt
-          else
-            echo "No robustness summary was produced."
-          fi
-
       - name: Upload robustness results
         if: always()
         uses: actions/upload-artifact@v4
@@ -591,11 +527,11 @@ jobs:
 
 
   # ========================================================================
-  # JOB 6 — FINAL RESEARCH PACKAGE
+  # 6. RESULTS VALIDATOR
   # ========================================================================
 
-  final-report:
-    name: Build Final V5 Research Package
+  validator:
+    name: V5 Independent Results Validator
     needs:
       - strategy-engine
       - optimizer
@@ -604,30 +540,105 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download strategy results
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Create validation package
+        run: |
+          mkdir -p validation_package
+
+      - name: Download strategy engine
         uses: actions/download-artifact@v4
         with:
           name: v5-strategy-engine-results
-          path: final_report/strategy_engine
+          path: validation_package/strategy_engine
 
-      - name: Download optimizer results
+      - name: Download optimizer
         uses: actions/download-artifact@v4
         with:
           name: v5-optimizer-results
-          path: final_report/optimizer
+          path: validation_package/optimizer
 
-      - name: Download walk-forward results
+      - name: Download walk forward
         uses: actions/download-artifact@v4
         with:
           name: v5-walk-forward-results
-          path: final_report/walk_forward
+          path: validation_package/walk_forward
+
+      - name: Download robustness
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-robustness-results
+          path: validation_package/robustness
+
+      - name: Download market data
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-prepared-xauusd-data
+          path: validation_package/market_data
+
+      - name: Run independent validator
+        run: |
+          python scripts/v5_results_validator.py \
+            --input validation_package \
+            --output validation_package/validation
+
+      - name: Print validator summary
+        if: always()
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "RAYMOND V2.8 V5 VALIDATION RESULT"
+          echo "============================================================"
+          echo ""
+
+          if [ -f validation_package/validation/summary.txt ]; then
+            cat validation_package/validation/summary.txt
+          else
+            echo "Validator summary was not generated."
+          fi
+
+      - name: Upload validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-validation-results
+          path: validation_package/validation
+          retention-days: 30
+
+
+  # ========================================================================
+  # 7. FINAL REPORT
+  # ========================================================================
+
+  final-report:
+    name: V5 Final Research Report
+    needs:
+      - validator
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Download validation results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-validation-results
+          path: final_report/validation
 
       - name: Download robustness results
         uses: actions/download-artifact@v4
@@ -635,58 +646,93 @@ jobs:
           name: v5-robustness-results
           path: final_report/robustness
 
-      - name: Create combined research index
+      - name: Download walk forward results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-walk-forward-results
+          path: final_report/walk_forward
+
+      - name: Download optimizer results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-optimizer-results
+          path: final_report/optimizer
+
+      - name: Download strategy engine results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-strategy-engine-results
+          path: final_report/strategy_engine
+
+      - name: Create research README
         run: |
           cat > final_report/README.txt <<'EOF'
-          RAYMOND V2.8 - V5 COMPLETE RESEARCH PACKAGE
-          =============================================
+          RAYMOND V2.8
+          V5 COMPLETE RESEARCH PACKAGE
+          =============================
 
-          This artifact contains the complete V5 research pipeline.
+          PIPELINE
+          --------
+          1. XAUUSD H1 data preparation
+          2. V5 strategy engine
+          3. Multi-objective optimizer
+          4. Walk-forward validation
+          5. Robustness analysis
+          6. Independent results validation
 
-          1. strategy_engine/
-             V5 strategy-family and regime detection.
+          XAUUSD CONTRACT MODEL
+          ---------------------
+          1.00 lot = 100 ounces
 
-          2. optimizer/
-             Multi-objective candidate optimization.
+          Therefore:
 
-          3. walk_forward/
-             Rolling validation with locked configurations
-             tested on later unseen periods.
+              P&L =
+              price_difference
+              × 100
+              × lot_size
 
-          4. robustness/
-             Final robustness classification and analysis.
+          Example:
+
+              2051 -> 2056
+              0.02 lot
+
+              5 × 100 × 0.02
+              = $10
+
+          LIVE TRADING
+          ------------
+          Disabled.
+
+          No MT5 orders.
+          No Exness orders.
+          No live position modification.
 
           IMPORTANT
           ---------
-          These results are research/backtest results only.
-
-          No MT5 orders were placed.
-          No Exness orders were placed.
-          No live broker execution was enabled.
-
-          A high historical return is NOT automatically
-          considered a valid trading edge.
+          A high backtest return alone does not prove a
+          profitable trading edge.
 
           The most important outputs are:
 
+              validation/summary.txt
+
+              validation/v5_results_validation.json
+
               robustness/summary.txt
-
-              robustness/v5_robustness_report.json
-
-              robustness/strategy_family_analysis.csv
-
-              robustness/regime_analysis.csv
 
               walk_forward/v5_walk_forward_windows.csv
 
               optimizer/
+
+          The validation verdict determines whether the
+          strategy should proceed to the next research stage.
           EOF
 
-      - name: Display final report
+      - name: Display final result
         run: |
           echo ""
           echo "============================================================"
-          echo "RAYMOND V2.8 V5 COMPLETE RESEARCH"
+          echo "RAYMOND V2.8 V5 FINAL RESULT"
           echo "============================================================"
           echo ""
 
@@ -694,40 +740,27 @@ jobs:
 
           echo ""
           echo "============================================================"
-          echo "ROBUSTNESS SUMMARY"
+          echo "VALIDATOR"
           echo "============================================================"
 
-          if [ -f \
-            final_report/robustness/summary.txt
-          ]; then
-            cat \
-              final_report/robustness/summary.txt
+          if [ -f final_report/validation/summary.txt ]; then
+            cat final_report/validation/summary.txt
           fi
 
-      - name: Upload complete V5 research package
-        uses: actions/upload-artifact@v4
-        with:
-          name: raymond-v2-8-v5-complete-research
-          path: final_report
-          retention-days: 30
-
-      - name: Add final report to GitHub summary
+      - name: GitHub Actions summary
         run: |
-          echo "# Raymond V2.8 V5 Complete Research" \
+          echo "# Raymond V2.8 V5 Final Research Result" \
             >> "$GITHUB_STEP_SUMMARY"
 
           echo "" \
             >> "$GITHUB_STEP_SUMMARY"
 
-          if [ -f \
-            final_report/robustness/summary.txt
-          ]; then
+          if [ -f final_report/validation/summary.txt ]; then
 
             echo '```text' \
               >> "$GITHUB_STEP_SUMMARY"
 
-            cat \
-              final_report/robustness/summary.txt \
+            cat final_report/validation/summary.txt \
               >> "$GITHUB_STEP_SUMMARY"
 
             echo '```' \
@@ -735,7 +768,14 @@ jobs:
 
           else
 
-            echo "Robustness report unavailable." \
+            echo "Validation summary unavailable." \
               >> "$GITHUB_STEP_SUMMARY"
 
           fi
+
+      - name: Upload complete research package
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-v2-8-v5-final-research
+          path: final_report
+          retention-days: 30
