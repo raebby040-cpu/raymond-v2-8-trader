@@ -3,12 +3,23 @@
 This module replays historical paper trades against M5 price data using
 the research-only runner_management_policy.
 
-It NEVER:
+IMPORTANT:
+This module NEVER:
 - places broker orders
 - modifies production positions
 - modifies the live strategy
 - connects to MT5/Exness
 - promotes research results to production
+
+Research model:
+1. Original risk_1r is immutable.
+2. Profit protection occurs at +1R.
+3. 50% partial close occurs at +2R.
+4. The remaining runner is protected and can continue.
+5. Runner trailing begins at +2.5R.
+6. Trailing continues as price extends.
+7. Partial P/L and final runner P/L are accounted separately.
+8. Total simulated P/L must reconcile exactly.
 """
 
 import argparse
@@ -26,32 +37,59 @@ from runner_management_policy import (
 
 
 CONTRACT_SIZE = 100.0
+EPSILON = 1e-9
 
 
-def price_at_r(direction, entry, risk, r):
+def price_at_r(
+    direction,
+    entry,
+    risk,
+    r,
+):
+    """Return the price corresponding to a given original R level."""
+
     if direction == Direction.BUY:
         return entry + (r * risk)
 
     return entry - (r * risk)
 
 
-def stop_hit(direction, candle, stop):
+def stop_hit(
+    direction,
+    candle,
+    stop,
+):
+    """Check whether the active stop was touched by an M5 candle."""
+
     if direction == Direction.BUY:
         return float(candle["low"]) <= stop
 
     return float(candle["high"]) >= stop
 
 
-def calculate_pnl(direction, entry, exit_price, quantity):
+def calculate_pnl(
+    direction,
+    entry,
+    exit_price,
+    quantity,
+):
+    """Calculate XAUUSD P/L using the 100 oz contract size."""
+
     if direction == Direction.BUY:
         price_move = exit_price - entry
     else:
         price_move = entry - exit_price
 
-    return price_move * quantity * CONTRACT_SIZE
+    return (
+        price_move
+        * quantity
+        * CONTRACT_SIZE
+    )
 
 
 def normalize_timestamp(value):
+    """Normalize a timestamp to UTC."""
+
     timestamp = pd.Timestamp(value)
 
     if timestamp.tzinfo is None:
@@ -60,7 +98,33 @@ def normalize_timestamp(value):
     return timestamp.tz_convert("UTC")
 
 
-def replay_trade(trade, m5, config):
+def validate_trade_direction(
+    direction,
+    entry,
+    initial_stop,
+):
+    """Validate that the original stop is on the correct side."""
+
+    if direction == Direction.BUY:
+        if initial_stop >= entry:
+            raise ValueError(
+                "BUY initial stop must be below entry."
+            )
+
+    elif direction == Direction.SELL:
+        if initial_stop <= entry:
+            raise ValueError(
+                "SELL initial stop must be above entry."
+            )
+
+
+def replay_trade(
+    trade,
+    m5,
+    config,
+):
+    """Replay one historical trade under the research runner policy."""
+
     required_fields = [
         "trade_id",
         "direction",
@@ -84,12 +148,25 @@ def replay_trade(trade, m5, config):
             "missing_fields": missing,
         }
 
-    direction = Direction(
-        str(trade["direction"]).upper()
+    try:
+        direction = Direction(
+            str(trade["direction"]).upper()
+        )
+    except ValueError:
+        return {
+            "trade_id": trade["trade_id"],
+            "status": "SKIPPED",
+            "reason": "invalid_direction",
+            "direction": trade.get("direction"),
+        }
+
+    entry = float(
+        trade["entry_price"]
     )
 
-    entry = float(trade["entry_price"])
-    initial_stop = float(trade["initial_stop_loss"])
+    initial_stop = float(
+        trade["initial_stop_loss"]
+    )
 
     quantity = float(
         trade.get("quantity")
@@ -115,6 +192,20 @@ def replay_trade(trade, m5, config):
             "reason": "invalid_original_risk",
         }
 
+    try:
+        validate_trade_direction(
+            direction,
+            entry,
+            initial_stop,
+        )
+    except ValueError as exc:
+        return {
+            "trade_id": trade["trade_id"],
+            "status": "SKIPPED",
+            "reason": "invalid_stop_direction",
+            "detail": str(exc),
+        }
+
     opened = normalize_timestamp(
         trade["opened_at"]
     )
@@ -123,8 +214,18 @@ def replay_trade(trade, m5, config):
         trade["closed_at"]
     )
 
+    if closed < opened:
+        return {
+            "trade_id": trade["trade_id"],
+            "status": "SKIPPED",
+            "reason": "closed_before_open",
+        }
+
     candles = m5[
-        (m5["timestamp"] >= opened.floor("5min"))
+        (
+            m5["timestamp"]
+            >= opened.floor("5min")
+        )
         & (
             m5["timestamp"]
             <= closed.ceil("5min")
@@ -144,24 +245,31 @@ def replay_trade(trade, m5, config):
     partial_close_applied = False
     trailing_active = False
 
+    # IMPORTANT:
+    # This is the corrected accumulator.
     partial_close_pnl = 0.0
 
     events = []
 
     exit_price = None
     exit_reason = None
+    exit_time = None
 
     for _, candle in candles.iterrows():
+
+        candle_time = candle["timestamp"]
 
         # --------------------------------------------------
         # EXISTING STOP FIRST
         # --------------------------------------------------
         #
-        # This is intentionally conservative.
+        # Conservative OHLC rule:
         #
-        # If the candle touches an already-active stop,
-        # the stop is considered hit before a new management
-        # action is allowed to use that candle.
+        # If the active stop was touched during this candle,
+        # the existing stop wins before a new management action.
+        #
+        # This avoids assuming favorable intrabar sequencing
+        # that OHLC data cannot prove.
         # --------------------------------------------------
 
         if stop_hit(
@@ -171,7 +279,12 @@ def replay_trade(trade, m5, config):
         ):
             exit_price = current_stop
             exit_reason = "STOP"
+            exit_time = candle_time
             break
+
+        # --------------------------------------------------
+        # USE CANDLE CLOSE FOR POLICY EVALUATION
+        # --------------------------------------------------
 
         current_price = float(
             candle["close"]
@@ -199,6 +312,17 @@ def replay_trade(trade, m5, config):
 
         if decision.action == "PARTIAL_CLOSE":
 
+            partial_quantity = float(
+                decision.partial_close_quantity
+            )
+
+            if (
+                partial_quantity <= 0
+                or partial_quantity
+                >= remaining_quantity
+            ):
+                continue
+
             partial_price = price_at_r(
                 direction,
                 entry,
@@ -206,15 +330,17 @@ def replay_trade(trade, m5, config):
                 config.partial_close_rr,
             )
 
-            partial_quantity = (
-                decision.partial_close_quantity
-            )
-
-            partial_pnl += calculate_pnl(
+            partial_trade_pnl = calculate_pnl(
                 direction,
                 entry,
                 partial_price,
                 partial_quantity,
+            )
+
+            # CORRECTED:
+            # Accumulate into partial_close_pnl.
+            partial_close_pnl += (
+                partial_trade_pnl
             )
 
             remaining_quantity = round(
@@ -228,49 +354,84 @@ def replay_trade(trade, m5, config):
             events.append(
                 {
                     "time": str(
-                        candle["timestamp"]
+                        candle_time
                     ),
-                    "action": "PARTIAL_CLOSE",
-                    "price": partial_price,
-                    "quantity": partial_quantity,
-                    "r": decision.current_r,
-                    "pnl": calculate_pnl(
-                        direction,
-                        entry,
-                        partial_price,
+                    "action":
+                        "PARTIAL_CLOSE",
+                    "price":
+                        round(
+                            partial_price,
+                            6,
+                        ),
+                    "quantity":
                         partial_quantity,
-                    ),
+                    "r":
+                        round(
+                            decision.current_r,
+                            6,
+                        ),
+                    "pnl":
+                        round(
+                            partial_trade_pnl,
+                            6,
+                        ),
                 }
             )
 
-            # The research model protects the remaining
-            # runner at entry after the partial threshold.
-            if (
-                config.protection_rr
-                <= config.partial_close_rr
-            ):
-                protection_stop = entry
+            # Protect the remaining runner at entry.
+            protection_stop = entry
 
-                if (
-                    direction == Direction.BUY
-                    and protection_stop
-                    > current_stop
-                ) or (
-                    direction == Direction.SELL
-                    and protection_stop
-                    < current_stop
-                ):
-                    current_stop = protection_stop
+            if direction == Direction.BUY:
+
+                if protection_stop > current_stop:
+                    current_stop = (
+                        protection_stop
+                    )
 
                     events.append(
                         {
                             "time": str(
-                                candle["timestamp"]
+                                candle_time
                             ),
                             "action":
                                 "MOVE_TO_PROTECTION",
-                            "price": current_stop,
-                            "r": decision.current_r,
+                            "price":
+                                round(
+                                    current_stop,
+                                    6,
+                                ),
+                            "r":
+                                round(
+                                    decision.current_r,
+                                    6,
+                                ),
+                        }
+                    )
+
+            else:
+
+                if protection_stop < current_stop:
+                    current_stop = (
+                        protection_stop
+                    )
+
+                    events.append(
+                        {
+                            "time": str(
+                                candle_time
+                            ),
+                            "action":
+                                "MOVE_TO_PROTECTION",
+                            "price":
+                                round(
+                                    current_stop,
+                                    6,
+                                ),
+                            "r":
+                                round(
+                                    decision.current_r,
+                                    6,
+                                ),
                         }
                     )
 
@@ -282,21 +443,64 @@ def replay_trade(trade, m5, config):
 
         if decision.action == "MOVE_TO_PROTECTION":
 
-            current_stop = float(
+            candidate_stop = float(
                 decision.new_stop
             )
 
-            events.append(
-                {
-                    "time": str(
-                        candle["timestamp"]
-                    ),
-                    "action":
-                        "MOVE_TO_PROTECTION",
-                    "price": current_stop,
-                    "r": decision.current_r,
-                }
-            )
+            # Never worsen protection.
+            if direction == Direction.BUY:
+
+                if candidate_stop > current_stop:
+                    current_stop = (
+                        candidate_stop
+                    )
+
+                    events.append(
+                        {
+                            "time": str(
+                                candle_time
+                            ),
+                            "action":
+                                "MOVE_TO_PROTECTION",
+                            "price":
+                                round(
+                                    current_stop,
+                                    6,
+                                ),
+                            "r":
+                                round(
+                                    decision.current_r,
+                                    6,
+                                ),
+                        }
+                    )
+
+            else:
+
+                if candidate_stop < current_stop:
+                    current_stop = (
+                        candidate_stop
+                    )
+
+                    events.append(
+                        {
+                            "time": str(
+                                candle_time
+                            ),
+                            "action":
+                                "MOVE_TO_PROTECTION",
+                            "price":
+                                round(
+                                    current_stop,
+                                    6,
+                                ),
+                            "r":
+                                round(
+                                    decision.current_r,
+                                    6,
+                                ),
+                        }
+                    )
 
             continue
 
@@ -312,11 +516,23 @@ def replay_trade(trade, m5, config):
 
             # Never worsen protection.
             if direction == Direction.BUY:
+
                 if candidate_stop <= current_stop:
                     continue
 
+                # Safety: BUY trailing stop must remain
+                # below current price.
+                if candidate_stop >= current_price:
+                    continue
+
             else:
+
                 if candidate_stop >= current_stop:
+                    continue
+
+                # Safety: SELL trailing stop must remain
+                # above current price.
+                if candidate_stop <= current_price:
                     continue
 
             current_stop = candidate_stop
@@ -325,16 +541,25 @@ def replay_trade(trade, m5, config):
             events.append(
                 {
                     "time": str(
-                        candle["timestamp"]
+                        candle_time
                     ),
-                    "action": "TRAIL",
-                    "price": current_stop,
-                    "r": decision.current_r,
+                    "action":
+                        "TRAIL",
+                    "price":
+                        round(
+                            current_stop,
+                            6,
+                        ),
+                    "r":
+                        round(
+                            decision.current_r,
+                            6,
+                        ),
                 }
             )
 
     # ------------------------------------------------------
-    # FALLBACK
+    # FALLBACK TO ACTUAL RECORDED EXIT
     # ------------------------------------------------------
 
     if exit_price is None:
@@ -344,17 +569,26 @@ def replay_trade(trade, m5, config):
         )
 
         if recorded_exit is not None:
+
             exit_price = float(
                 recorded_exit
             )
+
         else:
+
+            # Last available candle inside the
+            # historical replay window.
             exit_price = float(
-                m5.iloc[-1]["close"]
+                candles.iloc[-1]["close"]
             )
 
         exit_reason = (
             "RECORDED_CLOSE_FALLBACK"
         )
+
+        exit_time = candles.iloc[-1][
+            "timestamp"
+        ]
 
     # ------------------------------------------------------
     # FINAL RUNNER P/L
@@ -381,36 +615,105 @@ def replay_trade(trade, m5, config):
         - actual_audited_pnl
     )
 
+    # ------------------------------------------------------
+    # ACCOUNTING RECONCILIATION
+    # ------------------------------------------------------
+
+    accounting_reconciled = (
+        abs(
+            (
+                partial_close_pnl
+                + runner_final_pnl
+            )
+            - simulated_total_pnl
+        )
+        <= EPSILON
+    )
+
     return {
-        "trade_id": trade["trade_id"],
-        "status": "REPLAYED",
-        "direction": direction.value,
-        "quantity": quantity,
-        "entry_price": entry,
-        "initial_stop_loss": initial_stop,
-        "original_risk_1r": original_risk,
+        "trade_id":
+            trade["trade_id"],
+
+        "status":
+            "REPLAYED",
+
+        "direction":
+            direction.value,
+
+        "quantity":
+            quantity,
+
+        "entry_price":
+            round(entry, 6),
+
+        "initial_stop_loss":
+            round(initial_stop, 6),
+
+        "original_risk_1r":
+            round(original_risk, 6),
+
         "partial_close_applied":
             partial_close_applied,
+
         "partial_close_pnl":
-            round(partial_close_pnl, 6),
+            round(
+                partial_close_pnl,
+                6,
+            ),
+
         "runner_exit_price":
-            round(exit_price, 6),
+            round(
+                exit_price,
+                6,
+            ),
+
         "runner_exit_reason":
             exit_reason,
+
+        "runner_exit_time":
+            str(exit_time)
+            if exit_time is not None
+            else None,
+
         "runner_remaining_quantity":
-            remaining_quantity,
+            round(
+                remaining_quantity,
+                8,
+            ),
+
         "runner_final_pnl":
-            round(runner_final_pnl, 6),
+            round(
+                runner_final_pnl,
+                6,
+            ),
+
         "simulated_total_pnl":
-            round(simulated_total_pnl, 6),
+            round(
+                simulated_total_pnl,
+                6,
+            ),
+
         "actual_audited_pnl":
-            round(actual_audited_pnl, 6),
+            round(
+                actual_audited_pnl,
+                6,
+            ),
+
         "difference_vs_actual":
-            round(difference, 6),
+            round(
+                difference,
+                6,
+            ),
+
         "trailing_active":
             trailing_active,
+
         "event_count":
             len(events),
+
+        "accounting_reconciled":
+            accounting_reconciled,
+
         "events":
             events,
     }
@@ -442,8 +745,16 @@ def main():
 
     args = parser.parse_args()
 
+    # ------------------------------------------------------
+    # LOAD RESEARCH POLICY
+    # ------------------------------------------------------
+
     config = RunnerConfig()
     config.validate()
+
+    # ------------------------------------------------------
+    # LOAD AUDIT
+    # ------------------------------------------------------
 
     audit = json.loads(
         Path(
@@ -458,26 +769,161 @@ def main():
         []
     )
 
+    if not isinstance(
+        trades,
+        list,
+    ):
+        raise SystemExit(
+            "ERROR: audit trades must be a list."
+        )
+
+    # ------------------------------------------------------
+    # LOAD M5
+    # ------------------------------------------------------
+
     m5 = pd.read_csv(
         args.m5
     )
 
-    m5["timestamp"] = pd.to_datetime(
-        m5["timestamp"],
-        utc=True,
+    required_m5_columns = {
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+    }
+
+    missing_m5 = (
+        required_m5_columns
+        - set(m5.columns)
     )
+
+    if missing_m5:
+        raise SystemExit(
+            "ERROR: missing M5 columns: "
+            + ", ".join(
+                sorted(missing_m5)
+            )
+        )
+
+    m5["timestamp"] = (
+        pd.to_datetime(
+            m5["timestamp"],
+            utc=True,
+            errors="coerce",
+        )
+    )
+
+    for column in (
+        "open",
+        "high",
+        "low",
+        "close",
+    ):
+        m5[column] = pd.to_numeric(
+            m5[column],
+            errors="coerce",
+        )
+
+    m5 = m5.dropna(
+        subset=[
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+        ]
+    )
+
+    m5 = (
+        m5.sort_values(
+            "timestamp"
+        )
+        .drop_duplicates(
+            subset=["timestamp"]
+        )
+        .reset_index(drop=True)
+    )
+
+    if m5.empty:
+        raise SystemExit(
+            "ERROR: M5 dataset is empty."
+        )
+
+    # ------------------------------------------------------
+    # M5 DATA SAFETY VALIDATION
+    # ------------------------------------------------------
+
+    if (
+        m5["high"]
+        < m5["low"]
+    ).any():
+        raise SystemExit(
+            "ERROR: M5 candle has high < low."
+        )
+
+    for field in (
+        "open",
+        "close",
+    ):
+
+        if (
+            m5["high"]
+            < m5[field]
+        ).any():
+            raise SystemExit(
+                f"ERROR: M5 high < {field}."
+            )
+
+        if (
+            m5["low"]
+            > m5[field]
+        ).any():
+            raise SystemExit(
+                f"ERROR: M5 low > {field}."
+            )
+
+    # ------------------------------------------------------
+    # REPLAY
+    # ------------------------------------------------------
 
     results = []
 
     for trade in trades:
 
-        results.append(
-            replay_trade(
+        try:
+
+            result = replay_trade(
                 trade,
                 m5,
                 config,
             )
+
+        except Exception as exc:
+
+            # One malformed historical trade must NEVER
+            # abort the entire research run.
+            result = {
+                "trade_id":
+                    trade.get("trade_id"),
+
+                "status":
+                    "SKIPPED",
+
+                "reason":
+                    "replay_exception",
+
+                "detail":
+                    str(exc),
+            }
+
+        results.append(
+            result
         )
+
+    # ------------------------------------------------------
+    # AGGREGATION
+    # ------------------------------------------------------
 
     replayed = [
         result
@@ -511,6 +957,24 @@ def main():
         for result in replayed
     )
 
+    partial_total = sum(
+        float(
+            result[
+                "partial_close_pnl"
+            ]
+        )
+        for result in replayed
+    )
+
+    runner_total = sum(
+        float(
+            result[
+                "runner_final_pnl"
+            ]
+        )
+        for result in replayed
+    )
+
     difference = (
         simulated_total
         - actual_total
@@ -539,12 +1003,35 @@ def main():
         for result in replayed
     )
 
+    accounting_reconciled = all(
+        result[
+            "accounting_reconciled"
+        ]
+        for result in replayed
+    )
+
+    aggregate_accounting_reconciled = (
+        abs(
+            (
+                partial_total
+                + runner_total
+            )
+            - simulated_total
+        )
+        <= EPSILON
+    )
+
+    # ------------------------------------------------------
+    # REPORT
+    # ------------------------------------------------------
+
     report = {
+
         "report_type":
             "RAYMOND_RUNNER_MANAGEMENT_REPLAY",
 
         "version":
-            "1.0",
+            "1.1",
 
         "research_only":
             True,
@@ -568,9 +1055,12 @@ def main():
             "XAUUSD",
 
         "month":
-            audit.get("month"),
+            audit.get(
+                "month"
+            ),
 
         "configuration": {
+
             "minimum_rr":
                 config.minimum_rr,
 
@@ -614,6 +1104,18 @@ def main():
                 6,
             ),
 
+        "partial_close_pnl_total":
+            round(
+                partial_total,
+                6,
+            ),
+
+        "runner_final_pnl_total":
+            round(
+                runner_total,
+                6,
+            ),
+
         "difference_vs_actual":
             round(
                 difference,
@@ -630,36 +1132,135 @@ def main():
             unchanged,
 
         "accounting_reconciled":
-            all(
-                abs(
-                    (
-                        result[
-                            "partial_close_pnl"
-                        ]
-                        + result[
-                            "runner_final_pnl"
-                        ]
-                    )
-                    - result[
-                        "simulated_total_pnl"
-                    ]
-                )
-                < 0.000001
-                for result in replayed
+            (
+                accounting_reconciled
+                and aggregate_accounting_reconciled
             ),
+
+        "safety": {
+
+            "research_only":
+                True,
+
+            "live_trading_changed":
+                False,
+
+            "strategy_modified":
+                False,
+
+            "positions_modified":
+                False,
+
+            "orders_created":
+                False,
+
+            "candidates_promoted":
+                False,
+        },
 
         "trades":
             results,
     }
 
-    Path(
+    # ------------------------------------------------------
+    # WRITE OUTPUT
+    # ------------------------------------------------------
+
+    output_path = Path(
         args.output
-    ).write_text(
+    )
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path.write_text(
         json.dumps(
             report,
             indent=2,
         ),
         encoding="utf-8",
+    )
+
+    # ------------------------------------------------------
+    # CONSOLE SUMMARY
+    # ------------------------------------------------------
+
+    print(
+        "RAYMOND RUNNER MANAGEMENT REPLAY"
+    )
+
+    print(
+        "Research only:",
+        True,
+    )
+
+    print(
+        "Month:",
+        audit.get("month"),
+    )
+
+    print(
+        "Trades:",
+        len(trades),
+    )
+
+    print(
+        "Replayed:",
+        len(replayed),
+    )
+
+    print(
+        "Skipped:",
+        len(skipped),
+    )
+
+    print(
+        "Actual audited P/L:",
+        round(
+            actual_total,
+            6,
+        ),
+    )
+
+    print(
+        "Simulated runner P/L:",
+        round(
+            simulated_total,
+            6,
+        ),
+    )
+
+    print(
+        "Difference:",
+        round(
+            difference,
+            6,
+        ),
+    )
+
+    print(
+        "Improved:",
+        improved,
+    )
+
+    print(
+        "Worsened:",
+        worsened,
+    )
+
+    print(
+        "Unchanged:",
+        unchanged,
+    )
+
+    print(
+        "Accounting reconciled:",
+        (
+            accounting_reconciled
+            and aggregate_accounting_reconciled
+        ),
     )
 
 
