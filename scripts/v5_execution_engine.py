@@ -4,16 +4,14 @@ RAYMOND V2.8 - V5 EXECUTION & BACKTEST ENGINE
 
 STEP 3 OF V5 RESEARCH ARCHITECTURE
 
-This module takes V5 strategy signals and evaluates them through a
-realistic XAUUSD execution model.
+Research-only XAUUSD execution/backtest engine.
 
-RESEARCH ONLY
--------------
-No MT5 connection.
-No Exness connection.
-No broker orders.
-No broker position modification.
-No live trading.
+IMPORTANT:
+- No MT5 connection.
+- No Exness connection.
+- No broker orders.
+- No live trading.
+- No broker position modification.
 
 CORE OBJECTIVES
 ---------------
@@ -27,31 +25,38 @@ CORE OBJECTIVES
 8. Weekly trade/risk controls.
 9. Complete trade journal.
 10. Equity curve and drawdown.
-11. Yearly and weekly performance.
-12. Development / selection / holdout separation.
+11. Yearly/monthly/weekly reporting.
+12. Development/selection/holdout separation.
 
 XAUUSD CONTRACT MODEL
 ---------------------
-Default:
-    contract_size = 100 oz
-    1.00 lot = 100 oz
+1.00 lot = 100 oz.
 
-Therefore:
+P&L:
 
-    P&L = price_difference * contract_size * lots
+    BUY  = (exit - entry) * 100 * lots
+    SELL = (entry - exit) * 100 * lots
 
 Example:
 
-    XAUUSD 2051 -> 2056
-    movement = $5
-    lots = 0.02
-    contract = 100 oz
+    2051 -> 2056
+    0.02 lot
 
-    P&L = 5 * 100 * 0.02
-        = $10
+    5 * 100 * 0.02 = $10
 
-This is intentionally explicit so the previous gold-P&L mismatch
-cannot silently return.
+LOOKAHEAD CONTROL
+-----------------
+Historical OHLC data cannot tell us the exact intrabar sequence.
+
+Therefore the engine uses this order for an already-open position:
+
+    1. Check the EXISTING stop/target.
+    2. If touched, exit using the existing level.
+    3. If not touched, update break-even/trailing/TP.
+    4. Updated management levels become effective on the NEXT candle.
+
+This prevents a candle from both creating a new trailing/BE level
+and then using that newly-created level to exit itself.
 """
 
 from __future__ import annotations
@@ -81,6 +86,8 @@ DEFAULT_OUTPUT = (
 
 STARTING_BALANCE = 1000.0
 
+# XAUUSD:
+# 1.00 lot = 100 ounces
 CONTRACT_SIZE = 100.0
 
 MIN_LOT = 0.01
@@ -105,8 +112,6 @@ DEFAULT_TRAILING_DISTANCE_R = 1.0
 
 DEFAULT_MAX_WEEKLY_LOSS = -0.09
 
-# Used to prevent unrealistic over-trading if a signal remains valid
-# for consecutive candles.
 ENTRY_COOLDOWN_BARS = 1
 
 
@@ -193,32 +198,28 @@ def calculate_xauusd_pnl(
     contract_size: float = CONTRACT_SIZE,
 ) -> float:
     """
-    Correct XAUUSD contract P&L.
-
-    1.00 lot = 100 oz.
+    Correct XAUUSD P&L.
 
     BUY:
-        (exit - entry) * 100 * lots
+        (exit - entry) * contract_size * lots
 
     SELL:
-        (entry - exit) * 100 * lots
+        (entry - exit) * contract_size * lots
     """
 
     if direction == "BUY":
-        price_difference = (
-            exit_price - entry_price
-        )
+        difference = exit_price - entry_price
+
     elif direction == "SELL":
-        price_difference = (
-            entry_price - exit_price
-        )
+        difference = entry_price - exit_price
+
     else:
         raise ValueError(
             f"Invalid direction: {direction}"
         )
 
     return (
-        price_difference
+        difference
         * contract_size
         * lots
     )
@@ -231,10 +232,7 @@ def round_lots(
     lot_step: float = LOT_STEP,
 ) -> float:
     """
-    Round DOWN to broker volume step.
-
-    Rounding down is conservative because it prevents the engine
-    from accidentally exceeding the requested monetary risk.
+    Round down to broker lot step.
     """
 
     if lots <= 0:
@@ -249,9 +247,7 @@ def round_lots(
         lots / lot_step + 1e-12
     )
 
-    rounded = (
-        steps * lot_step
-    )
+    rounded = steps * lot_step
 
     rounded = min(
         max(rounded, min_lot),
@@ -273,18 +269,13 @@ def calculate_lot_size(
     """
     Risk-based XAUUSD sizing.
 
-    Monetary risk at 1 lot:
+    Risk per one lot:
 
-        stop_distance * contract_size
+        stop_distance * 100
 
-    Required lots:
+    Lots:
 
-        risk_amount /
-        (stop_distance * contract_size)
-
-    Returns:
-
-        lots, actual_risk_amount
+        requested risk / risk per one lot
     """
 
     if (
@@ -295,13 +286,11 @@ def calculate_lot_size(
         return 0.0, 0.0
 
     requested_risk = (
-        balance *
-        risk_fraction
+        balance * risk_fraction
     )
 
     risk_per_one_lot = (
-        stop_distance *
-        contract_size
+        stop_distance * contract_size
     )
 
     if risk_per_one_lot <= 0:
@@ -317,16 +306,16 @@ def calculate_lot_size(
     )
 
     actual_risk = (
-        stop_distance *
-        contract_size *
-        lots
+        stop_distance
+        * contract_size
+        * lots
     )
 
     return lots, actual_risk
 
 
 # ============================================================================
-# INDICATORS
+# DATA
 # ============================================================================
 
 def load_data(
@@ -391,6 +380,10 @@ def load_data(
     return df
 
 
+# ============================================================================
+# INDICATORS
+# ============================================================================
+
 def calculate_indicators(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -417,14 +410,11 @@ def calculate_indicators(
         .mean()
     )
 
-    previous_close = (
-        close.shift(1)
-    )
+    previous_close = close.shift(1)
 
     true_range = pd.concat(
         [
-            df["high"] -
-            df["low"],
+            df["high"] - df["low"],
 
             (
                 df["high"] -
@@ -603,7 +593,7 @@ def detect_regime(
 
 
 # ============================================================================
-# V5 SIGNAL ENGINE
+# SIGNAL ENGINE
 # ============================================================================
 
 def generate_signal(
@@ -649,10 +639,7 @@ def generate_signal(
     # TREND CONTINUATION
     # ------------------------------------------------------------------
 
-    if (
-        strategy_family ==
-        "TREND_CONTINUATION"
-    ):
+    if strategy_family == "TREND_CONTINUATION":
 
         if regime == "BULL_TREND":
 
@@ -684,10 +671,7 @@ def generate_signal(
     # PULLBACK RETEST
     # ------------------------------------------------------------------
 
-    elif (
-        strategy_family ==
-        "PULLBACK_RETEST"
-    ):
+    elif strategy_family == "PULLBACK_RETEST":
 
         if regime == "BULL_TREND":
 
@@ -721,10 +705,7 @@ def generate_signal(
     # BREAKOUT
     # ------------------------------------------------------------------
 
-    elif (
-        strategy_family ==
-        "BREAKOUT"
-    ):
+    elif strategy_family == "BREAKOUT":
 
         range_high = row.get(
             "range_high"
@@ -764,10 +745,7 @@ def generate_signal(
     # LIQUIDITY REVERSAL
     # ------------------------------------------------------------------
 
-    elif (
-        strategy_family ==
-        "LIQUIDITY_REVERSAL"
-    ):
+    elif strategy_family == "LIQUIDITY_REVERSAL":
 
         range_high = row.get(
             "range_high"
@@ -809,10 +787,7 @@ def generate_signal(
     # RANGE MEAN REVERSION
     # ------------------------------------------------------------------
 
-    elif (
-        strategy_family ==
-        "RANGE_MEAN_REVERSION"
-    ):
+    elif strategy_family == "RANGE_MEAN_REVERSION":
 
         if regime == "RANGE":
 
@@ -826,9 +801,7 @@ def generate_signal(
 
             if (
                 pd.notna(range_low)
-                and close <= (
-                    range_low * 1.001
-                )
+                and close <= range_low * 1.001
                 and rsi < 40
             ):
 
@@ -839,9 +812,7 @@ def generate_signal(
 
             elif (
                 pd.notna(range_high)
-                and close >= (
-                    range_high * 0.999
-                )
+                and close >= range_high * 0.999
                 and rsi > 60
             ):
 
@@ -854,10 +825,7 @@ def generate_signal(
     # MOMENTUM EXPANSION
     # ------------------------------------------------------------------
 
-    elif (
-        strategy_family ==
-        "MOMENTUM_EXPANSION"
-    ):
+    elif strategy_family == "MOMENTUM_EXPANSION":
 
         if regime == "VOLATILITY_EXPANSION":
 
@@ -867,6 +835,7 @@ def generate_signal(
                 and macd > macd_signal
                 and rsi > 55
             ):
+
                 buy_score = 90
 
             elif (
@@ -875,6 +844,7 @@ def generate_signal(
                 and macd < macd_signal
                 and rsi < 45
             ):
+
                 sell_score = 90
 
     if buy_score >= minimum_score:
@@ -903,9 +873,7 @@ def get_entry_price(
     slippage: float,
 ) -> float:
 
-    half_spread = (
-        spread / 2.0
-    )
+    half_spread = spread / 2.0
 
     if direction == "BUY":
 
@@ -929,9 +897,7 @@ def get_exit_price(
     slippage: float,
 ) -> float:
 
-    half_spread = (
-        spread / 2.0
-    )
+    half_spread = spread / 2.0
 
     if direction == "BUY":
 
@@ -961,8 +927,12 @@ def update_position(
     trailing_distance_r: float,
     allow_tp_extension: bool = True,
 ) -> None:
+    """
+    Apply management rules AFTER the existing SL/TP has been checked.
 
-    position.bars_held += 1
+    This means levels created from this candle cannot be used to exit
+    the same candle.
+    """
 
     high = float(row["high"])
     low = float(row["low"])
@@ -971,10 +941,7 @@ def update_position(
         position.initial_stop_distance
     )
 
-    # --------------------------------------------------------------
     # BUY
-    # --------------------------------------------------------------
-
     if position.direction == "BUY":
 
         # Break-even
@@ -982,21 +949,19 @@ def update_position(
             not position.break_even_triggered
             and high >= (
                 position.entry_price
-                + risk_distance *
-                break_even_r
+                + risk_distance
+                * break_even_r
             )
         ):
 
             position.stop_price = max(
                 position.stop_price,
                 position.entry_price
-                + risk_distance *
-                break_even_lock_r,
+                + risk_distance
+                * break_even_lock_r,
             )
 
-            position.break_even_triggered = (
-                True
-            )
+            position.break_even_triggered = True
 
         # TP extension
         if (
@@ -1010,8 +975,8 @@ def update_position(
 
             position.target_price = (
                 position.entry_price
-                + risk_distance *
-                max(
+                + risk_distance
+                * max(
                     position.initial_target_r,
                     3.0,
                 )
@@ -1022,30 +987,22 @@ def update_position(
         # Trailing
         if high >= (
             position.entry_price
-            + risk_distance *
-            trailing_start_r
+            + risk_distance
+            * trailing_start_r
         ):
 
             new_stop = (
-                high -
-                risk_distance *
-                trailing_distance_r
+                high
+                - risk_distance
+                * trailing_distance_r
             )
 
             if new_stop > position.stop_price:
 
-                position.stop_price = (
-                    new_stop
-                )
+                position.stop_price = new_stop
+                position.trailing_active = True
 
-                position.trailing_active = (
-                    True
-                )
-
-    # --------------------------------------------------------------
     # SELL
-    # --------------------------------------------------------------
-
     else:
 
         # Break-even
@@ -1053,21 +1010,19 @@ def update_position(
             not position.break_even_triggered
             and low <= (
                 position.entry_price
-                - risk_distance *
-                break_even_r
+                - risk_distance
+                * break_even_r
             )
         ):
 
             position.stop_price = min(
                 position.stop_price,
                 position.entry_price
-                - risk_distance *
-                break_even_lock_r,
+                - risk_distance
+                * break_even_lock_r,
             )
 
-            position.break_even_triggered = (
-                True
-            )
+            position.break_even_triggered = True
 
         # TP extension
         if (
@@ -1081,8 +1036,8 @@ def update_position(
 
             position.target_price = (
                 position.entry_price
-                - risk_distance *
-                max(
+                - risk_distance
+                * max(
                     position.initial_target_r,
                     3.0,
                 )
@@ -1093,33 +1048,35 @@ def update_position(
         # Trailing
         if low <= (
             position.entry_price
-            - risk_distance *
-            trailing_start_r
+            - risk_distance
+            * trailing_start_r
         ):
 
             new_stop = (
-                low +
-                risk_distance *
-                trailing_distance_r
+                low
+                + risk_distance
+                * trailing_distance_r
             )
 
             if new_stop < position.stop_price:
 
-                position.stop_price = (
-                    new_stop
-                )
+                position.stop_price = new_stop
+                position.trailing_active = True
 
-                position.trailing_active = (
-                    True
-                )
 
+# ============================================================================
+# EXIT CHECK
+# ============================================================================
 
 def check_exit(
     position: Position,
     row: pd.Series,
-) -> Optional[
-    Tuple[float, str]
-]:
+) -> Optional[Tuple[float, str]]:
+    """
+    Check only the EXISTING SL and TP.
+
+    No newly-created BE/trailing level is applied here.
+    """
 
     high = float(row["high"])
     low = float(row["low"])
@@ -1127,17 +1084,14 @@ def check_exit(
     if position.direction == "BUY":
 
         stop_hit = (
-            low <=
-            position.stop_price
+            low <= position.stop_price
         )
 
         target_hit = (
-            high >=
-            position.target_price
+            high >= position.target_price
         )
 
-        # Conservative same-candle rule:
-        # if both are touched, assume stop first.
+        # Conservative assumption when both are touched.
         if stop_hit:
             return (
                 position.stop_price,
@@ -1153,13 +1107,11 @@ def check_exit(
     else:
 
         stop_hit = (
-            high >=
-            position.stop_price
+            high >= position.stop_price
         )
 
         target_hit = (
-            low <=
-            position.target_price
+            low <= position.target_price
         )
 
         if stop_hit:
@@ -1188,10 +1140,7 @@ def close_position(
     balance: float,
     spread: float,
     slippage: float,
-) -> Tuple[
-    Trade,
-    float,
-]:
+) -> Tuple[Trade, float]:
 
     exit_price = get_exit_price(
         market_exit,
@@ -1207,52 +1156,39 @@ def close_position(
         position.direction,
     )
 
-    # Entry already contains spread/slippage adjustment.
-    # Exit also contains execution adjustment.
+    # Diagnostic cost fields.
     #
-    # We expose explicit costs separately for auditability.
-    #
-    # Cost estimate:
-    # spread + slippage on each side.
-    #
-    # This is expressed in price units and converted using
-    # contract size and lots.
+    # Spread/slippage are already represented in the entry/exit prices,
+    # therefore they MUST NOT be subtracted again.
 
     spread_cost = (
-        spread *
-        CONTRACT_SIZE *
-        position.lots
+        spread
+        * CONTRACT_SIZE
+        * position.lots
     )
 
     slippage_cost = (
-        slippage *
-        2.0 *
-        CONTRACT_SIZE *
-        position.lots
+        slippage
+        * 2.0
+        * CONTRACT_SIZE
+        * position.lots
     )
 
-    # The execution price already contains the execution adjustment.
-    # Therefore the explicit cost fields are diagnostics rather than
-    # an additional subtraction. This prevents double charging.
     net_pnl = gross_pnl
 
-    risk_amount = (
-        position.risk_amount
-    )
+    risk_amount = position.risk_amount
 
     if risk_amount > 0:
 
         r_multiple = (
-            net_pnl /
-            risk_amount
+            net_pnl / risk_amount
         )
 
     else:
+
         r_multiple = 0.0
 
-    if (
-        position.direction == "BUY"
-    ):
+    if position.direction == "BUY":
 
         price_move = (
             exit_price -
@@ -1266,6 +1202,41 @@ def close_position(
             exit_price
         )
 
+    initial_stop = (
+        position.entry_price
+        - position.initial_stop_distance
+        if position.direction == "BUY"
+        else
+        position.entry_price
+        + position.initial_stop_distance
+    )
+
+    initial_target = (
+        position.entry_price
+        + position.initial_stop_distance
+        * position.initial_target_r
+        if position.direction == "BUY"
+        else
+        position.entry_price
+        - position.initial_stop_distance
+        * position.initial_target_r
+    )
+
+    if abs(
+        exit_price -
+        position.target_price
+    ) < 1e-8:
+
+        exit_reason = "TARGET"
+
+    elif position.trailing_active:
+
+        exit_reason = "STOP_OR_TRAIL"
+
+    else:
+
+        exit_reason = "STOP"
+
     trade = Trade(
         entry_time=position.entry_time,
         exit_time=timestamp.isoformat(),
@@ -1278,31 +1249,11 @@ def close_position(
 
         direction=position.direction,
 
-        entry_price=(
-            position.entry_price
-        ),
-
+        entry_price=position.entry_price,
         exit_price=exit_price,
 
-        initial_stop=(
-            position.entry_price -
-            position.initial_stop_distance
-            if position.direction == "BUY"
-            else
-            position.entry_price +
-            position.initial_stop_distance
-        ),
-
-        initial_target=(
-            position.entry_price +
-            position.initial_stop_distance *
-            position.initial_target_r
-            if position.direction == "BUY"
-            else
-            position.entry_price -
-            position.initial_stop_distance *
-            position.initial_target_r
-        ),
+        initial_stop=initial_stop,
+        initial_target=initial_target,
 
         final_stop=position.stop_price,
         final_target=position.target_price,
@@ -1325,17 +1276,7 @@ def close_position(
 
         r_multiple=r_multiple,
 
-        exit_reason=(
-            "STOP_OR_TRAIL"
-            if position.trailing_active
-            and (
-                abs(
-                    exit_price -
-                    position.stop_price
-                ) < 1e-8
-            )
-            else "STOP"
-        ),
+        exit_reason=exit_reason,
 
         break_even_triggered=(
             position.break_even_triggered
@@ -1351,16 +1292,6 @@ def close_position(
 
         bars_held=position.bars_held,
     )
-
-    # Correct target identification.
-    if abs(
-        exit_price -
-        position.target_price
-    ) < 1e-8:
-
-        trade.exit_reason = (
-            "TARGET"
-        )
 
     balance += net_pnl
 
@@ -1394,29 +1325,24 @@ def run_backtest(
     Dict,
 ]:
 
-    balance = (
+    balance = float(
         starting_balance
     )
 
-    peak_balance = (
+    peak_equity = float(
         starting_balance
     )
 
-    position: Optional[
-        Position
-    ] = None
+    position: Optional[Position] = None
 
     trades: List[Trade] = []
 
     equity_records = []
 
-    weekly_trade_counts: Dict[
-        str,
-        int,
-    ] = {}
+    weekly_trade_counts: Dict[str, int] = {}
 
     weekly_start_balance = (
-        starting_balance
+        float(starting_balance)
     )
 
     current_week = None
@@ -1430,9 +1356,7 @@ def run_backtest(
 
         row = df.iloc[index]
 
-        timestamp = row[
-            "timestamp"
-        ]
+        timestamp = row["timestamp"]
 
         week_key = timestamp.strftime(
             "%Y-%W"
@@ -1446,9 +1370,7 @@ def run_backtest(
 
             current_week = week_key
 
-            weekly_start_balance = (
-                balance
-            )
+            weekly_start_balance = balance
 
             weekly_trade_counts[
                 week_key
@@ -1457,24 +1379,22 @@ def run_backtest(
         # --------------------------------------------------------------
         # MANAGE OPEN POSITION
         # --------------------------------------------------------------
+        #
+        # IMPORTANT:
+        #
+        # 1. Check existing SL/TP first.
+        # 2. If hit -> exit.
+        # 3. If not hit -> apply BE/trailing/TP extension.
+        #
+        # This removes same-candle management lookahead.
+        # --------------------------------------------------------------
 
         if position is not None:
 
-            update_position(
-                position=position,
-                row=row,
-                break_even_r=break_even_r,
-                break_even_lock_r=(
-                    break_even_lock_r
-                ),
-                trailing_start_r=(
-                    trailing_start_r
-                ),
-                trailing_distance_r=(
-                    trailing_distance_r
-                ),
-            )
+            # Count the current candle as a held candle.
+            position.bars_held += 1
 
+            # FIRST: check the levels that existed before this candle.
             exit_result = check_exit(
                 position,
                 row,
@@ -1490,30 +1410,42 @@ def run_backtest(
                     close_position(
                         position=position,
                         timestamp=timestamp,
-                        market_exit=(
-                            market_exit
-                        ),
+                        market_exit=market_exit,
                         balance=balance,
                         spread=spread,
                         slippage=slippage,
                     )
                 )
 
-                trade.exit_reason = (
-                    "TARGET"
-                    if reason == "TARGET"
-                    else (
+                # Preserve the actual exit reason.
+                if reason == "TARGET":
+
+                    trade.exit_reason = "TARGET"
+
+                else:
+
+                    trade.exit_reason = (
                         "STOP_OR_TRAIL"
                         if position.trailing_active
                         else "STOP"
                     )
-                )
 
-                trades.append(
-                    trade
-                )
+                trades.append(trade)
 
                 position = None
+
+            else:
+
+                # SECOND: only after the existing levels survive,
+                # update management for the NEXT candle.
+                update_position(
+                    position=position,
+                    row=row,
+                    break_even_r=break_even_r,
+                    break_even_lock_r=break_even_lock_r,
+                    trailing_start_r=trailing_start_r,
+                    trailing_distance_r=trailing_distance_r,
+                )
 
         # --------------------------------------------------------------
         # EQUITY RECORD
@@ -1525,7 +1457,6 @@ def run_backtest(
 
         else:
 
-            # Mark open position to current close.
             mark_price = float(
                 row["close"]
             )
@@ -1544,20 +1475,20 @@ def run_backtest(
                 unrealized
             )
 
-        peak_balance = max(
-            peak_balance,
+        peak_equity = max(
+            peak_equity,
             equity,
         )
 
         drawdown_pct = (
             (
-                peak_balance -
+                peak_equity -
                 equity
             )
             /
-            peak_balance *
-            100
-            if peak_balance > 0
+            peak_equity
+            * 100
+            if peak_equity > 0
             else 0.0
         )
 
@@ -1566,13 +1497,19 @@ def run_backtest(
                 "timestamp": timestamp,
                 "balance": balance,
                 "equity": equity,
-                "peak_equity": peak_balance,
+                "peak_equity": peak_equity,
                 "drawdown_pct": drawdown_pct,
             }
         )
 
         # --------------------------------------------------------------
-        # WEEKLY LOSS LIMIT
+        # WEEKLY REALIZED LOSS LIMIT
+        # --------------------------------------------------------------
+        #
+        # The weekly limit is based on REALIZED balance.
+        #
+        # Existing positions are still managed.
+        # The limit blocks NEW entries only.
         # --------------------------------------------------------------
 
         if weekly_start_balance > 0:
@@ -1586,10 +1523,12 @@ def run_backtest(
 
             weekly_return = 0.0
 
-        if (
+        weekly_loss_limit_hit = (
             weekly_return <=
             weekly_loss_limit
-        ):
+        )
+
+        if weekly_loss_limit_hit:
             continue
 
         # --------------------------------------------------------------
@@ -1615,8 +1554,7 @@ def run_backtest(
         # --------------------------------------------------------------
 
         trade_count = (
-            weekly_trade_counts
-            .get(
+            weekly_trade_counts.get(
                 week_key,
                 0,
             )
@@ -1635,13 +1573,9 @@ def run_backtest(
         signal, score = (
             generate_signal(
                 row=row,
-                strategy_family=(
-                    strategy_family
-                ),
+                strategy_family=strategy_family,
                 regime=regime,
-                minimum_score=(
-                    minimum_score
-                ),
+                minimum_score=minimum_score,
             )
         )
 
@@ -1670,18 +1604,16 @@ def run_backtest(
             row["close"]
         )
 
-        entry_price = (
-            get_entry_price(
-                market_price,
-                signal,
-                spread,
-                slippage,
-            )
+        entry_price = get_entry_price(
+            market_price,
+            signal,
+            spread,
+            slippage,
         )
 
         stop_distance = (
-            float(atr) *
-            atr_stop_multiplier
+            float(atr)
+            * atr_stop_multiplier
         )
 
         if stop_distance <= 0:
@@ -1716,12 +1648,8 @@ def run_backtest(
         lots, actual_risk = (
             calculate_lot_size(
                 balance=balance,
-                risk_fraction=(
-                    risk_per_trade
-                ),
-                stop_distance=(
-                    stop_distance
-                ),
+                risk_fraction=risk_per_trade,
+                stop_distance=stop_distance,
             )
         )
 
@@ -1762,9 +1690,7 @@ def run_backtest(
 
         weekly_trade_counts[
             week_key
-        ] = (
-            trade_count + 1
-        )
+        ] = trade_count + 1
 
         last_entry_index = index
 
@@ -1776,28 +1702,21 @@ def run_backtest(
 
         last_row = df.iloc[-1]
 
-        trade, balance = (
-            close_position(
-                position=position,
-                timestamp=(
-                    last_row["timestamp"]
-                ),
-                market_exit=float(
-                    last_row["close"]
-                ),
-                balance=balance,
-                spread=spread,
-                slippage=slippage,
-            )
+        # The final market close is used as the forced exit.
+        trade, balance = close_position(
+            position=position,
+            timestamp=last_row["timestamp"],
+            market_exit=float(
+                last_row["close"]
+            ),
+            balance=balance,
+            spread=spread,
+            slippage=slippage,
         )
 
-        trade.exit_reason = (
-            "END_OF_DATA"
-        )
+        trade.exit_reason = "END_OF_DATA"
 
-        trades.append(
-            trade
-        )
+        trades.append(trade)
 
         position = None
 
@@ -1808,9 +1727,7 @@ def run_backtest(
     metrics = calculate_metrics(
         trades=trades,
         equity_df=equity_df,
-        starting_balance=(
-            starting_balance
-        ),
+        starting_balance=starting_balance,
         ending_balance=balance,
     )
 
@@ -1903,8 +1820,8 @@ def calculate_metrics(
 
     win_rate = (
         wins /
-        trade_count *
-        100
+        trade_count
+        * 100
     )
 
     if gross_loss < 0:
@@ -1986,23 +1903,20 @@ def calculate_metrics(
 
     return {
         "trades": trade_count,
+
         "wins": wins,
+
         "losses": losses,
+
         "breakevens": breakevens,
 
         "win_rate_pct": win_rate,
 
-        "gross_profit": (
-            gross_profit
-        ),
+        "gross_profit": gross_profit,
 
-        "gross_loss": (
-            gross_loss
-        ),
+        "gross_loss": gross_loss,
 
-        "net_profit": (
-            net_profit
-        ),
+        "net_profit": net_profit,
 
         "return_pct": (
             (
@@ -2010,41 +1924,25 @@ def calculate_metrics(
                 starting_balance
             )
             /
-            starting_balance *
-            100
+            starting_balance
+            * 100
         ),
 
-        "profit_factor": (
-            profit_factor
-        ),
+        "profit_factor": profit_factor,
 
-        "expectancy": (
-            expectancy
-        ),
+        "expectancy": expectancy,
 
-        "average_r": (
-            average_r
-        ),
+        "average_r": average_r,
 
-        "average_win": (
-            average_win
-        ),
+        "average_win": average_win,
 
-        "average_loss": (
-            average_loss
-        ),
+        "average_loss": average_loss,
 
-        "max_drawdown": (
-            max_drawdown
-        ),
+        "max_drawdown": max_drawdown,
 
-        "max_drawdown_pct": (
-            max_drawdown_pct
-        ),
+        "max_drawdown_pct": max_drawdown_pct,
 
-        "ending_balance": (
-            ending_balance
-        ),
+        "ending_balance": ending_balance,
     }
 
 
@@ -2057,7 +1955,6 @@ def period_report(
 ) -> pd.DataFrame:
 
     if not trades:
-
         return pd.DataFrame()
 
     rows = []
@@ -2138,20 +2035,25 @@ def summarize_periods(
 
             output[str(name)] = {
                 "trades": count,
+
                 "wins": wins,
+
                 "losses": int(
                     (
                         group["pnl"] < 0
                     ).sum()
                 ),
+
                 "net_pnl": pnl,
+
                 "win_rate_pct": (
                     wins /
-                    count *
-                    100
+                    count
+                    * 100
                     if count
                     else 0.0
                 ),
+
                 "average_r": float(
                     group["r"].mean()
                 ),
@@ -2183,7 +2085,6 @@ def strategy_breakdown(
 ) -> pd.DataFrame:
 
     if not trades:
-
         return pd.DataFrame()
 
     rows = []
@@ -2195,9 +2096,13 @@ def strategy_breakdown(
                 "strategy": (
                     trade.strategy_family
                 ),
+
                 "regime": trade.regime,
+
                 "pnl": trade.net_pnl,
+
                 "r": trade.r_multiple,
+
                 "win": (
                     trade.net_pnl > 0
                 ),
@@ -2224,15 +2129,15 @@ def strategy_breakdown(
 
     result["win_rate_pct"] = (
         result["wins"] /
-        result["trades"] *
-        100
+        result["trades"]
+        * 100
     )
 
     return result
 
 
 # ============================================================================
-# CONFIGURATION FILE
+# CONFIGURATION
 # ============================================================================
 
 def load_config(
@@ -2307,7 +2212,7 @@ def load_config(
 
 
 # ============================================================================
-# SAVE OUTPUT
+# SAVE RESULTS
 # ============================================================================
 
 def save_results(
@@ -2323,10 +2228,6 @@ def save_results(
         exist_ok=True,
     )
 
-    # --------------------------------------------------------------
-    # TRADES
-    # --------------------------------------------------------------
-
     trades_df = pd.DataFrame(
         [
             asdict(trade)
@@ -2340,19 +2241,11 @@ def save_results(
         index=False,
     )
 
-    # --------------------------------------------------------------
-    # EQUITY
-    # --------------------------------------------------------------
-
     equity_df.to_csv(
         output_dir /
         "v5_equity_curve.csv",
         index=False,
     )
-
-    # --------------------------------------------------------------
-    # PERIODS
-    # --------------------------------------------------------------
 
     periods = summarize_periods(
         trades
@@ -2372,14 +2265,8 @@ def save_results(
             default=str,
         )
 
-    # --------------------------------------------------------------
-    # STRATEGY BREAKDOWN
-    # --------------------------------------------------------------
-
-    strategy_df = (
-        strategy_breakdown(
-            trades
-        )
+    strategy_df = strategy_breakdown(
+        trades
     )
 
     strategy_df.to_csv(
@@ -2387,10 +2274,6 @@ def save_results(
         "v5_strategy_breakdown.csv",
         index=False,
     )
-
-    # --------------------------------------------------------------
-    # METRICS
-    # --------------------------------------------------------------
 
     with open(
         output_dir /
@@ -2406,10 +2289,6 @@ def save_results(
             default=str,
         )
 
-    # --------------------------------------------------------------
-    # CONFIG
-    # --------------------------------------------------------------
-
     with open(
         output_dir /
         "v5_execution_config.json",
@@ -2424,52 +2303,19 @@ def save_results(
             default=str,
         )
 
-    # --------------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------------
-
-    lines = []
-
-    lines.append(
-        "RAYMOND V2.8 V5 EXECUTION ENGINE"
-    )
-
-    lines.append(
-        "=" * 80
-    )
-
-    lines.append(
-        "RESEARCH ONLY - NO LIVE BROKER EXECUTION"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "XAUUSD CONTRACT MODEL"
-    )
-
-    lines.append(
-        "----------------------"
-    )
-
-    lines.append(
-        f"Contract size: "
-        f"{CONTRACT_SIZE:.2f} oz/lot"
-    )
-
-    lines.append(
-        "Example: $5 movement at 0.02 lot = $10"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "CONFIGURATION"
-    )
-
-    lines.append(
-        "-------------"
-    )
+    lines = [
+        "RAYMOND V2.8 V5 EXECUTION ENGINE",
+        "=" * 80,
+        "RESEARCH ONLY - NO LIVE BROKER EXECUTION",
+        "",
+        "XAUUSD CONTRACT MODEL",
+        "----------------------",
+        f"Contract size: {CONTRACT_SIZE:.2f} oz/lot",
+        "Example: $5 movement at 0.02 lot = $10",
+        "",
+        "CONFIGURATION",
+        "-------------",
+    ]
 
     for key, value in config.items():
 
@@ -2477,138 +2323,103 @@ def save_results(
             f"{key}: {value}"
         )
 
-    lines.append("")
-
-    lines.append(
-        "RESULTS"
-    )
-
-    lines.append(
-        "-------"
-    )
-
-    lines.append(
-        f"Starting balance: "
-        f"{STARTING_BALANCE:.2f}"
-    )
-
-    lines.append(
-        f"Ending balance: "
-        f"{metrics['ending_balance']:.2f}"
-    )
-
-    lines.append(
-        f"Net profit: "
-        f"{metrics['net_profit']:.2f}"
-    )
-
-    lines.append(
-        f"Return: "
-        f"{metrics['return_pct']:.2f}%"
-    )
-
-    lines.append(
-        f"Trades: "
-        f"{metrics['trades']}"
-    )
-
-    lines.append(
-        f"Wins: "
-        f"{metrics['wins']}"
-    )
-
-    lines.append(
-        f"Losses: "
-        f"{metrics['losses']}"
-    )
-
-    lines.append(
-        f"Breakevens: "
-        f"{metrics['breakevens']}"
-    )
-
-    lines.append(
-        f"Win rate: "
-        f"{metrics['win_rate_pct']:.2f}%"
-    )
-
-    lines.append(
-        f"Gross profit: "
-        f"{metrics['gross_profit']:.2f}"
-    )
-
-    lines.append(
-        f"Gross loss: "
-        f"{metrics['gross_loss']:.2f}"
-    )
-
-    lines.append(
-        f"Profit factor: "
-        f"{metrics['profit_factor']:.4f}"
-    )
-
-    lines.append(
-        f"Expectancy/trade: "
-        f"{metrics['expectancy']:.4f}"
-    )
-
-    lines.append(
-        f"Average R: "
-        f"{metrics['average_r']:.4f}"
-    )
-
-    lines.append(
-        f"Average win: "
-        f"{metrics['average_win']:.4f}"
-    )
-
-    lines.append(
-        f"Average loss: "
-        f"{metrics['average_loss']:.4f}"
-    )
-
-    lines.append(
-        f"Max drawdown: "
-        f"{metrics['max_drawdown']:.2f}"
-    )
-
-    lines.append(
-        f"Max drawdown %: "
-        f"{metrics['max_drawdown_pct']:.2f}%"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "IMPORTANT ACCOUNTING CHECK"
-    )
-
-    lines.append(
-        "---------------------------"
-    )
-
-    lines.append(
-        "Ending balance must equal:"
-    )
-
-    lines.append(
-        "Starting balance + sum(all net trade P&L)"
-    )
-
-    lines.append(
-        f"{STARTING_BALANCE:.2f} + "
-        f"{metrics['net_profit']:.2f} = "
-        f"{metrics['ending_balance']:.2f}"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "Trade-level P&L is calculated using:"
-    )
-
-    lines.append(
-        "price movement × 100 oz × lot size"
+    lines.extend(
+        [
+            "",
+            "RESULTS",
+            "-------",
+            (
+                f"Starting balance: "
+                f"{config['starting_balance']:.2f}"
+            ),
+            (
+                f"Ending balance: "
+                f"{metrics['ending_balance']:.2f}"
+            ),
+            (
+                f"Net profit: "
+                f"{metrics['net_profit']:.2f}"
+            ),
+            (
+                f"Return: "
+                f"{metrics['return_pct']:.2f}%"
+            ),
+            (
+                f"Trades: "
+                f"{metrics['trades']}"
+            ),
+            (
+                f"Wins: "
+                f"{metrics['wins']}"
+            ),
+            (
+                f"Losses: "
+                f"{metrics['losses']}"
+            ),
+            (
+                f"Breakevens: "
+                f"{metrics['breakevens']}"
+            ),
+            (
+                f"Win rate: "
+                f"{metrics['win_rate_pct']:.2f}%"
+            ),
+            (
+                f"Gross profit: "
+                f"{metrics['gross_profit']:.2f}"
+            ),
+            (
+                f"Gross loss: "
+                f"{metrics['gross_loss']:.2f}"
+            ),
+            (
+                f"Profit factor: "
+                f"{metrics['profit_factor']:.4f}"
+            ),
+            (
+                f"Expectancy/trade: "
+                f"{metrics['expectancy']:.4f}"
+            ),
+            (
+                f"Average R: "
+                f"{metrics['average_r']:.4f}"
+            ),
+            (
+                f"Average win: "
+                f"{metrics['average_win']:.4f}"
+            ),
+            (
+                f"Average loss: "
+                f"{metrics['average_loss']:.4f}"
+            ),
+            (
+                f"Max drawdown: "
+                f"{metrics['max_drawdown']:.2f}"
+            ),
+            (
+                f"Max drawdown %: "
+                f"{metrics['max_drawdown_pct']:.2f}%"
+            ),
+            "",
+            "IMPORTANT ACCOUNTING CHECK",
+            "---------------------------",
+            (
+                "Ending balance must equal "
+                "starting balance + sum(all net trade P&L)"
+            ),
+            (
+                f"{config['starting_balance']:.2f} + "
+                f"{metrics['net_profit']:.2f} = "
+                f"{metrics['ending_balance']:.2f}"
+            ),
+            "",
+            "Trade-level P&L:",
+            "price movement × 100 oz × lot size",
+            "",
+            "LOOKAHEAD CONTROL:",
+            "Existing SL/TP checked before BE/trailing/TP updates.",
+            "Management changes become effective on the next candle.",
+        ]
     )
 
     with open(
@@ -2667,94 +2478,62 @@ def run_period(
             f"Not enough data for {period_name}"
         )
 
-    trades, equity, metrics = (
-        run_backtest(
-            df=data,
+    trades, equity, metrics = run_backtest(
+        df=data,
 
-            strategy_family=(
-                config[
-                    "strategy_family"
-                ]
-            ),
+        strategy_family=(
+            config["strategy_family"]
+        ),
 
-            regime=(
-                config["regime"]
-            ),
+        regime=config["regime"],
 
-            minimum_score=(
-                config[
-                    "minimum_score"
-                ]
-            ),
+        minimum_score=(
+            config["minimum_score"]
+        ),
 
-            risk_reward=(
-                config[
-                    "risk_reward"
-                ]
-            ),
+        risk_reward=(
+            config["risk_reward"]
+        ),
 
-            atr_stop_multiplier=(
-                config[
-                    "atr_stop_multiplier"
-                ]
-            ),
+        atr_stop_multiplier=(
+            config["atr_stop_multiplier"]
+        ),
 
-            risk_per_trade=(
-                config[
-                    "risk_per_trade"
-                ]
-            ),
+        risk_per_trade=(
+            config["risk_per_trade"]
+        ),
 
-            max_trades_per_week=(
-                config[
-                    "max_trades_per_week"
-                ]
-            ),
+        max_trades_per_week=(
+            config["max_trades_per_week"]
+        ),
 
-            break_even_r=(
-                config[
-                    "break_even_r"
-                ]
-            ),
+        break_even_r=(
+            config["break_even_r"]
+        ),
 
-            break_even_lock_r=(
-                config[
-                    "break_even_lock_r"
-                ]
-            ),
+        break_even_lock_r=(
+            config["break_even_lock_r"]
+        ),
 
-            trailing_start_r=(
-                config[
-                    "trailing_start_r"
-                ]
-            ),
+        trailing_start_r=(
+            config["trailing_start_r"]
+        ),
 
-            trailing_distance_r=(
-                config[
-                    "trailing_distance_r"
-                ]
-            ),
+        trailing_distance_r=(
+            config["trailing_distance_r"]
+        ),
 
-            weekly_loss_limit=(
-                config[
-                    "weekly_loss_limit"
-                ]
-            ),
+        weekly_loss_limit=(
+            config["weekly_loss_limit"]
+        ),
 
-            starting_balance=(
-                config[
-                    "starting_balance"
-                ]
-            ),
+        starting_balance=(
+            config["starting_balance"]
+        ),
 
-            spread=(
-                config["spread"]
-            ),
+        spread=config["spread"],
 
-            slippage=(
-                config["slippage"]
-            ),
-        )
+        slippage=config["slippage"],
     )
 
     return {
@@ -2840,6 +2619,7 @@ def main() -> None:
     ]
 
     if args.period != "all":
+
         periods = [
             args.period
         ]
@@ -2907,6 +2687,11 @@ def main() -> None:
             f"Max DD: "
             f"{metrics['max_drawdown_pct']:.2f}%"
         )
+
+    output_root.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     with open(
         output_root /
