@@ -1,4 +1,4 @@
-name: Monthly Trade Audit
+name: Monthly Trade Audit + Price-Path Forensics
 
 on:
   workflow_dispatch:
@@ -18,23 +18,43 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ============================================================
+      # PYTHON
+      # ============================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ============================================================
+      # NODE
+      # ============================================================
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas
+
+      # ============================================================
+      # DIRECTORIES
+      # ============================================================
 
       - name: Prepare directories
         run: |
@@ -50,18 +70,28 @@ jobs:
       - name: Verify research-only environment
         run: |
           echo "=================================================="
-          echo "RESEARCH-ONLY MONTHLY AUDIT"
+          echo "RAYMOND V2.8 RESEARCH-ONLY MONTHLY AUDIT"
           echo "=================================================="
+          echo ""
           echo "This workflow:"
-          echo "- does NOT place trades"
-          echo "- does NOT modify positions"
-          echo "- does NOT modify the live strategy"
-          echo "- does NOT promote research candidates"
-          echo "- does NOT deploy anything"
+          echo "- DOES NOT place trades"
+          echo "- DOES NOT modify positions"
+          echo "- DOES NOT modify the live strategy"
+          echo "- DOES NOT promote research candidates"
+          echo "- DOES NOT deploy anything"
+          echo "- DOES NOT call broker execution APIs"
+          echo ""
+          echo "Purpose:"
+          echo "- Monthly trade audit"
+          echo "- Historical accounting verification"
+          echo "- Price-path forensic reconstruction"
+          echo "- MFE / MAE analysis"
+          echo "- Loss reversal analysis"
+          echo ""
           echo "=================================================="
 
       # ============================================================
-      # MONTH CALCULATION
+      # CALCULATE AUDIT DATES
       # ============================================================
 
       - name: Calculate audit dates
@@ -74,6 +104,11 @@ jobs:
           from datetime import datetime
 
           month = os.environ["AUDIT_MONTH"]
+
+          if len(month) != 7:
+              raise SystemExit(
+                  "ERROR: Month must use YYYY-MM format."
+              )
 
           start = datetime.strptime(
               month + "-01",
@@ -109,7 +144,17 @@ jobs:
           PY
 
       # ============================================================
-      # DOWNLOAD MONTHLY AUDIT FROM RENDER
+      # DOWNLOAD MONTHLY AUDIT
+      #
+      # IMPORTANT:
+      #
+      # include_trades=true is intentional.
+      #
+      # The normal API hides individual trades.
+      # The research forensic workflow explicitly requests them
+      # so the price-path analyzer can reconstruct each trade.
+      #
+      # This remains read-only and research-only.
       # ============================================================
 
       - name: Download monthly audit from Render
@@ -117,7 +162,11 @@ jobs:
           AUDIT_MONTH: ${{ inputs.month }}
           RENDER_URL: "https://raymond-v2-8-trader.onrender.com"
         run: |
-          echo "Downloading monthly audit for ${AUDIT_MONTH}..."
+          echo "=================================================="
+          echo "DOWNLOADING MONTHLY AUDIT"
+          echo "=================================================="
+          echo "Month: ${AUDIT_MONTH}"
+          echo ""
 
           curl \
             --fail \
@@ -126,12 +175,13 @@ jobs:
             --retry 5 \
             --retry-delay 5 \
             --max-time 180 \
-            "${RENDER_URL}/api/research/monthly-audit?month=${AUDIT_MONTH}" \
+            "${RENDER_URL}/api/research/monthly-audit?month=${AUDIT_MONTH}&include_trades=true" \
             -o audit_output/monthly_trade_audit.json
 
           test -s audit_output/monthly_trade_audit.json
 
-          echo "Audit downloaded successfully."
+          echo ""
+          echo "Monthly audit downloaded successfully."
 
       # ============================================================
       # VALIDATE MONTHLY AUDIT
@@ -155,14 +205,35 @@ jobs:
           ) as f:
               report = json.load(f)
 
-          print("Report type:", report.get("report_type"))
-          print("Report version:", report.get("version"))
-          print("Month:", report.get("month"))
-          print("Research only:", report.get("research_only"))
+          print("==================================================")
+          print("MONTHLY AUDIT VALIDATION")
+          print("==================================================")
+
+          print(
+              "Report type:",
+              report.get("report_type"),
+          )
+
+          print(
+              "Report version:",
+              report.get("version"),
+          )
+
+          print(
+              "Month:",
+              report.get("month"),
+          )
+
+          print(
+              "Research only:",
+              report.get("research_only"),
+          )
+
           print(
               "Live trading changed:",
               report.get("live_trading_changed"),
           )
+
           print(
               "Accounting reconciled:",
               report.get("accounting", {}).get(
@@ -174,14 +245,15 @@ jobs:
               "RAYMOND_MONTHLY_TRADE_AUDIT"
           ):
               raise SystemExit(
-                  "ERROR: Unexpected report type."
+                  "ERROR: Unexpected monthly audit report type."
               )
 
           if report.get("month") != expected_month:
               raise SystemExit(
                   f"ERROR: Report month "
                   f"{report.get('month')} "
-                  f"does not match {expected_month}."
+                  f"does not match requested month "
+                  f"{expected_month}."
               )
 
           if report.get("research_only") is not True:
@@ -203,27 +275,145 @@ jobs:
               is not True
           ):
               raise SystemExit(
-                  "ERROR: Accounting is not reconciled."
+                  "ERROR: Historical accounting "
+                  "is not reconciled."
               )
 
-          trades = report.get("trades", [])
+          trades = report.get("trades")
 
           if not isinstance(trades, list):
               raise SystemExit(
                   "ERROR: trades field is not a list."
               )
 
+          print("")
           print(
-              f"Trade records available: {len(trades)}"
+              f"Trade records available for forensics: "
+              f"{len(trades)}"
+          )
+
+          if len(trades) == 0:
+              raise SystemExit(
+                  "ERROR: No trade records were returned. "
+                  "The forensic workflow requires "
+                  "include_trades=true."
+              )
+
+          performance = report.get(
+              "performance",
+              {},
+          )
+
+          expected_trades = performance.get(
+              "total_trades"
           )
 
           print(
-              "Monthly audit safety validation PASSED."
+              f"Audit performance trade count: "
+              f"{expected_trades}"
           )
+
+          if (
+              isinstance(expected_trades, int)
+              and expected_trades != len(trades)
+          ):
+              raise SystemExit(
+                  "ERROR: Trade record count does not "
+                  "match performance total_trades."
+              )
+
+          print("")
+          print(
+              "Monthly audit validation PASSED."
+          )
+          print(
+              "Trade records are available for "
+              "price-path forensic reconstruction."
+          )
+          print("==================================================")
           PY
 
       # ============================================================
-      # DOWNLOAD M5 MARKET DATA
+      # PRINT AUDIT SUMMARY
+      # ============================================================
+
+      - name: Print monthly audit summary
+        run: |
+          python - <<'PY'
+          import json
+
+          path = "audit_output/monthly_trade_audit.json"
+
+          with open(
+              path,
+              "r",
+              encoding="utf-8",
+          ) as f:
+              report = json.load(f)
+
+          performance = report.get(
+              "performance",
+              {}
+          )
+
+          accounting = report.get(
+              "accounting",
+              {}
+          )
+
+          print("")
+          print("==================================================")
+          print("RAYMOND V2.8 MONTHLY AUDIT BASELINE")
+          print("==================================================")
+
+          print(
+              f"Month:             {report.get('month')}"
+          )
+
+          print(
+              f"Trades:            "
+              f"{performance.get('total_trades')}"
+          )
+
+          print(
+              f"Wins:              "
+              f"{performance.get('wins')}"
+          )
+
+          print(
+              f"Losses:            "
+              f"{performance.get('losses')}"
+          )
+
+          print(
+              f"Win rate:          "
+              f"{performance.get('win_rate')}"
+          )
+
+          print(
+              f"Corrected P/L:     "
+              f"{performance.get('total_pnl')}"
+          )
+
+          print(
+              f"Profit factor:     "
+              f"{performance.get('profit_factor')}"
+          )
+
+          print(
+              f"Accounting fixed:  "
+              f"{accounting.get('accounting_reconciled')}"
+          )
+
+          print(
+              f"Trade records:     "
+              f"{len(report.get('trades', []))}"
+          )
+
+          print("==================================================")
+
+      # ============================================================
+      # DOWNLOAD XAUUSD M5 MARKET DATA
       # ============================================================
 
       - name: Download XAUUSD M5 market data
@@ -231,9 +421,12 @@ jobs:
           START_DATE: ${{ steps.dates.outputs.start }}
           END_DATE: ${{ steps.dates.outputs.end }}
         run: |
-          echo "Downloading XAUUSD M5 data..."
+          echo "=================================================="
+          echo "DOWNLOADING XAUUSD M5 MARKET DATA"
+          echo "=================================================="
           echo "From: ${START_DATE}"
           echo "To:   ${END_DATE}"
+          echo ""
 
           npx --yes dukascopy-node \
             -i xauusd \
@@ -254,10 +447,14 @@ jobs:
 
       # ============================================================
       # NORMALIZE M5 MARKET DATA
-      # IMPORTANT:
-      # Dukascopy may return timestamps as seconds,
-      # milliseconds, microseconds, or nanoseconds.
-      # This block detects the correct unit automatically.
+      #
+      # Detect:
+      # - nanoseconds
+      # - microseconds
+      # - milliseconds
+      # - seconds
+      #
+      # Prevents the previous 1970 timestamp problem.
       # ============================================================
 
       - name: Normalize M5 market data
@@ -307,10 +504,12 @@ jobs:
               if df.empty:
                   continue
 
-              original_columns = list(df.columns)
+              original_columns = list(
+                  df.columns
+              )
 
               # --------------------------------------------------
-              # Normalize column names
+              # NORMALIZE COLUMN NAMES
               # --------------------------------------------------
 
               normalized_columns = {}
@@ -331,7 +530,7 @@ jobs:
               )
 
               # --------------------------------------------------
-              # Find timestamp column
+              # FIND TIMESTAMP COLUMN
               # --------------------------------------------------
 
               timestamp_column = None
@@ -356,7 +555,7 @@ jobs:
                   continue
 
               # --------------------------------------------------
-              # Find OHLC columns
+              # FIND OHLC COLUMNS
               # --------------------------------------------------
 
               aliases = {
@@ -415,14 +614,6 @@ jobs:
 
               # --------------------------------------------------
               # ROBUST TIMESTAMP NORMALIZATION
-              #
-              # Detect:
-              #   nanoseconds
-              #   microseconds
-              #   milliseconds
-              #   seconds
-              #
-              # This prevents the previous 1970-date failure.
               # --------------------------------------------------
 
               raw_timestamp = df[
@@ -514,7 +705,7 @@ jobs:
                   )
 
               # --------------------------------------------------
-              # Convert OHLCV
+              # CONVERT OHLCV
               # --------------------------------------------------
 
               for column in required:
@@ -532,7 +723,7 @@ jobs:
               ).fillna(0.0)
 
               # --------------------------------------------------
-              # Select canonical columns
+              # SELECT CANONICAL COLUMNS
               # --------------------------------------------------
 
               df = df[
@@ -605,9 +796,11 @@ jobs:
           print(
               "Normalized timestamp range:"
           )
+
           print(
               f"Minimum: {minimum_timestamp}"
           )
+
           print(
               f"Maximum: {maximum_timestamp}"
           )
@@ -675,7 +868,10 @@ jobs:
               f"{expected_month:02d}"
           )
 
-          if expected_month_string not in timestamp_months:
+          if (
+              expected_month_string
+              not in timestamp_months
+          ):
               raise SystemExit(
                   "ERROR: Normalized M5 data does "
                   "not contain the requested audit month."
@@ -743,29 +939,187 @@ jobs:
           print(
               "=================================================="
           )
-          print("NORMALIZED M5 DATASET")
+          print(
+              "NORMALIZED M5 DATASET"
+          )
           print(
               "=================================================="
           )
+
           print(
               f"Rows:   {len(combined)}"
           )
+
           print(
-              f"Start:  {combined['timestamp'].min()}"
+              f"Start:  "
+              f"{combined['timestamp'].min()}"
           )
+
           print(
-              f"End:    {combined['timestamp'].max()}"
+              f"End:    "
+              f"{combined['timestamp'].max()}"
           )
+
           print(
               f"Output: {output}"
           )
+
           print(
               "=================================================="
           )
           PY
 
       # ============================================================
-      # RUN PRICE-PATH FORENSIC ANALYSIS
+      # VERIFY TRADE TIMESTAMPS BEFORE FORENSICS
+      #
+      # This catches the exact class of problem that previously
+      # produced trade_count=0.
+      # ============================================================
+
+      - name: Validate audit trade timestamps
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+
+          path = "audit_output/monthly_trade_audit.json"
+
+          with open(
+              path,
+              "r",
+              encoding="utf-8",
+          ) as f:
+              report = json.load(f)
+
+          trades = report.get(
+              "trades",
+              []
+          )
+
+          if not trades:
+              raise SystemExit(
+                  "ERROR: No trade records available."
+              )
+
+          print(
+              f"Validating {len(trades)} trade records..."
+          )
+
+          invalid = []
+
+          for index, trade in enumerate(
+              trades,
+              start=1,
+          ):
+              trade_id = trade.get(
+                  "trade_id",
+                  f"trade-{index}",
+              )
+
+              opened_at = trade.get(
+                  "opened_at"
+              )
+
+              closed_at = trade.get(
+                  "closed_at"
+              )
+
+              if not opened_at:
+                  invalid.append(
+                      (
+                          trade_id,
+                          "missing opened_at",
+                      )
+                  )
+                  continue
+
+              if not closed_at:
+                  invalid.append(
+                      (
+                          trade_id,
+                          "missing closed_at",
+                      )
+                  )
+                  continue
+
+              try:
+                  open_dt = datetime.fromisoformat(
+                      str(opened_at)
+                      .replace(
+                          "Z",
+                          "+00:00",
+                      )
+                  )
+
+                  close_dt = datetime.fromisoformat(
+                      str(closed_at)
+                      .replace(
+                          "Z",
+                          "+00:00",
+                      )
+                  )
+
+                  if open_dt.tzinfo is None:
+                      open_dt = open_dt.replace(
+                          tzinfo=timezone.utc
+                      )
+
+                  if close_dt.tzinfo is None:
+                      close_dt = close_dt.replace(
+                          tzinfo=timezone.utc
+                      )
+
+                  open_dt = open_dt.astimezone(
+                      timezone.utc
+                  )
+
+                  close_dt = close_dt.astimezone(
+                      timezone.utc
+                  )
+
+                  if close_dt < open_dt:
+                      invalid.append(
+                          (
+                              trade_id,
+                              "closed_at before opened_at",
+                          )
+                      )
+
+              except Exception as exc:
+                  invalid.append(
+                      (
+                          trade_id,
+                          f"timestamp parse error: {exc}",
+                      )
+                  )
+
+          if invalid:
+              print("")
+              print(
+                  "INVALID TRADE TIMESTAMPS:"
+              )
+
+              for trade_id, reason in invalid:
+                  print(
+                      f"- {trade_id}: {reason}"
+                  )
+
+              raise SystemExit(
+                  "ERROR: One or more audit trade "
+                  "timestamps are invalid."
+              )
+
+          print(
+              "All audit trade timestamps are valid."
+          )
+          print(
+              "Trade timestamps are ready for "
+              "price-path reconstruction."
+          )
+          PY
+
+      # ============================================================
+      # RUN PRICE-PATH FORENSICS
       # ============================================================
 
       - name: Run monthly trade forensic analysis
@@ -775,6 +1129,13 @@ jobs:
           M5_FILE="normalized_m5/xauusd_m5_${AUDIT_MONTH}_normalized.csv"
 
           test -s "${M5_FILE}"
+
+          echo "=================================================="
+          echo "RUNNING PRICE-PATH FORENSICS"
+          echo "=================================================="
+          echo "Audit month: ${AUDIT_MONTH}"
+          echo "M5 file:     ${M5_FILE}"
+          echo ""
 
           python scripts/monthly_trade_forensic.py \
             --audit audit_output/monthly_trade_audit.json \
@@ -795,17 +1156,32 @@ jobs:
 
           month = os.environ["AUDIT_MONTH"]
 
-          path = (
+          audit_path = (
+              "audit_output/monthly_trade_audit.json"
+          )
+
+          forensic_path = (
               f"forensic_output/{month}/"
               "monthly_trade_forensic.json"
           )
 
           with open(
-              path,
+              audit_path,
+              "r",
+              encoding="utf-8",
+          ) as f:
+              audit = json.load(f)
+
+          with open(
+              forensic_path,
               "r",
               encoding="utf-8",
           ) as f:
               report = json.load(f)
+
+          print("==================================================")
+          print("FORENSIC REPORT VALIDATION")
+          print("==================================================")
 
           print(
               "Forensic report type:",
@@ -881,10 +1257,162 @@ jobs:
                       f"expected {expected!r}"
                   )
 
+          audit_trades = audit.get(
+              "trades",
+              []
+          )
+
+          forensic_trades = report.get(
+              "trades",
+              []
+          )
+
+          audit_trade_count = len(
+              audit_trades
+          )
+
+          forensic_trade_count = len(
+              forensic_trades
+          )
+
           print("")
           print(
-              "Forensic safety validation PASSED."
+              f"Audit trade count:    "
+              f"{audit_trade_count}"
           )
+
+          print(
+              f"Forensic trade count: "
+              f"{forensic_trade_count}"
+          )
+
+          # The forensic report must account for every audit trade.
+          if forensic_trade_count != audit_trade_count:
+              raise SystemExit(
+                  "ERROR: Forensic trade count does not "
+                  "match monthly audit trade count."
+              )
+
+          audit_ids = {
+              str(
+                  trade.get("trade_id")
+              )
+              for trade in audit_trades
+          }
+
+          forensic_ids = {
+              str(
+                  trade.get("trade_id")
+              )
+              for trade in forensic_trades
+          }
+
+          missing_ids = (
+              audit_ids
+              - forensic_ids
+          )
+
+          unexpected_ids = (
+              forensic_ids
+              - audit_ids
+          )
+
+          if missing_ids:
+              print(
+                  "Missing forensic trade IDs:"
+              )
+
+              for trade_id in sorted(
+                  missing_ids
+              ):
+                  print(
+                      f"- {trade_id}"
+                  )
+
+              raise SystemExit(
+                  "ERROR: Some audit trades were not "
+                  "included in forensic output."
+              )
+
+          if unexpected_ids:
+              print(
+                  "Unexpected forensic trade IDs:"
+              )
+
+              for trade_id in sorted(
+                  unexpected_ids
+              ):
+                  print(
+                      f"- {trade_id}"
+                  )
+
+              raise SystemExit(
+                  "ERROR: Forensic output contains "
+                  "unexpected trade IDs."
+              )
+
+          summary = report.get(
+              "summary",
+              {}
+          )
+
+          print("")
+          print(
+              f"Loss count:           "
+              f"{summary.get('loss_count')}"
+          )
+
+          print(
+              f"Favorable-first:      "
+              f"{summary.get('losses_favorable_first')}"
+          )
+
+          print(
+              f"MFE >= 0.25R:         "
+              f"{summary.get('losses_mfe_ge_0_25r')}"
+          )
+
+          print(
+              f"MFE >= 0.50R:         "
+              f"{summary.get('losses_mfe_ge_0_5r')}"
+          )
+
+          print(
+              f"MFE >= 0.75R:         "
+              f"{summary.get('losses_mfe_ge_0_75r')}"
+          )
+
+          print(
+              f"MFE >= 1.00R:         "
+              f"{summary.get('losses_mfe_ge_1r')}"
+          )
+
+          print(
+              f"MFE >= 1.50R:         "
+              f"{summary.get('losses_mfe_ge_1_5r')}"
+          )
+
+          print(
+              f"MFE >= 2.00R:         "
+              f"{summary.get('losses_mfe_ge_2r')}"
+          )
+
+          print(
+              f"Reached TP then lost: "
+              f"{summary.get('losses_reached_tp_then_lost')}"
+          )
+
+          print("")
+          print(
+              "Forensic validation PASSED."
+          )
+
+          print(
+              "Every monthly audit trade is represented "
+              "in the forensic report."
+          )
+
+          print("==================================================")
           PY
 
       # ============================================================
@@ -929,8 +1457,18 @@ jobs:
               {},
           )
 
+          accounting = audit.get(
+              "accounting",
+              {},
+          )
+
           summary = forensic.get(
               "summary",
+              {},
+          )
+
+          direction = summary.get(
+              "direction",
               {},
           )
 
@@ -938,9 +1476,11 @@ jobs:
           print(
               "=================================================="
           )
+
           print(
               "RAYMOND V2.8 MONTHLY RESEARCH AUDIT"
           )
+
           print(
               "=================================================="
           )
@@ -979,58 +1519,106 @@ jobs:
               f"{performance.get('profit_factor')}"
           )
 
+          print(
+              f"Accounting fixed:   "
+              f"{accounting.get('accounting_reconciled')}"
+          )
+
           print("")
           print(
               "PRICE-PATH FORENSICS"
           )
 
           print(
-              f"Losses:             "
+              f"Trades reconstructed: "
+              f"{summary.get('trade_count')}"
+          )
+
+          print(
+              f"Losses:               "
               f"{summary.get('loss_count')}"
           )
 
           print(
-              "Favorable-first:    "
+              f"Favorable-first:      "
               f"{summary.get('losses_favorable_first')}"
           )
 
           print(
-              "MFE >= 0.25R:       "
+              f"Recrossed entry:      "
+              f"{summary.get('losses_recrossed_entry')}"
+          )
+
+          print(
+              f"Reached TP then lost: "
+              f"{summary.get('losses_reached_tp_then_lost')}"
+          )
+
+          print(
+              f"MFE >= 0R:            "
+              f"{summary.get('losses_mfe_ge_0r')}"
+          )
+
+          print(
+              f"MFE >= 0.25R:         "
               f"{summary.get('losses_mfe_ge_0_25r')}"
           )
 
           print(
-              "MFE >= 0.50R:       "
+              f"MFE >= 0.50R:         "
               f"{summary.get('losses_mfe_ge_0_5r')}"
           )
 
           print(
-              "MFE >= 0.75R:       "
+              f"MFE >= 0.75R:         "
               f"{summary.get('losses_mfe_ge_0_75r')}"
           )
 
           print(
-              "MFE >= 1.00R:       "
+              f"MFE >= 1.00R:         "
               f"{summary.get('losses_mfe_ge_1r')}"
           )
 
           print(
-              "MFE >= 1.50R:       "
+              f"MFE >= 1.50R:         "
               f"{summary.get('losses_mfe_ge_1_5r')}"
           )
 
           print(
-              "MFE >= 2.00R:       "
+              f"MFE >= 2.00R:         "
               f"{summary.get('losses_mfe_ge_2r')}"
           )
 
+          print("")
           print(
-              "Reached TP then lost: "
-              f"{summary.get('losses_reached_tp_then_lost')}"
+              "DIRECTION"
           )
 
+          for name in (
+              "BUY",
+              "SELL",
+          ):
+              row = direction.get(
+                  name,
+                  {}
+              )
+
+              print(
+                  f"{name}: "
+                  f"trades={row.get('trades')} "
+                  f"losses={row.get('losses')} "
+                  f"favorable_first="
+                  f"{row.get('favorable_first_losses')} "
+                  f"MFE>=0.5R="
+                  f"{row.get('mfe_ge_0_5r_losses')} "
+                  f"MFE>=1R="
+                  f"{row.get('mfe_ge_1r_losses')}"
+              )
+
           print("")
-          print("SAFETY")
+          print(
+              "SAFETY"
+          )
 
           print(
               "Research only:       ",
@@ -1068,7 +1656,7 @@ jobs:
           )
 
           print(
-              "Candidates promoted: ",
+              "Candidates promoted:",
               forensic.get(
                   "candidates_promoted"
               ),
