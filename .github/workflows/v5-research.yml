@@ -35,7 +35,7 @@ jobs:
     name: Prepare XAUUSD H1 Data
     runs-on: ubuntu-latest
 
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     outputs:
       dataset: ${{ steps.prepare.outputs.dataset }}
@@ -61,46 +61,81 @@ jobs:
           pip install pandas numpy
           npm install -g dukascopy-node
 
+      - name: Show dukascopy-node version
+        run: |
+          dukascopy-node --help
+          npm list -g dukascopy-node --depth=0
+
       - name: Create directories
         run: |
           mkdir -p data/historical
           mkdir -p backtest_results/weekly_growth_v5
 
+      # IMPORTANT:
+      # dukascopy-node uses -dir / --directory.
+      # It does NOT use -o.
+      #
+      # -fn forces a safe filename and avoids date-generated filenames
+      # containing characters that can cause file/path problems.
       - name: Download XAUUSD H1 data
         run: |
+          set -e
+
           dukascopy-node \
             -i xauusd \
             -from "${{ inputs.start_date }}" \
             -to "${{ inputs.end_date }}" \
             -t h1 \
             -f csv \
-            -o data/historical
+            -dir data/historical \
+            -fn xauusd_h1_download.csv \
+            -r 5 \
+            -re
+
+      - name: Inspect downloaded files
+        run: |
+          echo "Downloaded files:"
+          find data/historical -maxdepth 2 -type f -print -exec ls -lh {} \;
 
       - name: Normalize XAUUSD H1
         id: prepare
         shell: bash
         run: |
+          set -e
+
           python - <<'PY'
           from pathlib import Path
           import pandas as pd
 
           root = Path("data/historical")
 
-          files = list(root.glob("*.csv"))
+          files = [
+              p for p in root.glob("*.csv")
+              if p.name != "xauusd_h1_2024_2026_normalized.csv"
+          ]
 
           if not files:
               raise SystemExit(
                   "No XAUUSD CSV file was downloaded."
               )
 
+          print("CSV files found:")
+          for path in files:
+              print(f"  - {path}")
+
           selected = None
 
-          for path in files:
-              name = path.name.lower()
+          preferred = root / "xauusd_h1_download.csv"
 
-              if "xauusd" in name or "xau" in name:
-                  selected = path
-                  break
+          if preferred.exists():
+              selected = preferred
+          else:
+              for path in files:
+                  name = path.name.lower()
+
+                  if "xauusd" in name or "xau" in name:
+                      selected = path
+                      break
 
           if selected is None:
               selected = files[0]
@@ -108,6 +143,9 @@ jobs:
           print(f"Using source file: {selected}")
 
           df = pd.read_csv(selected)
+
+          print("Original columns:")
+          print(list(df.columns))
 
           rename = {}
 
@@ -123,19 +161,35 @@ jobs:
               }:
                   rename[column] = "timestamp"
 
-              elif key in {"open", "o"}:
+              elif key in {
+                  "open",
+                  "o",
+              }:
                   rename[column] = "open"
 
-              elif key in {"high", "h"}:
+              elif key in {
+                  "high",
+                  "h",
+              }:
                   rename[column] = "high"
 
-              elif key in {"low", "l"}:
+              elif key in {
+                  "low",
+                  "l",
+              }:
                   rename[column] = "low"
 
-              elif key in {"close", "c"}:
+              elif key in {
+                  "close",
+                  "c",
+              }:
                   rename[column] = "close"
 
-              elif key in {"volume", "vol", "v"}:
+              elif key in {
+                  "volume",
+                  "vol",
+                  "v",
+              }:
                   rename[column] = "volume"
 
           df = df.rename(columns=rename)
@@ -159,11 +213,28 @@ jobs:
                   f"Missing required columns: {missing}"
               )
 
-          df["timestamp"] = pd.to_datetime(
+          # Dukascopy CSV timestamps may be Unix milliseconds.
+          # Convert them safely to UTC.
+          timestamp_numeric = pd.to_numeric(
               df["timestamp"],
-              utc=True,
               errors="coerce",
           )
+
+          numeric_ratio = timestamp_numeric.notna().mean()
+
+          if numeric_ratio > 0.95:
+              df["timestamp"] = pd.to_datetime(
+                  timestamp_numeric,
+                  unit="ms",
+                  utc=True,
+                  errors="coerce",
+              )
+          else:
+              df["timestamp"] = pd.to_datetime(
+                  df["timestamp"],
+                  utc=True,
+                  errors="coerce",
+              )
 
           for column in [
               "open",
@@ -184,14 +255,17 @@ jobs:
               errors="coerce",
           ).fillna(0.0)
 
+          # Remove invalid rows.
           df = df.dropna(
               subset=required
           )
 
+          # Sort chronologically.
           df = df.sort_values(
               "timestamp"
           )
 
+          # Remove duplicate candles.
           df = df.drop_duplicates(
               "timestamp"
           )
@@ -199,6 +273,36 @@ jobs:
           df = df.reset_index(
               drop=True
           )
+
+          # Validate OHLC relationships.
+          invalid_high_low = (
+              df["high"] < df["low"]
+          )
+
+          invalid_open = (
+              (df["open"] > df["high"]) |
+              (df["open"] < df["low"])
+          )
+
+          invalid_close = (
+              (df["close"] > df["high"]) |
+              (df["close"] < df["low"])
+          )
+
+          if invalid_high_low.any():
+              raise SystemExit(
+                  "Found candles where High < Low."
+              )
+
+          if invalid_open.any():
+              raise SystemExit(
+                  "Found candles where Open is outside High/Low."
+              )
+
+          if invalid_close.any():
+              raise SystemExit(
+                  "Found candles where Close is outside High/Low."
+              )
 
           output = (
               root /
@@ -210,22 +314,31 @@ jobs:
               index=False,
           )
 
-          print(
-              f"Rows: {len(df):,}"
-          )
-
-          print(
-              f"Start: {df['timestamp'].min()}"
-          )
-
-          print(
-              f"End: {df['timestamp'].max()}"
-          )
+          print("")
+          print("==============================================")
+          print("NORMALIZED XAUUSD DATA")
+          print("==============================================")
+          print(f"Rows: {len(df):,}")
+          print(f"Start: {df['timestamp'].min()}")
+          print(f"End:   {df['timestamp'].max()}")
+          print(f"Output: {output}")
+          print("==============================================")
 
           if len(df) < 5000:
               raise SystemExit(
                   "Dataset has fewer than 5,000 H1 candles."
               )
+
+          print("")
+          print("First 5 rows:")
+          print(df.head().to_string())
+
+          print("")
+          print("Last 5 rows:")
+          print(df.tail().to_string())
+
+          print("")
+          print("Dataset normalization completed successfully.")
           PY
 
           echo "dataset=data/historical/xauusd_h1_2024_2026_normalized.csv" \
@@ -270,7 +383,7 @@ jobs:
 
           if not df["timestamp"].is_monotonic_increasing:
               raise SystemExit(
-                  "Timestamps are not monotonic."
+                  "Timestamps are not monotonic increasing."
               )
 
           if df["timestamp"].duplicated().any():
@@ -305,9 +418,32 @@ jobs:
                   "Found High < Low candle."
               )
 
-          print(
-              f"Validated {len(df):,} XAUUSD H1 candles."
-          )
+          if (
+              (df["open"] > df["high"]) |
+              (df["open"] < df["low"])
+          ).any():
+              raise SystemExit(
+                  "Found Open outside candle range."
+              )
+
+          if (
+              (df["close"] > df["high"]) |
+              (df["close"] < df["low"])
+          ).any():
+              raise SystemExit(
+                  "Found Close outside candle range."
+              )
+
+          print("")
+          print("==============================================")
+          print("MARKET DATA VALIDATION")
+          print("==============================================")
+          print(f"Validated {len(df):,} XAUUSD H1 candles.")
+          print(f"First candle: {df['timestamp'].min()}")
+          print(f"Last candle:  {df['timestamp'].max()}")
+          print("OHLC integrity: PASS")
+          print("Timestamp integrity: PASS")
+          print("==============================================")
           PY
 
       - name: Upload prepared data
@@ -366,7 +502,7 @@ jobs:
 
 
   # ========================================================================
-  # 3. OPTIMIZER
+  # 3. MULTI OBJECTIVE OPTIMIZER
   # ========================================================================
 
   optimizer:
@@ -422,7 +558,7 @@ jobs:
 
 
   # ========================================================================
-  # 4. WALK FORWARD
+  # 4. WALK FORWARD VALIDATION
   # ========================================================================
 
   walk-forward:
@@ -430,6 +566,7 @@ jobs:
     needs:
       - prepare-data
       - optimizer
+
     runs-on: ubuntu-latest
 
     timeout-minutes: 240
@@ -480,12 +617,13 @@ jobs:
 
 
   # ========================================================================
-  # 5. ROBUSTNESS
+  # 5. ROBUSTNESS ANALYSIS
   # ========================================================================
 
   robustness:
     name: V5 Robustness Analysis
     needs: walk-forward
+
     runs-on: ubuntu-latest
 
     timeout-minutes: 30
@@ -527,11 +665,12 @@ jobs:
 
 
   # ========================================================================
-  # 6. RESULTS VALIDATOR
+  # 6. INDEPENDENT RESULTS VALIDATOR
   # ========================================================================
 
   validator:
     name: V5 Independent Results Validator
+
     needs:
       - strategy-engine
       - optimizer
@@ -622,11 +761,12 @@ jobs:
 
 
   # ========================================================================
-  # 7. FINAL REPORT
+  # 7. FINAL RESEARCH REPORT
   # ========================================================================
 
   final-report:
     name: V5 Final Research Report
+
     needs:
       - validator
 
@@ -671,8 +811,8 @@ jobs:
           V5 COMPLETE RESEARCH PACKAGE
           =============================
 
-          PIPELINE
-          --------
+          RESEARCH PIPELINE
+          -----------------
           1. XAUUSD H1 data preparation
           2. V5 strategy engine
           3. Multi-objective optimizer
@@ -680,9 +820,14 @@ jobs:
           5. Robustness analysis
           6. Independent results validation
 
+          MARKET
+          ------
+          Symbol: XAUUSD
+          Timeframe: H1
+
           XAUUSD CONTRACT MODEL
           ---------------------
-          1.00 lot = 100 ounces
+          1.00 lot = 100 ounces.
 
           Therefore:
 
@@ -707,25 +852,46 @@ jobs:
           No Exness orders.
           No live position modification.
 
-          IMPORTANT
-          ---------
-          A high backtest return alone does not prove a
-          profitable trading edge.
+          RESEARCH PRINCIPLES
+          -------------------
+          The system must not judge the strategy using
+          headline return alone.
 
-          The most important outputs are:
+          Important measurements include:
 
-              validation/summary.txt
+              - Out-of-sample return
+              - Profit factor
+              - Expectancy
+              - Win rate
+              - Maximum drawdown
+              - Consistency
+              - Walk-forward degradation
+              - Strategy-family stability
+              - Regime stability
+              - Accounting reconciliation
+              - XAUUSD contract correctness
 
-              validation/v5_results_validation.json
+          A very high backtest return without out-of-sample
+          stability is not considered a validated edge.
 
-              robustness/summary.txt
+          IMPORTANT FILES
+          ---------------
+          validation/summary.txt
 
-              walk_forward/v5_walk_forward_windows.csv
+          validation/v5_results_validation.json
 
-              optimizer/
+          robustness/summary.txt
 
-          The validation verdict determines whether the
-          strategy should proceed to the next research stage.
+          walk_forward/v5_walk_forward_windows.csv
+
+          optimizer/
+
+          FINAL DECISION
+          --------------
+          The independent validation verdict determines whether
+          the V5 strategy proceeds to the next research stage.
+
+          No live trading is enabled by this workflow.
           EOF
 
       - name: Display final result
@@ -745,6 +911,8 @@ jobs:
 
           if [ -f final_report/validation/summary.txt ]; then
             cat final_report/validation/summary.txt
+          else
+            echo "Validation summary unavailable."
           fi
 
       - name: GitHub Actions summary
