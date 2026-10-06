@@ -39,6 +39,9 @@ jobs:
       - name: Configure backend Python path
         run: |
           echo "PYTHONPATH=${GITHUB_WORKSPACE}/backend:${PYTHONPATH}" >> "$GITHUB_ENV"
+
+      - name: Verify backend Python path
+        run: |
           python -c "import app; print('Backend package import: OK')"
 
       - name: Prepare directories
