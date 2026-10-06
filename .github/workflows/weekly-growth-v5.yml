@@ -1,0 +1,459 @@
+name: Raymond V5 Walk-Forward Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Research mode"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - quick
+          - full
+
+jobs:
+  v5-walk-forward:
+    name: V5 Walk-Forward Research
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 180
+
+    steps:
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # PYTHON
+      # ============================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ============================================================
+      # NODE
+      # Required for dukascopy-node
+      # ============================================================
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Install Dukascopy downloader
+        run: |
+          npm install -g dukascopy-node
+
+      # ============================================================
+      # DIRECTORIES
+      # ============================================================
+
+      - name: Prepare directories
+        run: |
+          mkdir -p data/historical
+          mkdir -p backtest_results/weekly_growth_v5/walk_forward
+
+      # ============================================================
+      # DOWNLOAD XAUUSD H1 DATA
+      # ============================================================
+
+      - name: Download XAUUSD H1 history
+        run: |
+          dukascopy-node \
+            -i xauusd \
+            -from 2024-01-01 \
+            -to 2026-10-02 \
+            -t h1 \
+            -f csv \
+            -o data/historical
+
+      # ============================================================
+      # LOCATE H1 FILE
+      # ============================================================
+
+      - name: Normalize H1 data
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path("data/historical")
+
+          candidates = list(root.glob("*.csv"))
+
+          if not candidates:
+              raise SystemExit(
+                  "No downloaded CSV files found."
+              )
+
+          print("Downloaded files:")
+          for path in candidates:
+              print(" -", path)
+
+          # Find the most likely XAUUSD H1 file.
+          selected = None
+
+          for path in candidates:
+              name = path.name.lower()
+
+              if "xauusd" in name or "xau" in name:
+                  selected = path
+                  break
+
+          if selected is None:
+              selected = candidates[0]
+
+          print("Selected:", selected)
+
+          df = pd.read_csv(selected)
+
+          print("Columns:", list(df.columns))
+
+          rename = {}
+
+          for column in df.columns:
+              lower = column.lower()
+
+              if lower in {"time", "timestamp", "date"}:
+                  rename[column] = "timestamp"
+
+              elif lower in {"open", "o"}:
+                  rename[column] = "open"
+
+              elif lower in {"high", "h"}:
+                  rename[column] = "high"
+
+              elif lower in {"low", "l"}:
+                  rename[column] = "low"
+
+              elif lower in {"close", "c"}:
+                  rename[column] = "close"
+
+              elif lower in {"volume", "vol", "v"}:
+                  rename[column] = "volume"
+
+          df = df.rename(columns=rename)
+
+          required = [
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+          ]
+
+          missing = [
+              column
+              for column in required
+              if column not in df.columns
+          ]
+
+          if missing:
+              raise SystemExit(
+                  f"Missing required columns: {missing}"
+              )
+
+          df["timestamp"] = pd.to_datetime(
+              df["timestamp"],
+              utc=True,
+              errors="coerce",
+          )
+
+          for column in [
+              "open",
+              "high",
+              "low",
+              "close",
+          ]:
+              df[column] = pd.to_numeric(
+                  df[column],
+                  errors="coerce",
+              )
+
+          if "volume" not in df.columns:
+              df["volume"] = 0.0
+
+          df["volume"] = pd.to_numeric(
+              df["volume"],
+              errors="coerce",
+          ).fillna(0.0)
+
+          df = df.dropna(
+              subset=required
+          )
+
+          df = df.sort_values(
+              "timestamp"
+          )
+
+          df = df.drop_duplicates(
+              "timestamp"
+          )
+
+          df = df.reset_index(
+              drop=True
+          )
+
+          output = (
+              root /
+              "xauusd_h1_2024_2026_normalized.csv"
+          )
+
+          df.to_csv(
+              output,
+              index=False,
+          )
+
+          print()
+          print(
+              "Normalized H1 rows:",
+              len(df),
+          )
+
+          print(
+              "Start:",
+              df["timestamp"].min(),
+          )
+
+          print(
+              "End:",
+              df["timestamp"].max(),
+          )
+
+          if len(df) < 5000:
+              raise SystemExit(
+                  "H1 dataset is unexpectedly small."
+              )
+          PY
+
+      # ============================================================
+      # DATA VALIDATION
+      # ============================================================
+
+      - name: Validate historical data
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          path = Path(
+              "data/historical/"
+              "xauusd_h1_2024_2026_normalized.csv"
+          )
+
+          if not path.exists():
+              raise SystemExit(
+                  f"Missing dataset: {path}"
+              )
+
+          df = pd.read_csv(path)
+
+          required = [
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+          ]
+
+          for column in required:
+              if column not in df.columns:
+                  raise SystemExit(
+                      f"Missing column: {column}"
+                  )
+
+          df["timestamp"] = pd.to_datetime(
+              df["timestamp"],
+              utc=True,
+              errors="coerce",
+          )
+
+          if df["timestamp"].isna().any():
+              raise SystemExit(
+                  "Invalid timestamps detected."
+              )
+
+          if not df["timestamp"].is_monotonic_increasing:
+              raise SystemExit(
+                  "Timestamps are not monotonic."
+              )
+
+          if df["timestamp"].duplicated().any():
+              raise SystemExit(
+                  "Duplicate timestamps detected."
+              )
+
+          for column in [
+              "open",
+              "high",
+              "low",
+              "close",
+          ]:
+              if (
+                  df[column]
+                  <= 0
+              ).any():
+                  raise SystemExit(
+                      f"Invalid prices in {column}."
+                  )
+
+          if (
+              df["high"]
+              < df["low"]
+          ).any():
+              raise SystemExit(
+                  "High < Low detected."
+              )
+
+          print(
+              "Validation passed."
+          )
+
+          print(
+              f"Rows: {len(df):,}"
+          )
+          PY
+
+      # ============================================================
+      # RUN V5
+      # ============================================================
+
+      - name: Run V5 walk-forward research
+        run: |
+          if [ "${{ inputs.mode }}" = "quick" ]; then
+
+            echo "Running QUICK V5 research..."
+
+            python scripts/v5_walk_forward.py \
+              --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+              --output backtest_results/weekly_growth_v5/walk_forward \
+              --max-candidates 250
+
+          else
+
+            echo "Running FULL V5 research..."
+
+            python scripts/v5_walk_forward.py \
+              --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+              --output backtest_results/weekly_growth_v5/walk_forward
+
+          fi
+
+      # ============================================================
+      # DISPLAY SUMMARY
+      # ============================================================
+
+      - name: Display V5 summary
+        if: always()
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "V5 WALK-FORWARD SUMMARY"
+          echo "============================================================"
+
+          if [ -f \
+            backtest_results/weekly_growth_v5/walk_forward/summary.txt
+          ]; then
+            cat \
+              backtest_results/weekly_growth_v5/walk_forward/summary.txt
+          else
+            echo "summary.txt was not created."
+          fi
+
+      # ============================================================
+      # DISPLAY WINDOW RESULTS
+      # ============================================================
+
+      - name: Display walk-forward windows
+        if: always()
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "WALK-FORWARD WINDOWS"
+          echo "============================================================"
+
+          if [ -f \
+            backtest_results/weekly_growth_v5/walk_forward/v5_walk_forward_windows.csv
+          ]; then
+            cat \
+              backtest_results/weekly_growth_v5/walk_forward/v5_walk_forward_windows.csv
+          else
+            echo "Window result CSV not found."
+          fi
+
+      # ============================================================
+      # CHECK OUTPUTS
+      # ============================================================
+
+      - name: Verify V5 outputs
+        run: |
+          test -f \
+            backtest_results/weekly_growth_v5/walk_forward/summary.txt
+
+          test -f \
+            backtest_results/weekly_growth_v5/walk_forward/v5_walk_forward_report.json
+
+          test -f \
+            backtest_results/weekly_growth_v5/walk_forward/v5_walk_forward_windows.csv
+
+          echo "Required V5 output files exist."
+
+      # ============================================================
+      # UPLOAD RESULTS
+      # ============================================================
+
+      - name: Upload V5 research results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-v2-8-v5-walk-forward-results
+          path: |
+            backtest_results/weekly_growth_v5/walk_forward/
+            data/historical/xauusd_h1_2024_2026_normalized.csv
+          retention-days: 30
+
+      # ============================================================
+      # GITHUB SUMMARY
+      # ============================================================
+
+      - name: Add results to GitHub summary
+        if: always()
+        run: |
+          echo "# Raymond V2.8 V5 Walk-Forward Research" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f \
+            backtest_results/weekly_growth_v5/walk_forward/summary.txt
+          ]; then
+
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+
+            cat \
+              backtest_results/weekly_growth_v5/walk_forward/summary.txt \
+              >> "$GITHUB_STEP_SUMMARY"
+
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          else
+
+            echo "No summary was generated." \
+              >> "$GITHUB_STEP_SUMMARY"
+
+          fi
