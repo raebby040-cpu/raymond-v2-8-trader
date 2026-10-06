@@ -36,6 +36,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas pytest
 
+      - name: Configure backend Python path
+        run: |
+          echo "PYTHONPATH=${GITHUB_WORKSPACE}/backend:${PYTHONPATH}" >> "$GITHUB_ENV"
+          python -c "import app; print('Backend package import: OK')"
+
       - name: Prepare directories
         run: |
           mkdir -p audit_output
