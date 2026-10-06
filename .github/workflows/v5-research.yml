@@ -1,0 +1,741 @@
+name: Raymond V5 Complete Research Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Research depth"
+        required: true
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - full
+
+      start_date:
+        description: "Historical data start date"
+        required: true
+        default: "2024-01-01"
+        type: string
+
+      end_date:
+        description: "Historical data end date"
+        required: true
+        default: "2026-10-02"
+        type: string
+
+jobs:
+
+  # ========================================================================
+  # JOB 1 — PREPARE DATA
+  # ========================================================================
+
+  prepare-data:
+    name: Prepare XAUUSD H1 Data
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    outputs:
+      dataset: ${{ steps.prepare.outputs.dataset }}
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+          npm install -g dukascopy-node
+
+      - name: Create directories
+        run: |
+          mkdir -p data/historical
+          mkdir -p backtest_results/weekly_growth_v5
+
+      - name: Download XAUUSD H1 data
+        run: |
+          dukascopy-node \
+            -i xauusd \
+            -from "${{ inputs.start_date }}" \
+            -to "${{ inputs.end_date }}" \
+            -t h1 \
+            -f csv \
+            -o data/historical
+
+      - name: Normalize XAUUSD H1
+        id: prepare
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path("data/historical")
+
+          files = list(root.glob("*.csv"))
+
+          if not files:
+              raise SystemExit(
+                  "No XAUUSD data file was downloaded."
+              )
+
+          print("Downloaded files:")
+          for path in files:
+              print(f"  {path}")
+
+          selected = None
+
+          for path in files:
+              name = path.name.lower()
+
+              if (
+                  "xauusd" in name
+                  or "xau" in name
+              ):
+                  selected = path
+                  break
+
+          if selected is None:
+              selected = files[0]
+
+          print(f"Selected file: {selected}")
+
+          df = pd.read_csv(selected)
+
+          rename = {}
+
+          for column in df.columns:
+
+              key = str(column).lower().strip()
+
+              if key in {
+                  "time",
+                  "timestamp",
+                  "date",
+                  "datetime",
+              }:
+                  rename[column] = "timestamp"
+
+              elif key in {
+                  "open",
+                  "o",
+              }:
+                  rename[column] = "open"
+
+              elif key in {
+                  "high",
+                  "h",
+              }:
+                  rename[column] = "high"
+
+              elif key in {
+                  "low",
+                  "l",
+              }:
+                  rename[column] = "low"
+
+              elif key in {
+                  "close",
+                  "c",
+              }:
+                  rename[column] = "close"
+
+              elif key in {
+                  "volume",
+                  "vol",
+                  "v",
+              }:
+                  rename[column] = "volume"
+
+          df = df.rename(columns=rename)
+
+          required = [
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+          ]
+
+          missing = [
+              column
+              for column in required
+              if column not in df.columns
+          ]
+
+          if missing:
+              raise SystemExit(
+                  f"Missing columns: {missing}"
+              )
+
+          df["timestamp"] = pd.to_datetime(
+              df["timestamp"],
+              utc=True,
+              errors="coerce",
+          )
+
+          for column in [
+              "open",
+              "high",
+              "low",
+              "close",
+          ]:
+              df[column] = pd.to_numeric(
+                  df[column],
+                  errors="coerce",
+              )
+
+          if "volume" not in df.columns:
+              df["volume"] = 0.0
+
+          df["volume"] = pd.to_numeric(
+              df["volume"],
+              errors="coerce",
+          ).fillna(0.0)
+
+          df = df.dropna(
+              subset=required
+          )
+
+          df = df.sort_values(
+              "timestamp"
+          )
+
+          df = df.drop_duplicates(
+              "timestamp"
+          )
+
+          df = df.reset_index(
+              drop=True
+          )
+
+          output = (
+              root /
+              "xauusd_h1_2024_2026_normalized.csv"
+          )
+
+          df.to_csv(
+              output,
+              index=False,
+          )
+
+          print(
+              f"Normalized rows: {len(df):,}"
+          )
+
+          print(
+              f"Start: {df['timestamp'].min()}"
+          )
+
+          print(
+              f"End: {df['timestamp'].max()}"
+          )
+
+          if len(df) < 5000:
+              raise SystemExit(
+                  "Dataset contains fewer than 5,000 H1 candles."
+              )
+          PY
+
+          echo "dataset=data/historical/xauusd_h1_2024_2026_normalized.csv" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Validate data
+        run: |
+          python - <<'PY'
+          import pandas as pd
+
+          path = (
+              "data/historical/"
+              "xauusd_h1_2024_2026_normalized.csv"
+          )
+
+          df = pd.read_csv(path)
+
+          required = [
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+          ]
+
+          for column in required:
+              if column not in df.columns:
+                  raise SystemExit(
+                      f"Missing column: {column}"
+                  )
+
+          df["timestamp"] = pd.to_datetime(
+              df["timestamp"],
+              utc=True,
+              errors="coerce",
+          )
+
+          if df["timestamp"].isna().any():
+              raise SystemExit(
+                  "Invalid timestamps found."
+              )
+
+          if not df["timestamp"].is_monotonic_increasing:
+              raise SystemExit(
+                  "Timestamps are not increasing."
+              )
+
+          if df["timestamp"].duplicated().any():
+              raise SystemExit(
+                  "Duplicate timestamps found."
+              )
+
+          for column in [
+              "open",
+              "high",
+              "low",
+              "close",
+          ]:
+              if (
+                  df[column] <= 0
+              ).any():
+                  raise SystemExit(
+                      f"Invalid {column} prices found."
+                  )
+
+          if (
+              df["high"] < df["low"]
+          ).any():
+              raise SystemExit(
+                  "Found candles where High < Low."
+              )
+
+          print(
+              f"Validated {len(df):,} H1 candles."
+          )
+          PY
+
+      - name: Upload prepared dataset
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-prepared-xauusd-data
+          path: data/historical/xauusd_h1_2024_2026_normalized.csv
+          retention-days: 30
+
+
+  # ========================================================================
+  # JOB 2 — V5 STRATEGY ENGINE
+  # ========================================================================
+
+  strategy-engine:
+    name: V5 Strategy Engine
+    needs: prepare-data
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Download prepared dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-prepared-xauusd-data
+          path: data/historical
+
+      - name: Run V5 strategy engine
+        run: |
+          python scripts/v5_strategy_engine.py \
+            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output backtest_results/weekly_growth_v5/strategy_engine
+
+      - name: Display strategy summary
+        if: always()
+        run: |
+          if [ -f \
+            backtest_results/weekly_growth_v5/strategy_engine/summary.txt
+          ]; then
+            cat \
+              backtest_results/weekly_growth_v5/strategy_engine/summary.txt
+          fi
+
+      - name: Upload strategy engine results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-strategy-engine-results
+          path: backtest_results/weekly_growth_v5/strategy_engine
+          retention-days: 30
+
+
+  # ========================================================================
+  # JOB 3 — V5 OPTIMIZER
+  # ========================================================================
+
+  optimizer:
+    name: V5 Multi-Objective Optimizer
+    needs: prepare-data
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Download prepared dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-prepared-xauusd-data
+          path: data/historical
+
+      - name: Run quick V5 optimizer
+        if: inputs.mode == 'quick'
+        run: |
+          python scripts/v5_optimizer.py \
+            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output backtest_results/weekly_growth_v5/optimizer \
+            --max-candidates 250
+
+      - name: Run full V5 optimizer
+        if: inputs.mode == 'full'
+        run: |
+          python scripts/v5_optimizer.py \
+            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output backtest_results/weekly_growth_v5/optimizer
+
+      - name: Display optimizer summary
+        if: always()
+        run: |
+          if [ -f \
+            backtest_results/weekly_growth_v5/optimizer/summary.txt
+          ]; then
+            cat \
+              backtest_results/weekly_growth_v5/optimizer/summary.txt
+          fi
+
+      - name: Upload optimizer results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-optimizer-results
+          path: backtest_results/weekly_growth_v5/optimizer
+          retention-days: 30
+
+
+  # ========================================================================
+  # JOB 4 — WALK-FORWARD VALIDATION
+  # ========================================================================
+
+  walk-forward:
+    name: V5 Walk-Forward Validation
+    needs:
+      - prepare-data
+      - optimizer
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 180
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Download prepared dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-prepared-xauusd-data
+          path: data/historical
+
+      - name: Run quick walk-forward
+        if: inputs.mode == 'quick'
+        run: |
+          python scripts/v5_walk_forward.py \
+            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output backtest_results/weekly_growth_v5/walk_forward \
+            --max-candidates 250
+
+      - name: Run full walk-forward
+        if: inputs.mode == 'full'
+        run: |
+          python scripts/v5_walk_forward.py \
+            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output backtest_results/weekly_growth_v5/walk_forward
+
+      - name: Display walk-forward summary
+        if: always()
+        run: |
+          if [ -f \
+            backtest_results/weekly_growth_v5/walk_forward/summary.txt
+          ]; then
+            cat \
+              backtest_results/weekly_growth_v5/walk_forward/summary.txt
+          fi
+
+      - name: Upload walk-forward results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-walk-forward-results
+          path: backtest_results/weekly_growth_v5/walk_forward
+          retention-days: 30
+
+
+  # ========================================================================
+  # JOB 5 — ROBUSTNESS ANALYSIS
+  # ========================================================================
+
+  robustness:
+    name: V5 Robustness Analysis
+    needs: walk-forward
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Download walk-forward results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-walk-forward-results
+          path: backtest_results/weekly_growth_v5/walk_forward
+
+      - name: Run robustness analyzer
+        run: |
+          python scripts/v5_robustness_analyzer.py \
+            --input backtest_results/weekly_growth_v5/walk_forward \
+            --output backtest_results/weekly_growth_v5/robustness
+
+      - name: Display final V5 verdict
+        if: always()
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "RAYMOND V2.8 V5 FINAL ROBUSTNESS VERDICT"
+          echo "============================================================"
+          echo ""
+
+          if [ -f \
+            backtest_results/weekly_growth_v5/robustness/summary.txt
+          ]; then
+            cat \
+              backtest_results/weekly_growth_v5/robustness/summary.txt
+          else
+            echo "No robustness summary was produced."
+          fi
+
+      - name: Upload robustness results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-robustness-results
+          path: backtest_results/weekly_growth_v5/robustness
+          retention-days: 30
+
+
+  # ========================================================================
+  # JOB 6 — FINAL RESEARCH PACKAGE
+  # ========================================================================
+
+  final-report:
+    name: Build Final V5 Research Package
+    needs:
+      - strategy-engine
+      - optimizer
+      - walk-forward
+      - robustness
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 20
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download strategy results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-strategy-engine-results
+          path: final_report/strategy_engine
+
+      - name: Download optimizer results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-optimizer-results
+          path: final_report/optimizer
+
+      - name: Download walk-forward results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-walk-forward-results
+          path: final_report/walk_forward
+
+      - name: Download robustness results
+        uses: actions/download-artifact@v4
+        with:
+          name: v5-robustness-results
+          path: final_report/robustness
+
+      - name: Create combined research index
+        run: |
+          cat > final_report/README.txt <<'EOF'
+          RAYMOND V2.8 - V5 COMPLETE RESEARCH PACKAGE
+          =============================================
+
+          This artifact contains the complete V5 research pipeline.
+
+          1. strategy_engine/
+             V5 strategy-family and regime detection.
+
+          2. optimizer/
+             Multi-objective candidate optimization.
+
+          3. walk_forward/
+             Rolling validation with locked configurations
+             tested on later unseen periods.
+
+          4. robustness/
+             Final robustness classification and analysis.
+
+          IMPORTANT
+          ---------
+          These results are research/backtest results only.
+
+          No MT5 orders were placed.
+          No Exness orders were placed.
+          No live broker execution was enabled.
+
+          A high historical return is NOT automatically
+          considered a valid trading edge.
+
+          The most important outputs are:
+
+              robustness/summary.txt
+
+              robustness/v5_robustness_report.json
+
+              robustness/strategy_family_analysis.csv
+
+              robustness/regime_analysis.csv
+
+              walk_forward/v5_walk_forward_windows.csv
+
+              optimizer/
+          EOF
+
+      - name: Display final report
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "RAYMOND V2.8 V5 COMPLETE RESEARCH"
+          echo "============================================================"
+          echo ""
+
+          cat final_report/README.txt
+
+          echo ""
+          echo "============================================================"
+          echo "ROBUSTNESS SUMMARY"
+          echo "============================================================"
+
+          if [ -f \
+            final_report/robustness/summary.txt
+          ]; then
+            cat \
+              final_report/robustness/summary.txt
+          fi
+
+      - name: Upload complete V5 research package
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-v2-8-v5-complete-research
+          path: final_report
+          retention-days: 30
+
+      - name: Add final report to GitHub summary
+        run: |
+          echo "# Raymond V2.8 V5 Complete Research" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f \
+            final_report/robustness/summary.txt
+          ]; then
+
+            echo '```text' \
+              >> "$GITHUB_STEP_SUMMARY"
+
+            cat \
+              final_report/robustness/summary.txt \
+              >> "$GITHUB_STEP_SUMMARY"
+
+            echo '```' \
+              >> "$GITHUB_STEP_SUMMARY"
+
+          else
+
+            echo "Robustness report unavailable." \
+              >> "$GITHUB_STEP_SUMMARY"
+
+          fi
