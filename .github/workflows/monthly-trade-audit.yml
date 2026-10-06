@@ -43,9 +43,9 @@ jobs:
           mkdir -p raw_m5
           mkdir -p normalized_m5
 
-      # ------------------------------------------------------------
+      # ============================================================
       # SAFETY
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Verify research-only environment
         run: |
@@ -60,9 +60,9 @@ jobs:
           echo "- does NOT deploy anything"
           echo "=================================================="
 
-      # ------------------------------------------------------------
+      # ============================================================
       # MONTH CALCULATION
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Calculate audit dates
         id: dates
@@ -75,15 +75,24 @@ jobs:
 
           month = os.environ["AUDIT_MONTH"]
 
-          start = datetime.strptime(month + "-01", "%Y-%m-%d")
+          start = datetime.strptime(
+              month + "-01",
+              "%Y-%m-%d",
+          )
 
           if start.month == 12:
-              next_month = datetime(start.year + 1, 1, 1)
+              next_month = datetime(
+                  start.year + 1,
+                  1,
+                  1,
+              )
           else:
-              next_month = datetime(start.year, start.month + 1, 1)
+              next_month = datetime(
+                  start.year,
+                  start.month + 1,
+                  1,
+              )
 
-          # Dukascopy's -to date is inclusive enough for our purposes,
-          # so use the first day of the following month.
           start_str = start.strftime("%Y-%m-%d")
           end_str = next_month.strftime("%Y-%m-%d")
 
@@ -91,14 +100,17 @@ jobs:
           print(f"M5 start:    {start_str}")
           print(f"M5 end:      {end_str}")
 
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+          ) as f:
               f.write(f"start={start_str}\n")
               f.write(f"end={end_str}\n")
           PY
 
-      # ------------------------------------------------------------
-      # DOWNLOAD CORRECTED MONTHLY AUDIT FROM RENDER
-      # ------------------------------------------------------------
+      # ============================================================
+      # DOWNLOAD MONTHLY AUDIT FROM RENDER
+      # ============================================================
 
       - name: Download monthly audit from Render
         env:
@@ -107,7 +119,10 @@ jobs:
         run: |
           echo "Downloading monthly audit for ${AUDIT_MONTH}..."
 
-          curl --fail --silent --show-error \
+          curl \
+            --fail \
+            --silent \
+            --show-error \
             --retry 5 \
             --retry-delay 5 \
             --max-time 180 \
@@ -118,9 +133,9 @@ jobs:
 
           echo "Audit downloaded successfully."
 
-      # ------------------------------------------------------------
-      # VALIDATE AUDIT SAFETY
-      # ------------------------------------------------------------
+      # ============================================================
+      # VALIDATE MONTHLY AUDIT
+      # ============================================================
 
       - name: Validate monthly audit
         env:
@@ -129,42 +144,64 @@ jobs:
           python - <<'PY'
           import json
           import os
-          import sys
 
           path = "audit_output/monthly_trade_audit.json"
           expected_month = os.environ["AUDIT_MONTH"]
 
-          with open(path, "r", encoding="utf-8") as f:
+          with open(
+              path,
+              "r",
+              encoding="utf-8",
+          ) as f:
               report = json.load(f)
 
           print("Report type:", report.get("report_type"))
           print("Report version:", report.get("version"))
           print("Month:", report.get("month"))
           print("Research only:", report.get("research_only"))
-          print("Live trading changed:", report.get("live_trading_changed"))
-          print("Accounting reconciled:",
-                report.get("accounting", {}).get("accounting_reconciled"))
+          print(
+              "Live trading changed:",
+              report.get("live_trading_changed"),
+          )
+          print(
+              "Accounting reconciled:",
+              report.get("accounting", {}).get(
+                  "accounting_reconciled"
+              ),
+          )
 
-          if report.get("report_type") != "RAYMOND_MONTHLY_TRADE_AUDIT":
-              raise SystemExit("ERROR: Unexpected report type.")
+          if report.get("report_type") != (
+              "RAYMOND_MONTHLY_TRADE_AUDIT"
+          ):
+              raise SystemExit(
+                  "ERROR: Unexpected report type."
+              )
 
           if report.get("month") != expected_month:
               raise SystemExit(
-                  f"ERROR: Report month {report.get('month')} "
+                  f"ERROR: Report month "
+                  f"{report.get('month')} "
                   f"does not match {expected_month}."
               )
 
           if report.get("research_only") is not True:
               raise SystemExit(
-                  "ERROR: Monthly audit is not marked research_only=true."
+                  "ERROR: Monthly audit is not "
+                  "marked research_only=true."
               )
 
           if report.get("live_trading_changed") is not False:
               raise SystemExit(
-                  "ERROR: Audit reports that live trading changed."
+                  "ERROR: Audit reports that "
+                  "live trading changed."
               )
 
-          if report.get("accounting", {}).get("accounting_reconciled") is not True:
+          if (
+              report.get("accounting", {}).get(
+                  "accounting_reconciled"
+              )
+              is not True
+          ):
               raise SystemExit(
                   "ERROR: Accounting is not reconciled."
               )
@@ -172,16 +209,22 @@ jobs:
           trades = report.get("trades", [])
 
           if not isinstance(trades, list):
-              raise SystemExit("ERROR: trades field is not a list.")
+              raise SystemExit(
+                  "ERROR: trades field is not a list."
+              )
 
-          print(f"Trade records available: {len(trades)}")
+          print(
+              f"Trade records available: {len(trades)}"
+          )
 
-          print("Monthly audit safety validation PASSED.")
+          print(
+              "Monthly audit safety validation PASSED."
+          )
           PY
 
-      # ------------------------------------------------------------
+      # ============================================================
       # DOWNLOAD M5 MARKET DATA
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Download XAUUSD M5 market data
         env:
@@ -202,12 +245,20 @@ jobs:
             -bs 5 \
             -bp 1000
 
+          echo ""
           echo "Downloaded M5 files:"
-          find raw_m5 -type f -maxdepth 5 -print
+          find raw_m5 \
+            -type f \
+            -maxdepth 5 \
+            -print
 
-      # ------------------------------------------------------------
-      # NORMALIZE M5 DATA
-      # ------------------------------------------------------------
+      # ============================================================
+      # NORMALIZE M5 MARKET DATA
+      # IMPORTANT:
+      # Dukascopy may return timestamps as seconds,
+      # milliseconds, microseconds, or nanoseconds.
+      # This block detects the correct unit automatically.
+      # ============================================================
 
       - name: Normalize M5 market data
         env:
@@ -216,21 +267,30 @@ jobs:
           python - <<'PY'
           import os
           from pathlib import Path
+
           import pandas as pd
 
           month = os.environ["AUDIT_MONTH"]
 
           raw_dir = Path("raw_m5")
+
           output = Path(
-              f"normalized_m5/xauusd_m5_{month}_normalized.csv"
+              f"normalized_m5/"
+              f"xauusd_m5_{month}_normalized.csv"
           )
 
-          files = sorted(raw_dir.rglob("*.csv"))
+          files = sorted(
+              raw_dir.rglob("*.csv")
+          )
 
           if not files:
-              raise SystemExit("ERROR: No M5 CSV files were downloaded.")
+              raise SystemExit(
+                  "ERROR: No M5 CSV files were downloaded."
+              )
 
-          print(f"Found {len(files)} raw M5 CSV files.")
+          print(
+              f"Found {len(files)} raw M5 CSV files."
+          )
 
           frames = []
 
@@ -238,16 +298,23 @@ jobs:
               try:
                   df = pd.read_csv(file)
               except Exception as exc:
-                  print(f"Skipping unreadable file {file}: {exc}")
+                  print(
+                      f"Skipping unreadable file "
+                      f"{file}: {exc}"
+                  )
                   continue
 
               if df.empty:
                   continue
 
-              # Normalize column names.
               original_columns = list(df.columns)
 
+              # --------------------------------------------------
+              # Normalize column names
+              # --------------------------------------------------
+
               normalized_columns = {}
+
               for column in df.columns:
                   key = (
                       str(column)
@@ -256,11 +323,17 @@ jobs:
                       .replace(" ", "_")
                       .replace("-", "_")
                   )
+
                   normalized_columns[column] = key
 
-              df = df.rename(columns=normalized_columns)
+              df = df.rename(
+                  columns=normalized_columns
+              )
 
-              # Timestamp variants.
+              # --------------------------------------------------
+              # Find timestamp column
+              # --------------------------------------------------
+
               timestamp_column = None
 
               for candidate in (
@@ -277,17 +350,37 @@ jobs:
               if timestamp_column is None:
                   print(
                       f"Skipping {file}: "
-                      f"no timestamp column. Columns={original_columns}"
+                      f"no timestamp column. "
+                      f"Columns={original_columns}"
                   )
                   continue
 
-              # OHLC variants.
+              # --------------------------------------------------
+              # Find OHLC columns
+              # --------------------------------------------------
+
               aliases = {
-                  "open": ["open", "o"],
-                  "high": ["high", "h"],
-                  "low": ["low", "l"],
-                  "close": ["close", "c"],
-                  "volume": ["volume", "vol", "v"],
+                  "open": [
+                      "open",
+                      "o",
+                  ],
+                  "high": [
+                      "high",
+                      "h",
+                  ],
+                  "low": [
+                      "low",
+                      "l",
+                  ],
+                  "close": [
+                      "close",
+                      "c",
+                  ],
+                  "volume": [
+                      "volume",
+                      "vol",
+                      "v",
+                  ],
               }
 
               rename = {}
@@ -298,22 +391,131 @@ jobs:
                           rename[candidate] = target
                           break
 
-              df = df.rename(columns=rename)
+              df = df.rename(
+                  columns=rename
+              )
 
-              required = ["open", "high", "low", "close"]
+              required = [
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              ]
 
-              if any(column not in df.columns for column in required):
+              if any(
+                  column not in df.columns
+                  for column in required
+              ):
                   print(
-                      f"Skipping {file}: missing OHLC columns. "
+                      f"Skipping {file}: "
+                      f"missing OHLC columns. "
                       f"Columns={list(df.columns)}"
                   )
                   continue
 
-              df["timestamp"] = pd.to_datetime(
-                  df[timestamp_column],
-                  utc=True,
+              # --------------------------------------------------
+              # ROBUST TIMESTAMP NORMALIZATION
+              #
+              # Detect:
+              #   nanoseconds
+              #   microseconds
+              #   milliseconds
+              #   seconds
+              #
+              # This prevents the previous 1970-date failure.
+              # --------------------------------------------------
+
+              raw_timestamp = df[
+                  timestamp_column
+              ]
+
+              numeric_timestamp = pd.to_numeric(
+                  raw_timestamp,
                   errors="coerce",
               )
+
+              numeric_ratio = (
+                  numeric_timestamp.notna().mean()
+              )
+
+              print(
+                  f"{file}: "
+                  f"numeric timestamp ratio="
+                  f"{numeric_ratio:.3f}"
+              )
+
+              if numeric_ratio >= 0.80:
+                  values = (
+                      numeric_timestamp
+                      .dropna()
+                      .abs()
+                  )
+
+                  if not values.empty:
+                      median_timestamp = float(
+                          values.median()
+                      )
+
+                      if median_timestamp >= 1e17:
+                          timestamp_unit = "ns"
+
+                      elif median_timestamp >= 1e14:
+                          timestamp_unit = "us"
+
+                      elif median_timestamp >= 1e11:
+                          timestamp_unit = "ms"
+
+                      elif median_timestamp >= 1e9:
+                          timestamp_unit = "s"
+
+                      else:
+                          timestamp_unit = None
+
+                      print(
+                          f"{file}: "
+                          f"detected timestamp unit="
+                          f"{timestamp_unit}"
+                      )
+
+                      if timestamp_unit:
+                          df["timestamp"] = (
+                              pd.to_datetime(
+                                  numeric_timestamp,
+                                  unit=timestamp_unit,
+                                  utc=True,
+                                  errors="coerce",
+                              )
+                          )
+                      else:
+                          df["timestamp"] = (
+                              pd.to_datetime(
+                                  raw_timestamp,
+                                  utc=True,
+                                  errors="coerce",
+                              )
+                          )
+
+                  else:
+                      df["timestamp"] = (
+                          pd.to_datetime(
+                              raw_timestamp,
+                              utc=True,
+                              errors="coerce",
+                          )
+                      )
+
+              else:
+                  df["timestamp"] = (
+                      pd.to_datetime(
+                          raw_timestamp,
+                          utc=True,
+                          errors="coerce",
+                      )
+                  )
+
+              # --------------------------------------------------
+              # Convert OHLCV
+              # --------------------------------------------------
 
               for column in required:
                   df[column] = pd.to_numeric(
@@ -328,6 +530,10 @@ jobs:
                   df["volume"],
                   errors="coerce",
               ).fillna(0.0)
+
+              # --------------------------------------------------
+              # Select canonical columns
+              # --------------------------------------------------
 
               df = df[
                   [
@@ -355,48 +561,173 @@ jobs:
 
           if not frames:
               raise SystemExit(
-                  "ERROR: No valid M5 OHLC data could be normalized."
+                  "ERROR: No valid M5 OHLC data "
+                  "could be normalized."
               )
 
-          combined = pd.concat(frames, ignore_index=True)
+          combined = pd.concat(
+              frames,
+              ignore_index=True,
+          )
 
-          combined = combined.sort_values("timestamp")
+          combined = combined.sort_values(
+              "timestamp"
+          )
 
           combined = combined.drop_duplicates(
               subset=["timestamp"],
               keep="last",
           )
 
-          combined = combined.reset_index(drop=True)
+          combined = combined.reset_index(
+              drop=True
+          )
 
           if combined.empty:
-              raise SystemExit("ERROR: Normalized M5 dataset is empty.")
+              raise SystemExit(
+                  "ERROR: Normalized M5 dataset "
+                  "is empty."
+              )
 
-          # Basic OHLC sanity checks.
-          if (combined["high"] < combined["low"]).any():
+          # --------------------------------------------------
+          # TIMESTAMP SAFETY CHECKS
+          # --------------------------------------------------
+
+          minimum_timestamp = (
+              combined["timestamp"].min()
+          )
+
+          maximum_timestamp = (
+              combined["timestamp"].max()
+          )
+
+          print("")
+          print(
+              "Normalized timestamp range:"
+          )
+          print(
+              f"Minimum: {minimum_timestamp}"
+          )
+          print(
+              f"Maximum: {maximum_timestamp}"
+          )
+
+          if minimum_timestamp.year < 2020:
+              raise SystemExit(
+                  "ERROR: M5 timestamps are invalid: "
+                  f"{minimum_timestamp}"
+              )
+
+          if maximum_timestamp.year > 2100:
+              raise SystemExit(
+                  "ERROR: M5 timestamps are invalid: "
+                  f"{maximum_timestamp}"
+              )
+
+          # --------------------------------------------------
+          # MONTH SANITY CHECK
+          # --------------------------------------------------
+
+          expected_year = int(
+              month[:4]
+          )
+
+          expected_month = int(
+              month[5:7]
+          )
+
+          timestamp_years = (
+              combined["timestamp"]
+              .dt.year
+              .unique()
+              .tolist()
+          )
+
+          timestamp_months = (
+              combined["timestamp"]
+              .dt.to_period("M")
+              .astype(str)
+              .unique()
+              .tolist()
+          )
+
+          print(
+              f"Expected year: {expected_year}"
+          )
+
+          print(
+              f"Timestamp years: {timestamp_years}"
+          )
+
+          print(
+              f"Timestamp months: "
+              f"{timestamp_months}"
+          )
+
+          if expected_year not in timestamp_years:
+              raise SystemExit(
+                  "ERROR: Normalized M5 data does "
+                  "not contain the requested audit year."
+              )
+
+          expected_month_string = (
+              f"{expected_year:04d}-"
+              f"{expected_month:02d}"
+          )
+
+          if expected_month_string not in timestamp_months:
+              raise SystemExit(
+                  "ERROR: Normalized M5 data does "
+                  "not contain the requested audit month."
+              )
+
+          # --------------------------------------------------
+          # OHLC SANITY CHECKS
+          # --------------------------------------------------
+
+          if (
+              combined["high"]
+              < combined["low"]
+          ).any():
               raise SystemExit(
                   "ERROR: M5 data contains high < low."
               )
 
-          if (combined["high"] < combined["open"]).any():
+          if (
+              combined["high"]
+              < combined["open"]
+          ).any():
               raise SystemExit(
                   "ERROR: M5 data contains high < open."
               )
 
-          if (combined["high"] < combined["close"]).any():
+          if (
+              combined["high"]
+              < combined["close"]
+          ).any():
               raise SystemExit(
                   "ERROR: M5 data contains high < close."
               )
 
-          if (combined["low"] > combined["open"]).any():
+          if (
+              combined["low"]
+              > combined["open"]
+          ).any():
               raise SystemExit(
                   "ERROR: M5 data contains low > open."
               )
 
-          if (combined["low"] > combined["close"]).any():
+          if (
+              combined["low"]
+              > combined["close"]
+          ).any():
               raise SystemExit(
                   "ERROR: M5 data contains low > close."
               )
+
+          # --------------------------------------------------
+          # WRITE NORMALIZED DATA
+          # --------------------------------------------------
 
           output.parent.mkdir(
               parents=True,
@@ -408,16 +739,34 @@ jobs:
               index=False,
           )
 
-          print("Normalized M5 dataset:")
-          print(f"Rows: {len(combined)}")
-          print(f"Start: {combined['timestamp'].min()}")
-          print(f"End:   {combined['timestamp'].max()}")
-          print(f"Output: {output}")
+          print("")
+          print(
+              "=================================================="
+          )
+          print("NORMALIZED M5 DATASET")
+          print(
+              "=================================================="
+          )
+          print(
+              f"Rows:   {len(combined)}"
+          )
+          print(
+              f"Start:  {combined['timestamp'].min()}"
+          )
+          print(
+              f"End:    {combined['timestamp'].max()}"
+          )
+          print(
+              f"Output: {output}"
+          )
+          print(
+              "=================================================="
+          )
           PY
 
-      # ------------------------------------------------------------
+      # ============================================================
       # RUN PRICE-PATH FORENSIC ANALYSIS
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Run monthly trade forensic analysis
         env:
@@ -432,9 +781,9 @@ jobs:
             --m5 "${M5_FILE}" \
             --output "forensic_output/${AUDIT_MONTH}"
 
-      # ------------------------------------------------------------
+      # ============================================================
       # VALIDATE FORENSIC REPORT
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Validate forensic report
         env:
@@ -451,25 +800,61 @@ jobs:
               "monthly_trade_forensic.json"
           )
 
-          with open(path, "r", encoding="utf-8") as f:
+          with open(
+              path,
+              "r",
+              encoding="utf-8",
+          ) as f:
               report = json.load(f)
 
-          print("Forensic report type:", report.get("report_type"))
-          print("Version:", report.get("version"))
-          print("Month:", report.get("month"))
-          print("Research only:", report.get("research_only"))
-          print("Live trading changed:",
-                report.get("live_trading_changed"))
-          print("Strategy modified:",
-                report.get("strategy_modified"))
-          print("Positions modified:",
-                report.get("positions_modified"))
-          print("Orders created:",
-                report.get("orders_created"))
-          print("Candidates promoted:",
-                report.get("candidates_promoted"))
+          print(
+              "Forensic report type:",
+              report.get("report_type"),
+          )
 
-          if report.get("report_type") != "RAYMOND_MONTHLY_TRADE_FORENSIC":
+          print(
+              "Version:",
+              report.get("version"),
+          )
+
+          print(
+              "Month:",
+              report.get("month"),
+          )
+
+          print(
+              "Research only:",
+              report.get("research_only"),
+          )
+
+          print(
+              "Live trading changed:",
+              report.get("live_trading_changed"),
+          )
+
+          print(
+              "Strategy modified:",
+              report.get("strategy_modified"),
+          )
+
+          print(
+              "Positions modified:",
+              report.get("positions_modified"),
+          )
+
+          print(
+              "Orders created:",
+              report.get("orders_created"),
+          )
+
+          print(
+              "Candidates promoted:",
+              report.get("candidates_promoted"),
+          )
+
+          if report.get("report_type") != (
+              "RAYMOND_MONTHLY_TRADE_FORENSIC"
+          ):
               raise SystemExit(
                   "ERROR: Unexpected forensic report type."
               )
@@ -496,12 +881,15 @@ jobs:
                       f"expected {expected!r}"
                   )
 
-          print("Forensic safety validation PASSED.")
+          print("")
+          print(
+              "Forensic safety validation PASSED."
+          )
           PY
 
-      # ------------------------------------------------------------
-      # PRINT SUMMARY
-      # ------------------------------------------------------------
+      # ============================================================
+      # PRINT RESEARCH SUMMARY
+      # ============================================================
 
       - name: Print research summary
         env:
@@ -513,97 +901,187 @@ jobs:
 
           month = os.environ["AUDIT_MONTH"]
 
-          audit_path = "audit_output/monthly_trade_audit.json"
+          audit_path = (
+              "audit_output/monthly_trade_audit.json"
+          )
 
           forensic_path = (
               f"forensic_output/{month}/"
               "monthly_trade_forensic.json"
           )
 
-          with open(audit_path, "r", encoding="utf-8") as f:
+          with open(
+              audit_path,
+              "r",
+              encoding="utf-8",
+          ) as f:
               audit = json.load(f)
 
-          with open(forensic_path, "r", encoding="utf-8") as f:
+          with open(
+              forensic_path,
+              "r",
+              encoding="utf-8",
+          ) as f:
               forensic = json.load(f)
 
-          performance = audit.get("performance", {})
-          summary = forensic.get("summary", {})
+          performance = audit.get(
+              "performance",
+              {},
+          )
+
+          summary = forensic.get(
+              "summary",
+              {},
+          )
 
           print("")
-          print("==================================================")
-          print("RAYMOND V2.8 MONTHLY RESEARCH AUDIT")
-          print("==================================================")
-          print(f"Month:              {month}")
-          print(f"Trades:             {performance.get('total_trades')}")
-          print(f"Wins:               {performance.get('wins')}")
-          print(f"Losses:             {performance.get('losses')}")
-          print(f"Win rate:           {performance.get('win_rate')}")
-          print(f"Total P/L:          {performance.get('total_pnl')}")
-          print(f"Profit factor:      {performance.get('profit_factor')}")
+          print(
+              "=================================================="
+          )
+          print(
+              "RAYMOND V2.8 MONTHLY RESEARCH AUDIT"
+          )
+          print(
+              "=================================================="
+          )
+
+          print(
+              f"Month:              {month}"
+          )
+
+          print(
+              f"Trades:             "
+              f"{performance.get('total_trades')}"
+          )
+
+          print(
+              f"Wins:               "
+              f"{performance.get('wins')}"
+          )
+
+          print(
+              f"Losses:             "
+              f"{performance.get('losses')}"
+          )
+
+          print(
+              f"Win rate:           "
+              f"{performance.get('win_rate')}"
+          )
+
+          print(
+              f"Total P/L:          "
+              f"{performance.get('total_pnl')}"
+          )
+
+          print(
+              f"Profit factor:      "
+              f"{performance.get('profit_factor')}"
+          )
+
           print("")
-          print("PRICE-PATH FORENSICS")
-          print(f"Losses:             {summary.get('loss_count')}")
+          print(
+              "PRICE-PATH FORENSICS"
+          )
+
+          print(
+              f"Losses:             "
+              f"{summary.get('loss_count')}"
+          )
+
           print(
               "Favorable-first:    "
               f"{summary.get('losses_favorable_first')}"
           )
+
           print(
               "MFE >= 0.25R:       "
               f"{summary.get('losses_mfe_ge_0_25r')}"
           )
+
           print(
               "MFE >= 0.50R:       "
               f"{summary.get('losses_mfe_ge_0_5r')}"
           )
+
           print(
               "MFE >= 0.75R:       "
               f"{summary.get('losses_mfe_ge_0_75r')}"
           )
+
           print(
               "MFE >= 1.00R:       "
               f"{summary.get('losses_mfe_ge_1r')}"
           )
+
           print(
               "MFE >= 1.50R:       "
               f"{summary.get('losses_mfe_ge_1_5r')}"
           )
+
           print(
               "MFE >= 2.00R:       "
               f"{summary.get('losses_mfe_ge_2r')}"
           )
+
           print(
-              "Reached TP then lost:"
-              f" {summary.get('losses_reached_tp_then_lost')}"
+              "Reached TP then lost: "
+              f"{summary.get('losses_reached_tp_then_lost')}"
           )
+
           print("")
           print("SAFETY")
-          print("Research only:       ", forensic.get("research_only"))
+
+          print(
+              "Research only:       ",
+              forensic.get(
+                  "research_only"
+              ),
+          )
+
           print(
               "Live changed:        ",
-              forensic.get("live_trading_changed"),
+              forensic.get(
+                  "live_trading_changed"
+              ),
           )
+
           print(
               "Strategy modified:  ",
-              forensic.get("strategy_modified"),
+              forensic.get(
+                  "strategy_modified"
+              ),
           )
+
           print(
               "Positions modified: ",
-              forensic.get("positions_modified"),
+              forensic.get(
+                  "positions_modified"
+              ),
           )
+
           print(
               "Orders created:      ",
-              forensic.get("orders_created"),
+              forensic.get(
+                  "orders_created"
+              ),
           )
+
           print(
               "Candidates promoted: ",
-              forensic.get("candidates_promoted"),
+              forensic.get(
+                  "candidates_promoted"
+              ),
           )
-          print("==================================================")
+
+          print(
+              "=================================================="
+          )
           PY
 
-      # ------------------------------------------------------------
+      # ============================================================
       # UPLOAD COMPLETE RESEARCH ARTIFACT
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Upload monthly audit and forensic artifacts
         uses: actions/upload-artifact@v4
