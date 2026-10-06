@@ -31,8 +31,18 @@ router = APIRouter(
 def monthly_audit(
     month: str | None = Query(
         None,
-        description="Calendar month in YYYY-MM format. Defaults to current UTC month.",
+        description=(
+            "Calendar month in YYYY-MM format. "
+            "Defaults to current UTC month."
+        ),
         pattern=r"^\d{4}-\d{2}$",
+    ),
+    include_trades: bool = Query(
+        False,
+        description=(
+            "Research-only option to include individual "
+            "trade records for price-path forensics."
+        ),
     ),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -44,6 +54,14 @@ def monthly_audit(
     - no broker/MT5 calls
     - no strategy changes
     - no candidate promotion
+
+    Individual trade records are hidden by default.
+
+    They are returned only when explicitly requested with:
+
+        include_trades=true
+
+    This option exists specifically for research-only forensic analysis.
     """
 
     start, end, label = month_bounds(month)
@@ -64,9 +82,15 @@ def monthly_audit(
         symbol=DEFAULT_SYMBOL,
     )
 
-    # Do not expose individual trade records through this endpoint.
-    report.pop("trades", None)
-    report.pop("loss_trade_ids", None)
+    # Individual trade records remain hidden by default.
+    #
+    # The forensic GitHub Actions workflow explicitly requests
+    # include_trades=true so it can reconstruct price paths.
+    #
+    # This remains read-only and research-only.
+    if not include_trades:
+        report.pop("trades", None)
+        report.pop("loss_trade_ids", None)
 
     return {
         **report,
