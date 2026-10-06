@@ -34,8 +34,7 @@ jobs:
   prepare-data:
     name: Prepare XAUUSD H1 Data
     runs-on: ubuntu-latest
-
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     outputs:
       dataset: ${{ steps.prepare.outputs.dataset }}
@@ -57,7 +56,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          set -e
+          set -euo pipefail
 
           python -m pip install --upgrade pip
           pip install pandas numpy
@@ -66,7 +65,7 @@ jobs:
 
       - name: Show dukascopy-node version
         run: |
-          set -e
+          set -euo pipefail
 
           echo "============================================================"
           echo "DUKASCOPY-NODE VERSION"
@@ -78,30 +77,29 @@ jobs:
 
       - name: Create directories
         run: |
-          set -e
+          set -euo pipefail
 
           mkdir -p data/historical
           mkdir -p data/historical/chunks
           mkdir -p backtest_results/weekly_growth_v5
 
-      # --------------------------------------------------------------------
-      # IMPORTANT
+      # ======================================================================
+      # MONTHLY XAUUSD DOWNLOAD
       #
-      # The previous workflow requested nearly 3 years in ONE request.
-      # Dukascopy returned HTTP 429 rate limiting.
+      # IMPORTANT:
+      # dukascopy-node automatically appends ".csv" to the filename supplied
+      # through -fn.
       #
-      # This version downloads one calendar month at a time.
+      # Therefore:
       #
-      # Each request:
-      #   - uses the correct -dir option
-      #   - uses a unique filename
-      #   - uses a small batch size
-      #   - pauses between batches
-      #   - retries failed downloads
-      #   - retries empty responses
+      #   -fn xauusd_h1_2024-01-01_2024-02-01
       #
-      # There is also a pause between monthly requests.
-      # --------------------------------------------------------------------
+      # produces:
+      #
+      #   xauusd_h1_2024-01-01_2024-02-01.csv
+      #
+      # We deliberately DO NOT include ".csv" in -fn.
+      # ======================================================================
 
       - name: Download XAUUSD H1 data in monthly chunks
         shell: bash
@@ -117,7 +115,7 @@ jobs:
 
           echo ""
           echo "============================================================"
-          echo "XAUUSD H1 CHUNKED DOWNLOAD"
+          echo "RAYMOND V5 XAUUSD H1 CHUNKED DOWNLOAD"
           echo "============================================================"
           echo "Start: $START_DATE"
           echo "End:   $END_DATE"
@@ -128,8 +126,10 @@ jobs:
           import sys
           import subprocess
           import time
-          from datetime import date, timedelta
+          from datetime import date
+
           from pathlib import Path
+
 
           start_text = sys.argv[1]
           end_text = sys.argv[2]
@@ -142,6 +142,7 @@ jobs:
                   "End date must be after start date."
               )
 
+
           chunk_dir = Path(
               "data/historical/chunks"
           )
@@ -150,6 +151,7 @@ jobs:
               parents=True,
               exist_ok=True,
           )
+
 
           def next_month(d):
               if d.month == 12:
@@ -165,6 +167,7 @@ jobs:
                   1,
               )
 
+
           current = date(
               start.year,
               start.month,
@@ -172,6 +175,7 @@ jobs:
           )
 
           chunk_number = 0
+
 
           while current < end:
 
@@ -190,21 +194,32 @@ jobs:
               if chunk_to <= chunk_from:
                   break
 
+
               chunk_number += 1
 
               from_text = chunk_from.isoformat()
               to_text = chunk_to.isoformat()
 
-              filename = (
+              # IMPORTANT:
+              # No ".csv" here.
+              #
+              # dukascopy-node appends ".csv" itself.
+              filename_base = (
                   "xauusd_h1_"
                   f"{from_text}_"
-                  f"{to_text}.csv"
+                  f"{to_text}"
               )
 
               output_path = (
                   chunk_dir /
-                  filename
+                  f"{filename_base}.csv"
               )
+
+              malformed_path = (
+                  chunk_dir /
+                  f"{filename_base}.csv.csv"
+              )
+
 
               print("")
               print("=" * 60)
@@ -219,19 +234,50 @@ jobs:
                   f"To:   {to_text}"
               )
               print(
-                  f"File: {output_path}"
+                  f"Expected file: {output_path}"
               )
               print("=" * 60)
 
-              # If a valid chunk already exists, do not download it again.
-              if output_path.exists() and output_path.stat().st_size > 100:
+
+              # --------------------------------------------------------------
+              # Clean up the malformed filename generated by the previous
+              # workflow version.
+              # --------------------------------------------------------------
+
+              if malformed_path.exists():
+
                   print(
-                      "Existing non-empty chunk found. "
+                      "Removing malformed previous file:"
+                  )
+
+                  print(
+                      f"  {malformed_path}"
+                  )
+
+                  malformed_path.unlink()
+
+
+              # --------------------------------------------------------------
+              # If a valid chunk already exists, do not request it again.
+              # --------------------------------------------------------------
+
+              if (
+                  output_path.exists()
+                  and output_path.stat().st_size > 100
+              ):
+
+                  print(
+                      "Existing valid chunk found."
+                  )
+
+                  print(
                       "Skipping download."
                   )
 
                   current = month_end
+
                   continue
+
 
               command = [
                   "dukascopy-node",
@@ -254,10 +300,12 @@ jobs:
                   "-dir",
                   str(chunk_dir),
 
+                  # IMPORTANT:
+                  # filename WITHOUT .csv
                   "-fn",
-                  filename,
+                  filename_base,
 
-                  # Keep the internal request batch small.
+                  # Keep request batches small.
                   "-bs",
                   "2",
 
@@ -265,56 +313,121 @@ jobs:
                   "-bp",
                   "3000",
 
-                  # Retry failed artifacts.
+                  # Dukascopy internal retries.
                   "-r",
                   "8",
 
-                  # Five seconds between retries.
+                  # Pause between internal retries.
                   "-rp",
                   "5000",
 
-                  # Retry successful-but-empty responses.
+                  # Retry empty responses.
                   "-re",
               ]
 
+
+              print("")
               print(
-                  "Running:",
-                  " ".join(command),
+                  "Running:"
               )
+
+              print(
+                  " ".join(command)
+              )
+
 
               successful = False
 
-              # Additional outer retry protection.
-              # This is intentionally slower to avoid repeatedly
-              # hitting the remote server after a 429.
+
+              # --------------------------------------------------------------
+              # Outer retry protection.
+              #
+              # We deliberately wait progressively longer so a temporary
+              # remote-server problem does not cause immediate repeated
+              # requests.
+              # --------------------------------------------------------------
+
               for attempt in range(1, 4):
 
                   print("")
                   print(
-                      f"Outer attempt "
-                      f"{attempt}/3"
+                      f"Outer attempt {attempt}/3"
                   )
+
 
                   result = subprocess.run(
                       command,
                       check=False,
                   )
 
+
+                  # ----------------------------------------------------------
+                  # Accept ONLY the correctly named file.
+                  # ----------------------------------------------------------
+
                   if (
                       result.returncode == 0
                       and output_path.exists()
                       and output_path.stat().st_size > 100
                   ):
+
+                      print("")
+                      print(
+                          "DOWNLOAD SUCCESS"
+                      )
+
+                      print(
+                          f"Valid file: "
+                          f"{output_path}"
+                      )
+
+                      print(
+                          f"Size: "
+                          f"{output_path.stat().st_size:,} bytes"
+                      )
+
                       successful = True
+
                       break
 
+
+                  print("")
                   print(
                       "Chunk download did not produce "
-                      "a valid file."
+                      "the expected valid file."
                   )
 
+
+                  # If dukascopy somehow generated .csv.csv,
+                  # rename it to the correct filename instead of
+                  # downloading the same month again.
+                  if (
+                      not output_path.exists()
+                      and malformed_path.exists()
+                      and malformed_path.stat().st_size > 100
+                  ):
+
+                      print("")
+                      print(
+                          "Detected legacy .csv.csv output."
+                      )
+
+                      print(
+                          "Renaming it to the correct .csv filename."
+                      )
+
+                      malformed_path.rename(
+                          output_path
+                      )
+
+                      successful = True
+
+                      break
+
+
                   if attempt < 3:
-                      wait_seconds = 30 * attempt
+
+                      wait_seconds = 60 * attempt
 
                       print(
                           f"Waiting "
@@ -326,27 +439,41 @@ jobs:
                           wait_seconds
                       )
 
+
               if not successful:
+
                   raise SystemExit(
                       "Failed to download "
                       f"XAUUSD chunk "
                       f"{from_text} -> {to_text}"
                   )
 
+
+              print("")
               print(
                   f"Chunk {chunk_number} "
-                  "downloaded successfully."
+                  "completed successfully."
               )
 
-              # Deliberate pause between monthly requests.
+
+              # --------------------------------------------------------------
+              # Pause between monthly requests.
+              # --------------------------------------------------------------
+
               print(
-                  "Waiting 15 seconds "
-                  "before next chunk..."
+                  "Waiting 20 seconds "
+                  "before next monthly request..."
               )
 
-              time.sleep(15)
+              time.sleep(20)
+
 
               current = month_end
+
+
+          # ==================================================================
+          # DOWNLOAD COMPLETE
+          # ==================================================================
 
           print("")
           print("=" * 60)
@@ -356,25 +483,54 @@ jobs:
           print("=" * 60)
           print("")
 
+
           files = sorted(
               chunk_dir.glob("*.csv")
           )
 
+
+          # Never allow malformed duplicate-extension files into
+          # the combination stage.
+
+          malformed_files = sorted(
+              chunk_dir.glob("*.csv.csv")
+          )
+
+
+          if malformed_files:
+
+              print(
+                  "WARNING: malformed .csv.csv files found:"
+              )
+
+              for path in malformed_files:
+
+                  print(
+                      f"  {path}"
+                  )
+
+
           if not files:
+
               raise SystemExit(
                   "No monthly XAUUSD CSV files found."
               )
 
+
           total_bytes = 0
 
+
           for path in files:
+
               size = path.stat().st_size
+
               total_bytes += size
 
               print(
                   f"{path.name}: "
                   f"{size:,} bytes"
               )
+
 
           print("")
           print(
@@ -385,12 +541,11 @@ jobs:
               f"Total size: "
               f"{total_bytes:,} bytes"
           )
-          PY
 
       - name: Inspect downloaded chunks
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo ""
           echo "============================================================"
@@ -404,63 +559,91 @@ jobs:
             -print \
             -exec ls -lh {} \;
 
-          COUNT="$(find data/historical/chunks \
-            -maxdepth 1 \
-            -type f \
-            -name "*.csv" | wc -l)"
-
           echo ""
-          echo "Chunk count: $COUNT"
 
-          if [ "$COUNT" -lt 1 ]; then
-            echo "No chunk files were downloaded."
+          MALFORMED_COUNT="$(
+            find data/historical/chunks \
+              -maxdepth 1 \
+              -type f \
+              -name "*.csv.csv" \
+              | wc -l
+          )"
+
+          echo "Malformed .csv.csv files: $MALFORMED_COUNT"
+
+          if [ "$MALFORMED_COUNT" -gt 0 ]; then
+            echo "ERROR: malformed duplicate-extension files remain."
             exit 1
           fi
 
-      # --------------------------------------------------------------------
-      # Combine all monthly chunks.
-      #
-      # The output is the SAME normalized filename expected by the
-      # existing V5 strategy/optimizer/walk-forward scripts.
-      # --------------------------------------------------------------------
+          COUNT="$(
+            find data/historical/chunks \
+              -maxdepth 1 \
+              -type f \
+              -name "*.csv" \
+              | wc -l
+          )"
+
+          echo "Valid chunk count: $COUNT"
+
+          if [ "$COUNT" -lt 1 ]; then
+            echo "No valid chunk files were downloaded."
+            exit 1
+          fi
+
+      # ======================================================================
+      # COMBINE AND NORMALIZE
+      # ======================================================================
 
       - name: Normalize and combine XAUUSD H1 chunks
         id: prepare
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           python - <<'PY'
           from pathlib import Path
+
           import pandas as pd
+
 
           chunk_dir = Path(
               "data/historical/chunks"
           )
+
 
           output = Path(
               "data/historical/"
               "xauusd_h1_2024_2026_normalized.csv"
           )
 
+
           files = sorted(
               chunk_dir.glob("*.csv")
           )
 
+
           if not files:
+
               raise SystemExit(
                   "No XAUUSD chunk CSV files found."
               )
 
+
           print("")
-          print("============================================================")
-          print("COMBINING XAUUSD H1 CHUNKS")
-          print("============================================================")
+          print("=" * 60)
+          print(
+              "COMBINING XAUUSD H1 CHUNKS"
+          )
+          print("=" * 60)
+
           print(
               f"Chunk files: {len(files)}"
           )
 
+
           frames = []
+
 
           for path in files:
 
@@ -468,37 +651,52 @@ jobs:
                   f"Reading: {path}"
               )
 
+
               try:
+
                   frame = pd.read_csv(
                       path
                   )
+
               except Exception as exc:
+
                   raise SystemExit(
                       f"Could not read {path}: "
                       f"{exc}"
                   )
 
+
               if frame.empty:
+
                   print(
                       f"WARNING: {path} is empty."
                   )
+
                   continue
+
 
               print(
                   f"  Rows: {len(frame):,}"
               )
 
-              frames.append(frame)
+
+              frames.append(
+                  frame
+              )
+
 
           if not frames:
+
               raise SystemExit(
                   "All downloaded chunks were empty."
               )
+
 
           df = pd.concat(
               frames,
               ignore_index=True,
           )
+
 
           print("")
           print(
@@ -506,11 +704,13 @@ jobs:
               f"{len(df):,}"
           )
 
-          # ---------------------------------------------------------------
-          # Normalize column names.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # NORMALIZE COLUMN NAMES
+          # ==================================================================
 
           rename = {}
+
 
           for column in df.columns:
 
@@ -520,48 +720,62 @@ jobs:
                   .lower()
               )
 
+
               if key in {
                   "time",
                   "timestamp",
                   "date",
                   "datetime",
               }:
+
                   rename[column] = "timestamp"
+
 
               elif key in {
                   "open",
                   "o",
               }:
+
                   rename[column] = "open"
+
 
               elif key in {
                   "high",
                   "h",
               }:
+
                   rename[column] = "high"
+
 
               elif key in {
                   "low",
                   "l",
               }:
+
                   rename[column] = "low"
+
 
               elif key in {
                   "close",
                   "c",
               }:
+
                   rename[column] = "close"
+
 
               elif key in {
                   "volume",
                   "vol",
                   "v",
               }:
+
                   rename[column] = "volume"
+
 
           df = df.rename(
               columns=rename
           )
+
 
           required = [
               "timestamp",
@@ -571,33 +785,36 @@ jobs:
               "close",
           ]
 
+
           missing = [
               column
               for column in required
               if column not in df.columns
           ]
 
+
           if missing:
+
               raise SystemExit(
                   "Missing required columns: "
                   f"{missing}"
               )
 
-          # ---------------------------------------------------------------
-          # Timestamp conversion.
-          #
-          # Dukascopy CSV output normally uses Unix milliseconds.
-          # We also support textual timestamps defensively.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # TIMESTAMP
+          # ==================================================================
 
           timestamp_numeric = pd.to_numeric(
               df["timestamp"],
               errors="coerce",
           )
 
+
           numeric_ratio = (
               timestamp_numeric.notna().mean()
           )
+
 
           if numeric_ratio > 0.95:
 
@@ -616,9 +833,10 @@ jobs:
                   errors="coerce",
               )
 
-          # ---------------------------------------------------------------
-          # Numeric OHLC conversion.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # NUMERIC OHLC
+          # ==================================================================
 
           for column in [
               "open",
@@ -632,6 +850,7 @@ jobs:
                   errors="coerce",
               )
 
+
           if "volume" not in df.columns:
 
               df["volume"] = 0.0
@@ -643,72 +862,87 @@ jobs:
                   errors="coerce",
               ).fillna(0.0)
 
-          # ---------------------------------------------------------------
-          # Remove invalid rows.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # REMOVE INVALID ROWS
+          # ==================================================================
 
           before_drop = len(df)
+
 
           df = df.dropna(
               subset=required
           )
+
 
           removed = (
               before_drop -
               len(df)
           )
 
+
           print(
               f"Invalid rows removed: "
               f"{removed:,}"
           )
 
-          # ---------------------------------------------------------------
-          # Sort and deduplicate.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # SORT AND DEDUPLICATE
+          # ==================================================================
 
           df = df.sort_values(
               "timestamp"
           )
 
+
           before_duplicates = len(df)
+
 
           df = df.drop_duplicates(
               subset=["timestamp"],
               keep="first",
           )
 
+
           duplicate_count = (
               before_duplicates -
               len(df)
           )
+
 
           print(
               f"Duplicate candles removed: "
               f"{duplicate_count:,}"
           )
 
+
           df = df.reset_index(
               drop=True
           )
 
-          # ---------------------------------------------------------------
-          # OHLC integrity checks.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # OHLC INTEGRITY
+          # ==================================================================
 
           invalid_high_low = (
-              df["high"] < df["low"]
+              df["high"] <
+              df["low"]
           )
+
 
           invalid_open = (
               (df["open"] > df["high"]) |
               (df["open"] < df["low"])
           )
 
+
           invalid_close = (
               (df["close"] > df["high"]) |
               (df["close"] < df["low"])
           )
+
 
           if invalid_high_low.any():
 
@@ -720,6 +954,7 @@ jobs:
                   f"Found {count} candles "
                   "where High < Low."
               )
+
 
           if invalid_open.any():
 
@@ -733,6 +968,7 @@ jobs:
                   "High/Low."
               )
 
+
           if invalid_close.any():
 
               count = int(
@@ -745,16 +981,17 @@ jobs:
                   "High/Low."
               )
 
-          # ---------------------------------------------------------------
-          # Timestamp integrity.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # TIMESTAMP INTEGRITY
+          # ==================================================================
 
           if df["timestamp"].isna().any():
 
               raise SystemExit(
-                  "Invalid timestamps remain "
-                  "after normalization."
+                  "Invalid timestamps remain."
               )
+
 
           if not df[
               "timestamp"
@@ -765,18 +1002,19 @@ jobs:
                   "monotonic increasing."
               )
 
+
           if df[
               "timestamp"
           ].duplicated().any():
 
               raise SystemExit(
-                  "Duplicate timestamps remain "
-                  "after deduplication."
+                  "Duplicate timestamps remain."
               )
 
-          # ---------------------------------------------------------------
-          # Positive prices.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # POSITIVE PRICES
+          # ==================================================================
 
           for column in [
               "open",
@@ -794,35 +1032,56 @@ jobs:
                       "values detected."
                   )
 
-          # ---------------------------------------------------------------
-          # Save normalized dataset.
-          # ---------------------------------------------------------------
+
+          # ==================================================================
+          # SAVE
+          # ==================================================================
 
           df.to_csv(
               output,
               index=False,
           )
 
+
           print("")
-          print("============================================================")
-          print("NORMALIZED XAUUSD H1 DATASET")
-          print("============================================================")
+          print("=" * 60)
+          print(
+              "NORMALIZED XAUUSD H1 DATASET"
+          )
+          print("=" * 60)
+
           print(
               f"Rows:       {len(df):,}"
           )
+
           print(
-              f"Start:      {df['timestamp'].min()}"
+              f"Start:      "
+              f"{df['timestamp'].min()}"
           )
+
           print(
-              f"End:        {df['timestamp'].max()}"
+              f"End:        "
+              f"{df['timestamp'].max()}"
           )
+
           print(
               f"Output:     {output}"
           )
-          print("OHLC:       VALID")
-          print("Timestamps: VALID")
-          print("Duplicates: NONE")
-          print("============================================================")
+
+          print(
+              "OHLC:       VALID"
+          )
+
+          print(
+              "Timestamps: VALID"
+          )
+
+          print(
+              "Duplicates: NONE"
+          )
+
+          print("=" * 60)
+
 
           if len(df) < 5000:
 
@@ -831,16 +1090,20 @@ jobs:
                   "than 5,000 H1 candles."
               )
 
+
           print("")
           print("First 5 candles:")
+
           print(
               df.head().to_string(
                   index=False
               )
           )
 
+
           print("")
           print("Last 5 candles:")
+
           print(
               df.tail().to_string(
                   index=False
@@ -849,25 +1112,29 @@ jobs:
 
           PY
 
-          echo "dataset=data/historical/xauusd_h1_2024_2026_normalized.csv" \
+          echo \
+            "dataset=data/historical/xauusd_h1_2024_2026_normalized.csv" \
             >> "$GITHUB_OUTPUT"
 
       - name: Validate final market dataset
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           python - <<'PY'
           import pandas as pd
+
 
           path = (
               "data/historical/"
               "xauusd_h1_2024_2026_normalized.csv"
           )
 
+
           df = pd.read_csv(
               path
           )
+
 
           required = [
               "timestamp",
@@ -877,22 +1144,27 @@ jobs:
               "close",
           ]
 
+
           missing = [
               column
               for column in required
               if column not in df.columns
           ]
 
+
           if missing:
+
               raise SystemExit(
                   f"Missing columns: {missing}"
               )
+
 
           df["timestamp"] = pd.to_datetime(
               df["timestamp"],
               utc=True,
               errors="coerce",
           )
+
 
           if df[
               "timestamp"
@@ -901,6 +1173,7 @@ jobs:
               raise SystemExit(
                   "Invalid timestamps detected."
               )
+
 
           if not df[
               "timestamp"
@@ -911,6 +1184,7 @@ jobs:
                   "monotonic increasing."
               )
 
+
           if df[
               "timestamp"
           ].duplicated().any():
@@ -918,6 +1192,7 @@ jobs:
               raise SystemExit(
                   "Duplicate timestamps detected."
               )
+
 
           for column in [
               "open",
@@ -931,19 +1206,23 @@ jobs:
                   errors="coerce",
               )
 
+
               if df[column].isna().any():
 
                   raise SystemExit(
                       f"Invalid {column} values."
                   )
 
+
               if (
                   df[column] <= 0
               ).any():
 
                   raise SystemExit(
-                      f"Non-positive {column} values."
+                      f"Non-positive "
+                      f"{column} values."
                   )
+
 
           if (
               df["high"] <
@@ -954,6 +1233,7 @@ jobs:
                   "High < Low detected."
               )
 
+
           if (
               (df["open"] > df["high"]) |
               (df["open"] < df["low"])
@@ -962,6 +1242,7 @@ jobs:
               raise SystemExit(
                   "Open outside candle range."
               )
+
 
           if (
               (df["close"] > df["high"]) |
@@ -972,23 +1253,39 @@ jobs:
                   "Close outside candle range."
               )
 
+
           print("")
-          print("============================================================")
-          print("FINAL MARKET DATA VALIDATION: PASS")
-          print("============================================================")
+          print("=" * 60)
+          print(
+              "FINAL MARKET DATA VALIDATION: PASS"
+          )
+          print("=" * 60)
+
           print(
               f"Rows:  {len(df):,}"
           )
+
           print(
               f"Start: {df['timestamp'].min()}"
           )
+
           print(
               f"End:   {df['timestamp'].max()}"
           )
-          print("OHLC integrity: PASS")
-          print("Timestamp integrity: PASS")
-          print("Duplicate timestamps: NONE")
-          print("============================================================")
+
+          print(
+              "OHLC integrity: PASS"
+          )
+
+          print(
+              "Timestamp integrity: PASS"
+          )
+
+          print(
+              "Duplicate timestamps: NONE"
+          )
+
+          print("=" * 60)
           PY
 
       - name: Upload prepared data
@@ -1007,7 +1304,6 @@ jobs:
     name: V5 Strategy Engine
     needs: prepare-data
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     steps:
@@ -1054,7 +1350,6 @@ jobs:
     name: V5 Multi Objective Optimizer
     needs: prepare-data
     runs-on: ubuntu-latest
-
     timeout-minutes: 180
 
     steps:
@@ -1113,7 +1408,6 @@ jobs:
       - optimizer
 
     runs-on: ubuntu-latest
-
     timeout-minutes: 240
 
     steps:
@@ -1169,7 +1463,6 @@ jobs:
     name: V5 Robustness Analysis
     needs: walk-forward
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     steps:
@@ -1222,7 +1515,6 @@ jobs:
       - robustness
 
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     steps:
@@ -1310,10 +1602,8 @@ jobs:
 
   final-report:
     name: V5 Final Research Report
-
     needs:
       - validator
-
     runs-on: ubuntu-latest
 
     steps:
@@ -1372,19 +1662,13 @@ jobs:
           DATA DOWNLOAD
           -------------
           Historical XAUUSD H1 data is downloaded in monthly chunks
-          to reduce the likelihood of external data-server rate
-          limiting.
+          to reduce external data-server rate limiting.
 
           XAUUSD CONTRACT MODEL
           ---------------------
           1.00 lot = 100 ounces.
 
-          Therefore:
-
-              P&L =
-              price_difference
-              × 100
-              × lot_size
+          P&L = price_difference × 100 × lot_size
 
           Example:
 
@@ -1404,8 +1688,7 @@ jobs:
 
           RESEARCH PRINCIPLES
           -------------------
-          The system must not judge the strategy using headline
-          return alone.
+          The strategy is not judged by headline return alone.
 
           Important measurements include:
 
