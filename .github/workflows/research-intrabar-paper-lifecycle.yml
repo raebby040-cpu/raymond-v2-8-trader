@@ -1,0 +1,507 @@
+name: Research - Intrabar Paper Lifecycle Replay
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Research month (YYYY-MM)"
+        required: true
+        default: "2026-09"
+
+permissions:
+  contents: read
+
+jobs:
+  intrabar-replay:
+    name: Full M5 Intrabar Lifecycle Replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pytest
+
+      - name: Prepare directories
+        run: |
+          mkdir -p audit_output
+          mkdir -p raw_m5
+          mkdir -p normalized_m5
+          mkdir -p replay_output
+
+      - name: Verify research-only safety
+        run: |
+          echo "RAYMOND V2.8 RESEARCH-ONLY INTRABAR REPLAY"
+          echo "No strategy changes."
+          echo "No position changes."
+          echo "No orders."
+          echo "No deployment."
+          echo "No candidate promotion."
+
+      - name: Calculate dates
+        id: dates
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+
+          month = os.environ["AUDIT_MONTH"]
+
+          start = datetime.strptime(
+              month + "-01",
+              "%Y-%m-%d",
+          )
+
+          if start.month == 12:
+              end = datetime(
+                  start.year + 1,
+                  1,
+                  1,
+              )
+          else:
+              end = datetime(
+                  start.year,
+                  start.month + 1,
+                  1,
+              )
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+          ) as f:
+              f.write(
+                  "start="
+                  + start.strftime("%Y-%m-%d")
+                  + "\n"
+              )
+
+              f.write(
+                  "end="
+                  + end.strftime("%Y-%m-%d")
+                  + "\n"
+              )
+          PY
+
+      - name: Download authoritative monthly audit
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+          RENDER_URL: "https://raymond-v2-8-trader.onrender.com"
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --retry 5 \
+            --retry-delay 5 \
+            --max-time 180 \
+            "${RENDER_URL}/api/research/monthly-audit?month=${AUDIT_MONTH}&include_trades=true" \
+            -o audit_output/monthly_trade_audit.json
+
+          test -s audit_output/monthly_trade_audit.json
+
+      - name: Validate authoritative audit
+        env:
+          AUDIT_MONTH: ${{ inputs.month }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          path = (
+              "audit_output/"
+              "monthly_trade_audit.json"
+          )
+
+          expected = os.environ[
+              "AUDIT_MONTH"
+          ]
+
+          with open(
+              path,
+              "r",
+              encoding="utf-8",
+          ) as f:
+              report = json.load(f)
+
+          if report.get(
+              "report_type"
+          ) != "RAYMOND_MONTHLY_TRADE_AUDIT":
+              raise SystemExit(
+                  "Wrong audit report type."
+              )
+
+          if report.get(
+              "month"
+          ) != expected:
+              raise SystemExit(
+                  "Audit month mismatch."
+              )
+
+          if report.get(
+              "research_only"
+          ) is not True:
+              raise SystemExit(
+                  "Audit is not research-only."
+              )
+
+          if report.get(
+              "live_trading_changed"
+          ) is not False:
+              raise SystemExit(
+                  "Audit reports live trading changed."
+              )
+
+          if (
+              report.get(
+                  "accounting",
+                  {},
+              ).get(
+                  "accounting_reconciled"
+              )
+              is not True
+          ):
+              raise SystemExit(
+                  "Audit accounting is not reconciled."
+              )
+
+          trades = report.get(
+              "trades"
+          )
+
+          if (
+              not isinstance(
+                  trades,
+                  list,
+              )
+              or not trades
+          ):
+              raise SystemExit(
+                  "No authoritative trade records."
+              )
+
+          print(
+              "Authoritative audit validated."
+          )
+
+          print(
+              "Trades:",
+              len(trades),
+          )
+          PY
+
+      - name: Download XAUUSD M5 data
+        env:
+          START_DATE: ${{ steps.dates.outputs.start }}
+          END_DATE: ${{ steps.dates.outputs.end }}
+        run: |
+          npx --yes dukascopy-node \
+            -i xauusd \
+            -from "${START_DATE}" \
+            -to "${END_DATE}" \
+            -t m5 \
+            -f csv \
+            -dir raw_m5 \
+            -bs 5 \
+            -bp 1000
+
+          find raw_m5 \
+            -type f \
+            -name "*.csv" \
+            -print
+
+      - name: Normalize M5 data
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          files = sorted(
+              Path("raw_m5").rglob("*.csv")
+          )
+
+          if not files:
+              raise SystemExit(
+                  "No M5 CSV files downloaded."
+              )
+
+          frames = []
+
+          for path in files:
+              df = pd.read_csv(path)
+
+              df.columns = [
+                  str(c)
+                  .strip()
+                  .lower()
+                  .replace(" ", "_")
+                  .replace("-", "_")
+                  for c in df.columns
+              ]
+
+              aliases = {
+                  "timestamp": [
+                      "timestamp",
+                      "time",
+                      "datetime",
+                      "date",
+                      "timestamp_utc",
+                  ],
+                  "open": ["open", "o"],
+                  "high": ["high", "h"],
+                  "low": ["low", "l"],
+                  "close": ["close", "c"],
+              }
+
+              rename = {}
+
+              for target, candidates in aliases.items():
+                  for candidate in candidates:
+                      if candidate in df.columns:
+                          rename[candidate] = target
+                          break
+
+              df = df.rename(
+                  columns=rename
+              )
+
+              required = [
+                  "timestamp",
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              ]
+
+              if not all(
+                  c in df.columns
+                  for c in required
+              ):
+                  continue
+
+              raw = df["timestamp"]
+
+              numeric = pd.to_numeric(
+                  raw,
+                  errors="coerce",
+              )
+
+              if numeric.notna().mean() >= 0.8:
+                  median = float(
+                      numeric.dropna()
+                      .abs()
+                      .median()
+                  )
+
+                  if median >= 1e17:
+                      unit = "ns"
+                  elif median >= 1e14:
+                      unit = "us"
+                  elif median >= 1e11:
+                      unit = "ms"
+                  elif median >= 1e9:
+                      unit = "s"
+                  else:
+                      unit = None
+
+                  if unit:
+                      df["timestamp"] = (
+                          pd.to_datetime(
+                              numeric,
+                              unit=unit,
+                              utc=True,
+                              errors="coerce",
+                          )
+                      )
+                  else:
+                      df["timestamp"] = (
+                          pd.to_datetime(
+                              raw,
+                              utc=True,
+                              errors="coerce",
+                          )
+                      )
+              else:
+                  df["timestamp"] = (
+                      pd.to_datetime(
+                          raw,
+                          utc=True,
+                          errors="coerce",
+                      )
+                  )
+
+              for c in [
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+              ]:
+                  df[c] = pd.to_numeric(
+                      df[c],
+                      errors="coerce",
+                  )
+
+              frames.append(
+                  df[
+                      [
+                          "timestamp",
+                          "open",
+                          "high",
+                          "low",
+                          "close",
+                      ]
+                  ]
+              )
+
+          if not frames:
+              raise SystemExit(
+                  "No valid M5 frames."
+              )
+
+          combined = pd.concat(
+              frames,
+              ignore_index=True,
+          )
+
+          combined = (
+              combined
+              .dropna()
+              .sort_values("timestamp")
+              .drop_duplicates(
+                  "timestamp"
+              )
+              .reset_index(
+                  drop=True
+              )
+          )
+
+          if combined.empty:
+              raise SystemExit(
+                  "Normalized M5 dataset is empty."
+              )
+
+          output = (
+              Path("normalized_m5")
+              / "xauusd_m5_normalized.csv"
+          )
+
+          combined.to_csv(
+              output,
+              index=False,
+          )
+
+          print(
+              "Normalized rows:",
+              len(combined),
+          )
+
+          print(
+              "Start:",
+              combined.timestamp.min(),
+          )
+
+          print(
+              "End:",
+              combined.timestamp.max(),
+          )
+          PY
+
+      - name: Run existing forensic analyzer
+        run: |
+          python scripts/monthly_trade_forensic.py \
+            --audit audit_output/monthly_trade_audit.json \
+            --m5 normalized_m5/xauusd_m5_normalized.csv \
+            --output replay_output/forensic
+
+      - name: Run connected intrabar replay
+        run: |
+          python scripts/research/run_intrabar_september_replay.py \
+            --audit audit_output/monthly_trade_audit.json \
+            --m5 normalized_m5/xauusd_m5_normalized.csv \
+            --forensic replay_output/forensic/monthly_trade_forensic.json \
+            --output replay_output/intrabar
+
+      - name: Run research tests
+        run: |
+          pytest -q tests/research
+
+      - name: Validate replay safety
+        run: |
+          python - <<'PY'
+          import json
+
+          path = (
+              "replay_output/"
+              "intrabar/"
+              "intrabar_lifecycle_replay.json"
+          )
+
+          with open(
+              path,
+              "r",
+              encoding="utf-8",
+          ) as f:
+              report = json.load(f)
+
+          safety = report["safety"]
+
+          required_false = [
+              "live_trading_changed",
+              "strategy_modified",
+              "positions_modified",
+              "orders_created",
+              "candidates_promoted",
+              "intrabar_order_invented",
+          ]
+
+          if report.get(
+              "research_only"
+          ) is not True:
+              raise SystemExit(
+                  "Replay is not research-only."
+              )
+
+          for key in required_false:
+              if safety.get(key) is not False:
+                  raise SystemExit(
+                      "Safety check failed: "
+                      + key
+                  )
+
+          print(
+              "Research safety validation PASSED."
+          )
+
+          print(
+              "TP-crossed stored losses:",
+              report["comparison"][
+                  "tp_crossed_but_stored_loss_count"
+              ],
+          )
+          PY
+
+      - name: Upload research artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raymond-intrabar-replay-${{ inputs.month }}
+          path: |
+            audit_output/monthly_trade_audit.json
+            replay_output/forensic/
+            replay_output/intrabar/
+            normalized_m5/xauusd_m5_normalized.csv
+          retention-days: 14
