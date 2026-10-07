@@ -1314,8 +1314,8 @@ jobs:
       - name: Run strategy engine
         run: |
           python scripts/v5_strategy_engine.py \
-            --data data/historical/xauusd_h1_2024_2026_normalized.csv \
-            --output backtest_results/weekly_growth_v5/strategy_engine
+            --input data/historical/xauusd_h1_2024_2026_normalized.csv \
+            --output-dir backtest_results/weekly_growth_v5/strategy_engine
 
       - name: Upload strategy results
         if: always()
