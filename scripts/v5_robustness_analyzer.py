@@ -88,6 +88,28 @@ def safe_float(
         return default
 
 
+def safe_optional_float(
+    value,
+):
+    try:
+        if value is None:
+            return None
+
+        value = float(value)
+
+        if not math.isfinite(value):
+            return None
+
+        return value
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        return None
+
+
 def load_json(
     path: Path,
 ) -> Dict:
@@ -127,8 +149,91 @@ def load_window_results(
         path
     )
 
-    numeric_columns = [
+    # ------------------------------------------------------------------------
+    # SCHEMA COMPATIBILITY
+    # ------------------------------------------------------------------------
+    #
+    # V5 walk-forward files have existed in more than one schema revision.
+    #
+    # Current names:
+    #   test_max_drawdown_pct
+    #   return_change_percentage
+    #
+    # Older names:
+    #   test_max_dd_pct
+    #   return_change_pct
+    #
+    # Normalize them into the canonical names used by this analyzer.
+    # ------------------------------------------------------------------------
+
+    aliases = {
+
+        "test_max_dd_pct": [
+            "test_max_dd_pct",
+            "test_max_drawdown_pct",
+            "test_max_drawdown",
+        ],
+
+        "return_change_pct": [
+            "return_change_pct",
+            "return_change_percentage",
+        ],
+    }
+
+    for canonical, candidates in aliases.items():
+
+        if canonical not in df.columns:
+
+            for candidate in candidates:
+
+                if candidate in df.columns:
+
+                    df[canonical] = df[candidate]
+
+                    break
+
+    # ------------------------------------------------------------------------
+    # REQUIRED COLUMN CHECK
+    # ------------------------------------------------------------------------
+
+    required_columns = [
+        "test_return_pct",
+        "test_profit_factor",
+        "test_trades",
+    ]
+
+    missing = [
+        column
+        for column in required_columns
+        if column not in df.columns
+    ]
+
+    if missing:
+
+        raise ValueError(
+            "Walk-forward results are missing required "
+            f"columns: {missing}"
+        )
+
+    # ------------------------------------------------------------------------
+    # OPTIONAL COLUMNS
+    # ------------------------------------------------------------------------
+    #
+    # Do NOT invent measured drawdown if an old artifact genuinely lacks it.
+    # NaN makes that limitation explicit.
+    # ------------------------------------------------------------------------
+
+    if "test_max_dd_pct" not in df.columns:
+
+        df["test_max_dd_pct"] = np.nan
+
+    if "return_change_pct" not in df.columns:
+
+        df["return_change_pct"] = np.nan
+
+    optional_numeric_columns = [
         "risk_per_trade",
+        "risk_reward",
         "rr",
         "validation_return_pct",
         "test_return_pct",
@@ -140,7 +245,7 @@ def load_window_results(
         "return_change_pct",
     ]
 
-    for column in numeric_columns:
+    for column in optional_numeric_columns:
 
         if column in df.columns:
 
@@ -159,7 +264,6 @@ def load_window_results(
 def compound_returns(
     returns: pd.Series,
 ) -> float:
-
     """
     Compound sequential percentage returns.
 
@@ -208,7 +312,7 @@ def score_window(
         )
     )
 
-    test_dd = safe_float(
+    test_dd = safe_optional_float(
         row.get(
             "test_max_dd_pct"
         )
@@ -230,6 +334,10 @@ def score_window(
 
     score = 0.0
 
+    # ------------------------------------------------------------------------
+    # RETURN
+    # ------------------------------------------------------------------------
+
     score += (
         math.copysign(
             math.log1p(
@@ -240,6 +348,10 @@ def score_window(
         * 20.0
     )
 
+    # ------------------------------------------------------------------------
+    # PROFIT FACTOR
+    # ------------------------------------------------------------------------
+
     score += (
         np.clip(
             test_pf - 1.0,
@@ -248,6 +360,10 @@ def score_window(
         )
         * 20.0
     )
+
+    # ------------------------------------------------------------------------
+    # EXPECTANCY
+    # ------------------------------------------------------------------------
 
     score += (
         np.clip(
@@ -258,15 +374,29 @@ def score_window(
         * 10.0
     )
 
+    # ------------------------------------------------------------------------
+    # SAMPLE SIZE
+    # ------------------------------------------------------------------------
+
     if trades >= 30:
+
         score += 10.0
+
     elif trades >= 15:
+
         score += 5.0
 
-    score -= max(
-        test_dd - 10.0,
-        0.0,
-    ) * 2.0
+    # ------------------------------------------------------------------------
+    # DRAWDOWN
+    # ------------------------------------------------------------------------
+
+    # Only apply the DD penalty when measured DD is actually available.
+    if test_dd is not None:
+
+        score -= max(
+            test_dd - 10.0,
+            0.0,
+        ) * 2.0
 
     return float(
         score
@@ -345,52 +475,93 @@ def classify_robustness(
         ].min()
     )
 
-    average_dd = float(
+    # ------------------------------------------------------------------------
+    # DRAWDOWN
+    # ------------------------------------------------------------------------
+
+    dd_series = pd.to_numeric(
         df[
             "test_max_dd_pct"
-        ].mean()
+        ],
+        errors="coerce",
     )
 
-    worst_dd = float(
-        df[
-            "test_max_dd_pct"
-        ].max()
+    valid_dd = (
+        dd_series
+        .dropna()
     )
 
-    average_degradation = float(
+    if valid_dd.empty:
+
+        average_dd = None
+        worst_dd = None
+
+    else:
+
+        average_dd = float(
+            valid_dd.mean()
+        )
+
+        worst_dd = float(
+            valid_dd.max()
+        )
+
+    # ------------------------------------------------------------------------
+    # DEGRADATION
+    # ------------------------------------------------------------------------
+
+    degradation_series = pd.to_numeric(
         df[
             "return_change_pct"
-        ].mean()
+        ],
+        errors="coerce",
     )
 
-    # --------------------------------------------------------------
-    # Strong robustness
-    # --------------------------------------------------------------
+    valid_degradation = (
+        degradation_series
+        .dropna()
+    )
 
-    if (
+    if valid_degradation.empty:
+
+        average_degradation = None
+
+    else:
+
+        average_degradation = float(
+            valid_degradation.mean()
+        )
+
+    # ------------------------------------------------------------------------
+    # STRONG ROBUSTNESS
+    # ------------------------------------------------------------------------
+
+    strong_conditions = (
         windows >= 3
         and profitable_return_rate >= 75.0
         and pf_rate >= 75.0
         and median_return > 0
         and worst_return > -10.0
         and worst_pf > 0.90
-    ):
+    )
+
+    if strong_conditions:
 
         classification = (
             "ROBUST"
         )
 
         reason = (
-            "The strategy remains "
-            "profitable across most unseen "
-            "windows with generally stable "
-            "profit factor and controlled "
-            "drawdown."
+            "The unseen windows satisfy the primary "
+            "robustness gates: consistent positive returns, "
+            "profit factor above 1, positive median return, "
+            "controlled worst-window loss, and acceptable "
+            "worst-window profit factor."
         )
 
-    # --------------------------------------------------------------
-    # Promising
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
+    # PROMISING
+    # ------------------------------------------------------------------------
 
     elif (
         windows >= 2
@@ -404,15 +575,14 @@ def classify_robustness(
         )
 
         reason = (
-            "There is evidence of an edge, "
-            "but the unseen-window sample "
-            "is not strong enough to call "
-            "the strategy robust."
+            "The unseen results show evidence of an edge, "
+            "but the consistency or sample size is not "
+            "strong enough for a robust classification."
         )
 
-    # --------------------------------------------------------------
-    # Unstable
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
+    # UNSTABLE
+    # ------------------------------------------------------------------------
 
     elif (
         average_pf > 1.0
@@ -425,10 +595,14 @@ def classify_robustness(
         )
 
         reason = (
-            "The strategy can make money, "
-            "but performance varies too much "
-            "between unseen periods."
+            "Average performance is positive, but at least "
+            "one unseen window experiences a materially large "
+            "loss. The edge is therefore unstable."
         )
+
+    # ------------------------------------------------------------------------
+    # NOT ROBUST
+    # ------------------------------------------------------------------------
 
     else:
 
@@ -437,12 +611,12 @@ def classify_robustness(
         )
 
         reason = (
-            "The current V5 configuration "
-            "does not demonstrate a sufficiently "
-            "stable unseen-market edge."
+            "The unseen-window results do not currently "
+            "provide sufficient evidence of a stable edge."
         )
 
-    return {
+    result = {
+
         "classification":
             classification,
 
@@ -482,9 +656,11 @@ def classify_robustness(
         "worst_test_drawdown_pct":
             worst_dd,
 
-        "average_return_degradation_pct":
+        "average_return_change_pct":
             average_degradation,
     }
+
+    return result
 
 
 # ============================================================================
@@ -495,122 +671,111 @@ def analyze_strategy_families(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    if (
-        "strategy" not in df.columns
-        or df.empty
-    ):
+    if "strategy_family" not in df.columns:
 
         return pd.DataFrame()
 
-    grouped = (
-        df.groupby(
-            "strategy",
-            dropna=False,
+    rows: List[Dict] = []
+
+    for strategy, group in df.groupby(
+        "strategy_family"
+    ):
+
+        returns = pd.to_numeric(
+            group[
+                "test_return_pct"
+            ],
+            errors="coerce",
+        ).dropna()
+
+        pf = pd.to_numeric(
+            group[
+                "test_profit_factor"
+            ],
+            errors="coerce",
+        ).dropna()
+
+        positive_windows = int(
+            (
+                returns > 0
+            ).sum()
         )
-        .agg(
-            windows=(
-                "window",
-                "count",
-            ),
 
-            average_return_pct=(
-                "test_return_pct",
-                "mean",
-            ),
-
-            median_return_pct=(
-                "test_return_pct",
-                "median",
-            ),
-
-            compounded_return_pct=(
-                "test_return_pct",
-                compound_returns,
-            ),
-
-            average_pf=(
-                "test_profit_factor",
-                "mean",
-            ),
-
-            worst_pf=(
-                "test_profit_factor",
-                "min",
-            ),
-
-            average_dd_pct=(
-                "test_max_dd_pct",
-                "mean",
-            ),
-
-            worst_dd_pct=(
-                "test_max_dd_pct",
-                "max",
-            ),
-
-            average_win_rate_pct=(
-                "test_win_rate_pct",
-                "mean",
-            ),
-
-            average_expectancy=(
-                "test_expectancy",
-                "mean",
-            ),
+        window_count = len(
+            group
         )
-        .reset_index()
-    )
 
-    grouped[
-        "positive_windows"
-    ] = (
-        df.groupby(
-            "strategy"
-        )[
-            "test_return_pct"
-        ]
-        .apply(
-            lambda values:
-            int(
+        rows.append({
+
+            "strategy_family":
+                strategy,
+
+            "windows":
+                window_count,
+
+            "positive_windows":
+                positive_windows,
+
+            "positive_window_pct":
                 (
-                    values > 0
-                ).sum()
-            )
-        )
-        .values
+                    positive_windows /
+                    window_count *
+                    100.0
+                )
+                if window_count
+                else 0.0,
+
+            "average_return_pct":
+                float(
+                    returns.mean()
+                )
+                if not returns.empty
+                else 0.0,
+
+            "median_return_pct":
+                float(
+                    returns.median()
+                )
+                if not returns.empty
+                else 0.0,
+
+            "worst_return_pct":
+                float(
+                    returns.min()
+                )
+                if not returns.empty
+                else 0.0,
+
+            "average_pf":
+                float(
+                    pf.mean()
+                )
+                if not pf.empty
+                else 0.0,
+
+            "worst_pf":
+                float(
+                    pf.min()
+                )
+                if not pf.empty
+                else 0.0,
+        })
+
+    result = pd.DataFrame(
+        rows
     )
 
-    grouped[
-        "positive_window_pct"
-    ] = (
-        grouped[
-            "positive_windows"
-        ]
-        /
-        grouped[
-            "windows"
-        ]
-        *
-        100.0
-    )
+    if not result.empty:
 
-    grouped = (
-        grouped.sort_values(
+        result = result.sort_values(
             [
-                "positive_window_pct",
-                "average_pf",
                 "average_return_pct",
+                "average_pf",
             ],
-            ascending=[
-                False,
-                False,
-                False,
-            ],
+            ascending=False,
         )
-        .reset_index(drop=True)
-    )
 
-    return grouped
+    return result
 
 
 # ============================================================================
@@ -621,115 +786,111 @@ def analyze_regimes(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    if (
-        "regime" not in df.columns
-        or df.empty
-    ):
+    if "regime" not in df.columns:
 
         return pd.DataFrame()
 
-    grouped = (
-        df.groupby(
-            "regime",
-            dropna=False,
+    rows: List[Dict] = []
+
+    for regime, group in df.groupby(
+        "regime"
+    ):
+
+        returns = pd.to_numeric(
+            group[
+                "test_return_pct"
+            ],
+            errors="coerce",
+        ).dropna()
+
+        pf = pd.to_numeric(
+            group[
+                "test_profit_factor"
+            ],
+            errors="coerce",
+        ).dropna()
+
+        positive_windows = int(
+            (
+                returns > 0
+            ).sum()
         )
-        .agg(
-            windows=(
-                "window",
-                "count",
-            ),
 
-            average_return_pct=(
-                "test_return_pct",
-                "mean",
-            ),
-
-            median_return_pct=(
-                "test_return_pct",
-                "median",
-            ),
-
-            average_pf=(
-                "test_profit_factor",
-                "mean",
-            ),
-
-            worst_pf=(
-                "test_profit_factor",
-                "min",
-            ),
-
-            average_dd_pct=(
-                "test_max_dd_pct",
-                "mean",
-            ),
-
-            worst_dd_pct=(
-                "test_max_dd_pct",
-                "max",
-            ),
-
-            average_win_rate_pct=(
-                "test_win_rate_pct",
-                "mean",
-            ),
-
-            average_expectancy=(
-                "test_expectancy",
-                "mean",
-            ),
+        window_count = len(
+            group
         )
-        .reset_index()
-    )
 
-    grouped[
-        "positive_windows"
-    ] = (
-        df.groupby(
-            "regime"
-        )[
-            "test_return_pct"
-        ]
-        .apply(
-            lambda values:
-            int(
+        rows.append({
+
+            "regime":
+                regime,
+
+            "windows":
+                window_count,
+
+            "positive_windows":
+                positive_windows,
+
+            "positive_window_pct":
                 (
-                    values > 0
-                ).sum()
-            )
-        )
-        .values
+                    positive_windows /
+                    window_count *
+                    100.0
+                )
+                if window_count
+                else 0.0,
+
+            "average_return_pct":
+                float(
+                    returns.mean()
+                )
+                if not returns.empty
+                else 0.0,
+
+            "median_return_pct":
+                float(
+                    returns.median()
+                )
+                if not returns.empty
+                else 0.0,
+
+            "worst_return_pct":
+                float(
+                    returns.min()
+                )
+                if not returns.empty
+                else 0.0,
+
+            "average_pf":
+                float(
+                    pf.mean()
+                )
+                if not pf.empty
+                else 0.0,
+
+            "worst_pf":
+                float(
+                    pf.min()
+                )
+                if not pf.empty
+                else 0.0,
+        })
+
+    result = pd.DataFrame(
+        rows
     )
 
-    grouped[
-        "positive_window_pct"
-    ] = (
-        grouped[
-            "positive_windows"
-        ]
-        /
-        grouped[
-            "windows"
-        ]
-        *
-        100.0
-    )
+    if not result.empty:
 
-    return (
-        grouped.sort_values(
+        result = result.sort_values(
             [
-                "positive_window_pct",
-                "average_pf",
                 "average_return_pct",
+                "average_pf",
             ],
-            ascending=[
-                False,
-                False,
-                False,
-            ],
+            ascending=False,
         )
-        .reset_index(drop=True)
-    )
+
+    return result
 
 
 # ============================================================================
@@ -740,62 +901,67 @@ def analyze_degradation(
     df: pd.DataFrame,
 ) -> Dict:
 
-    degradation = (
-        pd.to_numeric(
-            df[
-                "return_change_pct"
-            ],
-            errors="coerce",
-        )
-        .dropna()
-    )
+    series = pd.to_numeric(
+        df[
+            "return_change_pct"
+        ],
+        errors="coerce",
+    ).dropna()
 
-    if degradation.empty:
+    if series.empty:
 
         return {
+
+            "available":
+                False,
+
             "average_pct":
-                0.0,
+                None,
 
             "median_pct":
-                0.0,
+                None,
 
             "worst_pct":
-                0.0,
-
-            "best_pct":
-                0.0,
+                None,
 
             "windows_with_degradation":
                 0,
+
+            "reason":
+                "No validation-to-test degradation field "
+                "was available in the walk-forward artifact.",
         }
 
     return {
+
+        "available":
+            True,
+
         "average_pct":
             float(
-                degradation.mean()
+                series.mean()
             ),
 
         "median_pct":
             float(
-                degradation.median()
+                series.median()
             ),
 
         "worst_pct":
             float(
-                degradation.min()
-            ),
-
-        "best_pct":
-            float(
-                degradation.max()
+                series.min()
             ),
 
         "windows_with_degradation":
             int(
                 (
-                    degradation < 0
+                    series < 0
                 ).sum()
             ),
+
+        "reason":
+            "Validation-to-test return changes were available "
+            "and analyzed.",
     }
 
 
@@ -807,38 +973,51 @@ def analyze_risk(
     df: pd.DataFrame,
 ) -> Dict:
 
-    if df.empty:
+    dd = pd.to_numeric(
+        df[
+            "test_max_dd_pct"
+        ],
+        errors="coerce",
+    ).dropna()
 
-        return {}
+    returns = pd.to_numeric(
+        df[
+            "test_return_pct"
+        ],
+        errors="coerce",
+    ).dropna()
 
-    returns = (
-        pd.to_numeric(
-            df[
-                "test_return_pct"
-            ],
-            errors="coerce",
-        )
-        .dropna()
-    )
+    if dd.empty:
 
-    drawdowns = (
-        pd.to_numeric(
-            df[
-                "test_max_dd_pct"
-            ],
-            errors="coerce",
-        )
-        .dropna()
-    )
+        return {
 
-    if returns.empty:
+            "drawdown_available":
+                False,
 
-        return {}
+            "average_drawdown_pct":
+                None,
+
+            "worst_drawdown_pct":
+                None,
+
+            "drawdown_reason":
+                "The walk-forward artifact did not contain "
+                "a measured test drawdown field.",
+        }
 
     return {
-        "average_return_pct":
+
+        "drawdown_available":
+            True,
+
+        "average_drawdown_pct":
             float(
-                returns.mean()
+                dd.mean()
+            ),
+
+        "worst_drawdown_pct":
+            float(
+                dd.max()
             ),
 
         "return_std_pct":
@@ -848,45 +1027,13 @@ def analyze_risk(
             if len(returns) > 1
             else 0.0,
 
-        "return_coefficient_of_variation":
-            float(
-                returns.std()
-                /
-                abs(returns.mean())
-            )
-            if abs(returns.mean()) > 1e-9
-            else 0.0,
-
-        "average_drawdown_pct":
-            float(
-                drawdowns.mean()
-            )
-            if not drawdowns.empty
-            else 0.0,
-
-        "worst_drawdown_pct":
-            float(
-                drawdowns.max()
-            )
-            if not drawdowns.empty
-            else 0.0,
-
-        "return_to_average_dd":
-            float(
-                returns.mean()
-                /
-                drawdowns.mean()
-            )
-            if (
-                not drawdowns.empty
-                and drawdowns.mean() > 0
-            )
-            else 0.0,
+        "drawdown_reason":
+            "Measured test drawdown was available.",
     }
 
 
 # ============================================================================
-# FINAL EQUITY SIMULATION
+# SEQUENTIAL EQUITY
 # ============================================================================
 
 def simulate_sequential_equity(
@@ -894,24 +1041,24 @@ def simulate_sequential_equity(
     starting_balance: float = 1000.0,
 ) -> Dict:
 
-    balance = (
+    balance = float(
         starting_balance
     )
 
     peak = balance
-    max_drawdown = 0.0
+    max_drawdown_pct = 0.0
 
-    equity_values = []
+    equity_points = []
 
-    for return_pct in returns:
+    for value in returns:
 
-        return_pct = safe_float(
-            return_pct
+        value = safe_float(
+            value
         )
 
         balance *= (
             1.0 +
-            return_pct / 100.0
+            value / 100.0
         )
 
         peak = max(
@@ -919,27 +1066,39 @@ def simulate_sequential_equity(
             balance,
         )
 
-        drawdown = (
+        drawdown_pct = (
             (
                 peak -
                 balance
             )
             /
-            peak
-            *
+            peak *
             100.0
         )
+        if peak > 0
+        else 0.0
 
-        max_drawdown = max(
-            max_drawdown,
-            drawdown,
+        max_drawdown_pct = max(
+            max_drawdown_pct,
+            drawdown_pct,
         )
 
-        equity_values.append(
+        equity_points.append(
             balance
         )
 
+    total_return_pct = (
+        (
+            balance -
+            starting_balance
+        )
+        /
+        starting_balance *
+        100.0
+    )
+
     return {
+
         "starting_balance":
             starting_balance,
 
@@ -947,24 +1106,21 @@ def simulate_sequential_equity(
             balance,
 
         "total_return_pct":
-            (
-                balance /
-                starting_balance
-                -
-                1.0
-            )
-            * 100.0,
+            total_return_pct,
 
         "sequential_max_drawdown_pct":
-            max_drawdown,
+            max_drawdown_pct,
 
-        "equity_curve":
-            equity_values,
+        "windows_processed":
+            len(equity_points),
+
+        "equity_points":
+            equity_points,
     }
 
 
 # ============================================================================
-# VERDICT
+# FINAL VERDICT
 # ============================================================================
 
 def build_verdict(
@@ -974,114 +1130,103 @@ def build_verdict(
 ) -> Dict:
 
     classification_name = (
-        classification.get(
-            "classification",
-            "UNKNOWN",
-        )
+        classification[
+            "classification"
+        ]
     )
 
-    if (
-        classification_name
-        == "ROBUST"
-    ):
-
-        verdict = (
-            "V5 has passed the initial "
-            "walk-forward robustness gate."
-        )
-
-        next_step = (
-            "Proceed to deeper stress testing "
-            "and Monte Carlo validation before "
-            "any live-trading consideration."
-        )
-
-    elif (
-        classification_name
-        == "PROMISING_BUT_NEEDS_MORE_TESTING"
-    ):
-
-        verdict = (
-            "V5 shows a potentially useful edge "
-            "but has not yet demonstrated enough "
-            "unseen-market stability."
-        )
-
-        next_step = (
-            "Continue research with additional "
-            "walk-forward windows, stress tests "
-            "and parameter perturbation."
-        )
-
-    elif (
-        classification_name
-        == "UNSTABLE"
-    ):
-
-        verdict = (
-            "V5 can work in some conditions but "
-            "is not stable enough across regimes."
-        )
-
-        next_step = (
-            "Improve regime/strategy selection "
-            "before increasing risk or targeting "
-            "aggressive compounding."
-        )
-
-    else:
-
-        verdict = (
-            "The current V5 research configuration "
-            "does not demonstrate a reliable "
-            "unseen-market edge."
-        )
-
-        next_step = (
-            "Return to strategy-family and "
-            "regime research rather than simply "
-            "increasing risk."
-        )
-
-    best_family = None
+    strongest_strategy_family = None
 
     if (
         family_df is not None
         and not family_df.empty
     ):
 
-        best_family = (
-            family_df.iloc[0]
-            .to_dict()
+        strongest_strategy_family = (
+            family_df.iloc[0].to_dict()
         )
 
-    best_regime = None
+    strongest_regime = None
 
     if (
         regime_df is not None
         and not regime_df.empty
     ):
 
-        best_regime = (
-            regime_df.iloc[0]
-            .to_dict()
+        strongest_regime = (
+            regime_df.iloc[0].to_dict()
+        )
+
+    if classification_name == "ROBUST":
+
+        verdict = (
+            "V5 ROBUSTNESS GATE PASSED"
+        )
+
+        next_step = (
+            "Proceed to deeper validation: full-resolution "
+            "research, additional walk-forward testing, "
+            "stress testing, Monte Carlo analysis, and "
+            "parameter sensitivity testing. Do not enable "
+            "live trading solely from this result."
+        )
+
+    elif classification_name == "PROMISING_BUT_NEEDS_MORE_TESTING":
+
+        verdict = (
+            "V5 SHOWS PROMISING EVIDENCE BUT IS NOT YET ROBUST"
+        )
+
+        next_step = (
+            "Run the full V5 research pipeline and expand "
+            "unseen testing before changing strategy logic. "
+            "Investigate which strategy families and regimes "
+            "remain positive."
+        )
+
+    elif classification_name == "UNSTABLE":
+
+        verdict = (
+            "V5 HAS AN UNSTABLE EDGE"
+        )
+
+        next_step = (
+            "Do not advance to live trading. Investigate "
+            "regime dependency, drawdown concentration, "
+            "strategy-family stability, and validation-to-test "
+            "degradation before further optimization."
+        )
+
+    else:
+
+        verdict = (
+            "V5 DOES NOT YET HAVE A VALIDATED ROBUST EDGE"
+        )
+
+        next_step = (
+            "Do not enable live trading. Complete the full "
+            "research run and analyze strategy families, "
+            "regimes, parameter sensitivity, and unseen "
+            "walk-forward performance before modifying the "
+            "strategy."
         )
 
     return {
-        "classification":
-            classification_name,
 
         "verdict":
             verdict,
+
+        "classification":
+            classification_name,
 
         "recommended_next_step":
             next_step,
 
         "strongest_strategy_family":
-            best_family,
+            strongest_strategy_family,
 
         "strongest_regime":
-            best_regime,
+            strongest_regime,
     }
 
 
@@ -1093,18 +1238,24 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Raymond V2.8 V5 robustness analyzer"
+            "Analyze V5 walk-forward robustness."
         )
     )
 
     parser.add_argument(
         "--input",
         default=DEFAULT_INPUT,
+        help=(
+            "Walk-forward result directory."
+        ),
     )
 
     parser.add_argument(
         "--output",
         default=DEFAULT_OUTPUT,
+        help=(
+            "Robustness output directory."
+        ),
     )
 
     args = parser.parse_args()
@@ -1122,15 +1273,27 @@ def main() -> None:
         exist_ok=True,
     )
 
-    print("=" * 80)
     print(
         "RAYMOND V2.8 V5 ROBUSTNESS ANALYZER"
     )
-    print("=" * 80)
 
-    # --------------------------------------------------------------
+    print(
+        "===================================="
+    )
+
+    print(
+        f"Input: {input_dir}"
+    )
+
+    print(
+        f"Output: {output_dir}"
+    )
+
+    print()
+
+    # ------------------------------------------------------------------------
     # LOAD
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     df = load_window_results(
         input_dir
@@ -1147,9 +1310,9 @@ def main() -> None:
             "No walk-forward results found."
         )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # WINDOW SCORE
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     df[
         "robustness_score"
@@ -1158,14 +1321,16 @@ def main() -> None:
         axis=1,
     )
 
-    df = (
-        df.sort_values(
-            "window"
+    if "window" in df.columns:
+
+        df = (
+            df.sort_values(
+                "window"
+            )
+            .reset_index(
+                drop=True
+            )
         )
-        .reset_index(
-            drop=True
-        )
-    )
 
     df.to_csv(
         output_dir /
@@ -1173,9 +1338,9 @@ def main() -> None:
         index=False,
     )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # CLASSIFICATION
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     classification = (
         classify_robustness(
@@ -1183,9 +1348,9 @@ def main() -> None:
         )
     )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # STRATEGY FAMILIES
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     family_df = (
         analyze_strategy_families(
@@ -1201,9 +1366,9 @@ def main() -> None:
             index=False,
         )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # REGIMES
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     regime_df = (
         analyze_regimes(
@@ -1219,9 +1384,9 @@ def main() -> None:
             index=False,
         )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # DEGRADATION
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     degradation = (
         analyze_degradation(
@@ -1229,9 +1394,9 @@ def main() -> None:
         )
     )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # RISK
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     risk = (
         analyze_risk(
@@ -1239,9 +1404,9 @@ def main() -> None:
         )
     )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # SEQUENTIAL EQUITY
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     sequential = (
         simulate_sequential_equity(
@@ -1251,9 +1416,9 @@ def main() -> None:
         )
     )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # VERDICT
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     verdict = build_verdict(
         classification,
@@ -1261,11 +1426,12 @@ def main() -> None:
         regime_df,
     )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # MASTER REPORT
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     report = {
+
         "status":
             "completed",
 
@@ -1304,9 +1470,9 @@ def main() -> None:
             default=str,
         )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # HUMAN SUMMARY
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     lines = []
 
@@ -1388,17 +1554,47 @@ def main() -> None:
         f"{classification['worst_test_profit_factor']:.3f}"
     )
 
-    lines.append(
-        f"Average DD: "
-        f"{classification['average_test_drawdown_pct']:.2f}%"
-    )
+    if (
+        classification[
+            "average_test_drawdown_pct"
+        ]
+        is None
+    ):
 
-    lines.append(
-        f"Worst DD: "
-        f"{classification['worst_test_drawdown_pct']:.2f}%"
-    )
+        lines.append(
+            "Average DD: unavailable"
+        )
+
+    else:
+
+        lines.append(
+            f"Average DD: "
+            f"{classification['average_test_drawdown_pct']:.2f}%"
+        )
+
+    if (
+        classification[
+            "worst_test_drawdown_pct"
+        ]
+        is None
+    ):
+
+        lines.append(
+            "Worst DD: unavailable"
+        )
+
+    else:
+
+        lines.append(
+            f"Worst DD: "
+            f"{classification['worst_test_drawdown_pct']:.2f}%"
+        )
 
     lines.append("")
+
+    # ------------------------------------------------------------------------
+    # VALIDATION → UNSEEN DEGRADATION
+    # ------------------------------------------------------------------------
 
     lines.append(
         "VALIDATION → UNSEEN DEGRADATION"
@@ -1408,27 +1604,41 @@ def main() -> None:
         "--------------------------------"
     )
 
-    lines.append(
-        f"Average return change: "
-        f"{degradation['average_pct']:.2f}%"
-    )
+    if degradation[
+        "available"
+    ]:
 
-    lines.append(
-        f"Median return change: "
-        f"{degradation['median_pct']:.2f}%"
-    )
+        lines.append(
+            f"Average return change: "
+            f"{degradation['average_pct']:.2f}%"
+        )
 
-    lines.append(
-        f"Worst return change: "
-        f"{degradation['worst_pct']:.2f}%"
-    )
+        lines.append(
+            f"Median return change: "
+            f"{degradation['median_pct']:.2f}%"
+        )
 
-    lines.append(
-        f"Windows with degradation: "
-        f"{degradation['windows_with_degradation']}"
-    )
+        lines.append(
+            f"Worst return change: "
+            f"{degradation['worst_pct']:.2f}%"
+        )
+
+        lines.append(
+            f"Windows with degradation: "
+            f"{degradation['windows_with_degradation']}"
+        )
+
+    else:
+
+        lines.append(
+            "Validation-to-test degradation: unavailable"
+        )
 
     lines.append("")
+
+    # ------------------------------------------------------------------------
+    # SEQUENTIAL EQUITY
+    # ------------------------------------------------------------------------
 
     lines.append(
         "SEQUENTIAL EQUITY"
@@ -1460,6 +1670,10 @@ def main() -> None:
 
     lines.append("")
 
+    # ------------------------------------------------------------------------
+    # VERDICT
+    # ------------------------------------------------------------------------
+
     lines.append(
         "VERDICT"
     )
@@ -1490,6 +1704,10 @@ def main() -> None:
         ]
     )
 
+    # ------------------------------------------------------------------------
+    # STRONGEST STRATEGY
+    # ------------------------------------------------------------------------
+
     if (
         verdict[
             "strongest_strategy_family"
@@ -1508,11 +1726,15 @@ def main() -> None:
         )
 
         lines.append(
-            f"{best.get('strategy')}: "
+            f"{best.get('strategy_family')}: "
             f"{best.get('average_return_pct', 0):.2f}% "
             f"average test return, "
             f"PF {best.get('average_pf', 0):.3f}"
         )
+
+    # ------------------------------------------------------------------------
+    # STRONGEST REGIME
+    # ------------------------------------------------------------------------
 
     if (
         verdict[
@@ -1555,6 +1777,10 @@ def main() -> None:
         "the primary research gates."
     )
 
+    # ------------------------------------------------------------------------
+    # WRITE SUMMARY
+    # ------------------------------------------------------------------------
+
     with open(
         output_dir /
         "summary.txt",
@@ -1563,19 +1789,28 @@ def main() -> None:
     ) as file:
 
         file.write(
-            "\n".join(lines)
+            "\n".join(
+                lines
+            )
         )
 
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # CONSOLE
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------------
 
     print()
-    print("=" * 80)
+
+    print(
+        "=" * 80
+    )
+
     print(
         "ROBUSTNESS ANALYSIS COMPLETE"
     )
-    print("=" * 80)
+
+    print(
+        "=" * 80
+    )
 
     print(
         f"Classification: "
@@ -1608,6 +1843,7 @@ def main() -> None:
     )
 
     print()
+
     print(
         f"Results saved to: "
         f"{output_dir}"
@@ -1615,4 +1851,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+
     main()
