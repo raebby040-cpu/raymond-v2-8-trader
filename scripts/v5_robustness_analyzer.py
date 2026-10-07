@@ -1066,6 +1066,12 @@ def simulate_sequential_equity(
             balance,
         )
 
+        # --------------------------------------------------------------------
+        # FIX:
+        # The conditional expression must include the condition BEFORE
+        # the "else" branch and the whole expression must be enclosed.
+        # --------------------------------------------------------------------
+
         drawdown_pct = (
             (
                 peak -
@@ -1074,9 +1080,9 @@ def simulate_sequential_equity(
             /
             peak *
             100.0
+            if peak > 0
+            else 0.0
         )
-        if peak > 0
-        else 0.0
 
         max_drawdown_pct = max(
             max_drawdown_pct,
