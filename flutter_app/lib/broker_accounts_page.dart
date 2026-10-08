@@ -20,6 +20,7 @@ class _BrokerAccountsPageState
   static const gold = Color(0xFFF5B82E);
   static const green = Color(0xFF00E59B);
   static const red = Color(0xFFFF5C6C);
+  static const orange = Color(0xFFFFA726);
   static const background = Color(0xFF030B14);
   static const card = Color(0xFF091724);
   static const border = Color(0xFF17334D);
@@ -47,11 +48,14 @@ class _BrokerAccountsPageState
     });
 
     try {
-      final response = await widget.api.brokerAccounts();
+      final response =
+          await widget.api.brokerAccounts();
 
-      final rawAccounts = response['accounts'];
+      final rawAccounts =
+          response['accounts'];
 
-      final loaded = <Map<String, dynamic>>[];
+      final loaded =
+          <Map<String, dynamic>>[];
 
       if (rawAccounts is List) {
         for (final item in rawAccounts) {
@@ -74,16 +78,28 @@ class _BrokerAccountsPageState
 
       setState(() {
         loading = false;
-        errorMessage = _friendlyError(error);
+        errorMessage =
+            _friendlyError(error);
       });
     }
   }
 
   String _friendlyError(Object error) {
-    final text = error.toString();
+    var text = error.toString();
 
-    if (text.length > 180) {
-      return text.substring(0, 180);
+    if (text.startsWith('DioException')) {
+      final marker = 'message:';
+
+      final index = text.indexOf(marker);
+
+      if (index >= 0) {
+        text =
+            text.substring(index + marker.length);
+      }
+    }
+
+    if (text.length > 220) {
+      return text.substring(0, 220);
     }
 
     return text;
@@ -126,52 +142,77 @@ class _BrokerAccountsPageState
                     color: gold,
                   ),
                   SizedBox(width: 10),
-                  Text('Add Broker Account'),
+                  Expanded(
+                    child: Text(
+                      'Add Broker Account',
+                    ),
+                  ),
                 ],
               ),
-              content: SingleChildScrollView(
+              content:
+                  SingleChildScrollView(
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                  mainAxisSize:
+                      MainAxisSize.min,
                   children: [
                     _dialogField(
-                      controller: brokerController,
+                      controller:
+                          brokerController,
                       label: 'Broker',
                       hint: 'Exness',
-                      icon: Icons.business_outlined,
+                      icon:
+                          Icons.business_outlined,
                     ),
                     const SizedBox(height: 12),
                     _dialogField(
-                      controller: platformController,
+                      controller:
+                          platformController,
                       label: 'Platform',
                       hint: 'MT5',
-                      icon: Icons.devices_outlined,
+                      icon:
+                          Icons.devices_outlined,
                     ),
                     const SizedBox(height: 12),
                     _dialogField(
-                      controller: serverController,
+                      controller:
+                          serverController,
                       label: 'MT5 Server',
-                      hint: 'Example: Exness-MT5Real',
-                      icon: Icons.dns_outlined,
+                      hint:
+                          'Example: Exness-MT5Real',
+                      icon:
+                          Icons.dns_outlined,
                     ),
                     const SizedBox(height: 12),
                     _dialogField(
-                      controller: accountNumberController,
-                      label: 'Account Number',
-                      hint: 'MT5 account number',
-                      icon: Icons.badge_outlined,
-                      keyboardType: TextInputType.number,
+                      controller:
+                          accountNumberController,
+                      label:
+                          'Account Number',
+                      hint:
+                          'MT5 account number',
+                      icon:
+                          Icons.badge_outlined,
+                      keyboardType:
+                          TextInputType.number,
                     ),
                     const SizedBox(height: 12),
                     TextField(
-                      controller: credentialController,
-                      obscureText: obscureCredential,
-                      decoration: InputDecoration(
-                        labelText: 'Credential Reference',
-                        hintText: 'Secure secret reference',
-                        prefixIcon: const Icon(
+                      controller:
+                          credentialController,
+                      obscureText:
+                          obscureCredential,
+                      decoration:
+                          InputDecoration(
+                        labelText:
+                            'Credential Reference',
+                        hintText:
+                            'Secure reference',
+                        prefixIcon:
+                            const Icon(
                           Icons.key_outlined,
                         ),
-                        suffixIcon: IconButton(
+                        suffixIcon:
+                            IconButton(
                           onPressed: () {
                             setDialogState(() {
                               obscureCredential =
@@ -180,8 +221,10 @@ class _BrokerAccountsPageState
                           },
                           icon: Icon(
                             obscureCredential
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
+                                ? Icons
+                                    .visibility_outlined
+                                : Icons
+                                    .visibility_off_outlined,
                           ),
                         ),
                         border:
@@ -189,137 +232,119 @@ class _BrokerAccountsPageState
                       ),
                     ),
                     const SizedBox(height: 16),
-                    Container(
-                      padding:
-                          const EdgeInsets.all(12),
-                      decoration:
-                          BoxDecoration(
-                        color:
-                            gold.withOpacity(.08),
-                        borderRadius:
-                            BorderRadius.circular(12),
-                        border: Border.all(
-                          color:
-                              gold.withOpacity(.25),
-                        ),
-                      ),
-                      child: const Row(
-                        crossAxisAlignment:
-                            CrossAxisAlignment.start,
-                        children: [
-                          Icon(
-                            Icons.security,
-                            color: gold,
-                            size: 20,
-                          ),
-                          SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              'Raymond does not display broker passwords or raw credentials. The backend stores only a credential reference.',
-                              style: TextStyle(
-                                color: muted,
-                                fontSize: 12,
-                                height: 1.4,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
+                    _securityBox(
+                      'The credential reference is not the MT5 password. Raymond never stores the MT5 password in the broker-account record.',
                     ),
                   ],
                 ),
               ),
               actions: [
                 TextButton(
-                  onPressed: dialogSubmitting
-                      ? null
-                      : () {
-                          Navigator.of(
-                            dialogContext,
-                          ).pop(false);
-                        },
-                  child: const Text('Cancel'),
+                  onPressed:
+                      dialogSubmitting
+                          ? null
+                          : () {
+                              Navigator.of(
+                                dialogContext,
+                              ).pop(false);
+                            },
+                  child:
+                      const Text('Cancel'),
                 ),
                 FilledButton.icon(
-                  onPressed: dialogSubmitting
-                      ? null
-                      : () async {
-                          final broker =
-                              brokerController.text.trim();
+                  onPressed:
+                      dialogSubmitting
+                          ? null
+                          : () async {
+                              final broker =
+                                  brokerController
+                                      .text
+                                      .trim();
 
-                          final platform =
-                              platformController.text.trim();
+                              final platform =
+                                  platformController
+                                      .text
+                                      .trim();
 
-                          final server =
-                              serverController.text.trim();
+                              final server =
+                                  serverController
+                                      .text
+                                      .trim();
 
-                          final accountNumber =
-                              accountNumberController
-                                  .text
-                                  .trim();
+                              final accountNumber =
+                                  accountNumberController
+                                      .text
+                                      .trim();
 
-                          final credentialRef =
-                              credentialController
-                                  .text
-                                  .trim();
+                              final credentialRef =
+                                  credentialController
+                                      .text
+                                      .trim();
 
-                          if (broker.isEmpty ||
-                              platform.isEmpty ||
-                              server.isEmpty ||
-                              accountNumber.isEmpty ||
-                              credentialRef.isEmpty) {
-                            ScaffoldMessenger.of(
-                              dialogContext,
-                            ).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Please complete all fields.',
-                                ),
-                              ),
-                            );
+                              if (broker.isEmpty ||
+                                  platform.isEmpty ||
+                                  server.isEmpty ||
+                                  accountNumber
+                                      .isEmpty ||
+                                  credentialRef
+                                      .isEmpty) {
+                                ScaffoldMessenger.of(
+                                  dialogContext,
+                                ).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Please complete all fields.',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
 
-                            return;
-                          }
+                              setDialogState(() {
+                                dialogSubmitting =
+                                    true;
+                              });
 
-                          setDialogState(() {
-                            dialogSubmitting = true;
-                          });
+                              try {
+                                await widget.api
+                                    .createBrokerAccount(
+                                  broker: broker,
+                                  platform:
+                                      platform,
+                                  server: server,
+                                  accountNumber:
+                                      accountNumber,
+                                  credentialRef:
+                                      credentialRef,
+                                );
 
-                          try {
-                            await widget.api
-                                .createBrokerAccount(
-                              broker: broker,
-                              platform: platform,
-                              server: server,
-                              accountNumber:
-                                  accountNumber,
-                              credentialRef:
-                                  credentialRef,
-                            );
+                                if (!mounted) {
+                                  return;
+                                }
 
-                            if (!mounted) {
-                              return;
-                            }
+                                Navigator.of(
+                                  dialogContext,
+                                ).pop(true);
+                              } catch (error) {
+                                setDialogState(() {
+                                  dialogSubmitting =
+                                      false;
+                                });
 
-                            Navigator.of(
-                              dialogContext,
-                            ).pop(true);
-                          } catch (error) {
-                            setDialogState(() {
-                              dialogSubmitting = false;
-                            });
-
-                            ScaffoldMessenger.of(
-                              dialogContext,
-                            ).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  _friendlyError(error),
-                                ),
-                              ),
-                            );
-                          }
-                        },
+                                ScaffoldMessenger.of(
+                                  dialogContext,
+                                ).showSnackBar(
+                                  SnackBar(
+                                    content:
+                                        Text(
+                                      _friendlyError(
+                                        error,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
                   icon: dialogSubmitting
                       ? const SizedBox(
                           width: 16,
@@ -329,8 +354,11 @@ class _BrokerAccountsPageState
                             strokeWidth: 2,
                           ),
                         )
-                      : const Icon(Icons.add),
-                  label: const Text('Add Account'),
+                      : const Icon(
+                          Icons.add,
+                        ),
+                  label:
+                      const Text('Add Account'),
                 ),
               ],
             );
@@ -350,7 +378,8 @@ class _BrokerAccountsPageState
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
         const SnackBar(
           content: Text(
             'Broker account added successfully.',
@@ -374,18 +403,552 @@ class _BrokerAccountsPageState
         labelText: label,
         hintText: hint,
         prefixIcon: Icon(icon),
-        border: const OutlineInputBorder(),
+        border:
+            const OutlineInputBorder(),
       ),
     );
   }
 
-  Future<void> _selectAccount(
+  Widget _securityBox(String text) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: gold.withOpacity(.08),
+        borderRadius:
+            BorderRadius.circular(12),
+        border: Border.all(
+          color: gold.withOpacity(.25),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.security,
+            color: gold,
+            size: 20,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                color: muted,
+                fontSize: 12,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showConnectDialog(
     Map<String, dynamic> account,
   ) async {
     final accountId =
         account['account_id']?.toString();
 
-    if (accountId == null || accountId.isEmpty) {
+    if (accountId == null ||
+        accountId.isEmpty) {
+      return;
+    }
+
+    final passwordController =
+        TextEditingController();
+
+    final terminalPathController =
+        TextEditingController();
+
+    bool obscurePassword = true;
+    bool dialogSubmitting = false;
+
+    final result =
+        await showDialog<Map<String, dynamic>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (
+            context,
+            setDialogState,
+          ) {
+            return AlertDialog(
+              backgroundColor: card,
+              title: const Row(
+                children: [
+                  Icon(
+                    Icons.link,
+                    color: gold,
+                  ),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Connect & Verify MT5',
+                    ),
+                  ),
+                ],
+              ),
+              content:
+                  SingleChildScrollView(
+                child: Column(
+                  mainAxisSize:
+                      MainAxisSize.min,
+                  children: [
+                    _infoBox(
+                      'Account',
+                      '${account['broker'] ?? 'Broker'} • ${account['account_number'] ?? 'Unknown'}',
+                    ),
+                    const SizedBox(height: 12),
+                    _infoBox(
+                      'Server',
+                      account['server']
+                              ?.toString() ??
+                          'Unknown',
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller:
+                          passwordController,
+                      obscureText:
+                          obscurePassword,
+                      autofocus: true,
+                      decoration:
+                          InputDecoration(
+                        labelText:
+                            'MT5 Password',
+                        hintText:
+                            'Enter MT5 trading password',
+                        prefixIcon:
+                            const Icon(
+                          Icons.lock_outline,
+                        ),
+                        suffixIcon:
+                            IconButton(
+                          onPressed: () {
+                            setDialogState(() {
+                              obscurePassword =
+                                  !obscurePassword;
+                            });
+                          },
+                          icon: Icon(
+                            obscurePassword
+                                ? Icons
+                                    .visibility_outlined
+                                : Icons
+                                    .visibility_off_outlined,
+                          ),
+                        ),
+                        border:
+                            const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller:
+                          terminalPathController,
+                      decoration:
+                          const InputDecoration(
+                        labelText:
+                            'MT5 Terminal Path',
+                        hintText:
+                            'Optional — normally configured on the server',
+                        prefixIcon:
+                            Icon(
+                          Icons.folder_outlined,
+                        ),
+                        border:
+                            OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _securityBox(
+                      'The MT5 password is sent only for this connection request. Raymond does not save it in the broker account database. A successful connection still does NOT authorize live trading.',
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed:
+                      dialogSubmitting
+                          ? null
+                          : () {
+                              Navigator.of(
+                                dialogContext,
+                              ).pop(null);
+                            },
+                  child:
+                      const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  onPressed:
+                      dialogSubmitting
+                          ? null
+                          : () async {
+                              final password =
+                                  passwordController
+                                      .text;
+
+                              if (password
+                                  .isEmpty) {
+                                ScaffoldMessenger.of(
+                                  dialogContext,
+                                ).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Enter the MT5 password.',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
+
+                              setDialogState(() {
+                                dialogSubmitting =
+                                    true;
+                              });
+
+                              try {
+                                final response =
+                                    await widget.api
+                                        .connectBrokerAccount(
+                                  accountId:
+                                      accountId,
+                                  password:
+                                      password,
+                                  terminalPath:
+                                      terminalPathController
+                                          .text
+                                          .trim(),
+                                );
+
+                                if (!mounted) {
+                                  return;
+                                }
+
+                                Navigator.of(
+                                  dialogContext,
+                                ).pop(response);
+                              } catch (error) {
+                                setDialogState(() {
+                                  dialogSubmitting =
+                                      false;
+                                });
+
+                                ScaffoldMessenger.of(
+                                  dialogContext,
+                                ).showSnackBar(
+                                  SnackBar(
+                                    content:
+                                        Text(
+                                      _friendlyError(
+                                        error,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                  icon: dialogSubmitting
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child:
+                              CircularProgressIndicator(
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Icon(
+                          Icons.link,
+                        ),
+                  label:
+                      const Text('Connect'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    passwordController.dispose();
+    terminalPathController.dispose();
+
+    if (result != null) {
+      await _loadAccounts();
+
+      if (!mounted) return;
+
+      _showConnectionResult(result);
+    }
+  }
+
+  Widget _infoBox(
+    String label,
+    String value,
+  ) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius:
+            BorderRadius.circular(10),
+        border: Border.all(
+          color: border,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: muted,
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showConnectionResult(
+    Map<String, dynamic> result,
+  ) {
+    final status =
+        result['status']?.toString() ??
+            'unknown';
+
+    final verificationRaw =
+        result['verification'];
+
+    final verification =
+        verificationRaw is Map
+            ? Map<String, dynamic>.from(
+                verificationRaw,
+              )
+            : <String, dynamic>{};
+
+    final verified =
+        verification['account_verified'] ==
+            true;
+
+    final tradingAllowed =
+        verification['trading_allowed'] ==
+            true;
+
+    final liveAuthorization =
+        result['live_authorization'] ==
+            true;
+
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: card,
+          title: Row(
+            children: [
+              Icon(
+                verified
+                    ? Icons.verified
+                    : Icons.warning_amber_rounded,
+                color:
+                    verified ? green : orange,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  verified
+                      ? 'MT5 Verified'
+                      : 'Verification Failed',
+                ),
+              ),
+            ],
+          ),
+          content:
+              SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                _resultRow(
+                  'Connection',
+                  status,
+                  verified
+                      ? green
+                      : red,
+                ),
+                _resultRow(
+                  'Terminal connected',
+                  _yesNo(
+                    verification[
+                        'terminal_connected'],
+                  ),
+                  _boolColor(
+                    verification[
+                        'terminal_connected'],
+                  ),
+                ),
+                _resultRow(
+                  'Account number',
+                  _yesNo(
+                    verification[
+                        'account_number_matches'],
+                  ),
+                  _boolColor(
+                    verification[
+                        'account_number_matches'],
+                  ),
+                ),
+                _resultRow(
+                  'Server',
+                  _yesNo(
+                    verification[
+                        'server_matches'],
+                  ),
+                  _boolColor(
+                    verification[
+                        'server_matches'],
+                  ),
+                ),
+                _resultRow(
+                  'Trading allowed',
+                  tradingAllowed
+                      ? 'YES'
+                      : 'NO',
+                  tradingAllowed
+                      ? green
+                      : orange,
+                ),
+                _resultRow(
+                  'Live authorization',
+                  liveAuthorization
+                      ? 'AUTHORIZED'
+                      : 'DISABLED',
+                  liveAuthorization
+                      ? red
+                      : green,
+                ),
+                const SizedBox(height: 14),
+                _securityBox(
+                  'Order created: ${result['order_created'] == true ? 'YES' : 'NO'}. Connection verification never creates a trade.',
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () =>
+                  Navigator.pop(context),
+              child: const Text('Done'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _resultRow(
+    String label,
+    String value,
+    Color color,
+  ) {
+    return Padding(
+      padding:
+          const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: muted,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight:
+                  FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _yesNo(dynamic value) {
+    return value == true ? 'YES' : 'NO';
+  }
+
+  Color _boolColor(dynamic value) {
+    return value == true ? green : red;
+  }
+
+  Future<void> _disconnectAccount(
+    Map<String, dynamic> account,
+  ) async {
+    final accountId =
+        account['account_id']?.toString();
+
+    if (accountId == null ||
+        accountId.isEmpty) {
+      return;
+    }
+
+    final confirmed =
+        await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: card,
+          title: const Text(
+            'Disconnect MT5?',
+          ),
+          content: const Text(
+            'Raymond will disconnect its MT5 session. This does not close broker positions.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(
+                context,
+                false,
+              ),
+              child:
+                  const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.pop(
+                context,
+                true,
+              ),
+              child:
+                  const Text('Disconnect'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
       return;
     }
 
@@ -394,7 +957,8 @@ class _BrokerAccountsPageState
     });
 
     try {
-      await widget.api.selectBrokerAccount(
+      await widget.api
+          .disconnectBrokerAccount(
         accountId,
       );
 
@@ -402,7 +966,59 @@ class _BrokerAccountsPageState
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
+        const SnackBar(
+          content: Text(
+            'MT5 account disconnected. No broker position was closed.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
+        SnackBar(
+          content: Text(
+            _friendlyError(error),
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          submitting = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _selectAccount(
+    Map<String, dynamic> account,
+  ) async {
+    final accountId =
+        account['account_id']?.toString();
+
+    if (accountId == null ||
+        accountId.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      submitting = true;
+    });
+
+    try {
+      await widget.api
+          .selectBrokerAccount(accountId);
+
+      await _loadAccounts();
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
         const SnackBar(
           content: Text(
             'Broker account selected. Live authorization remains disabled.',
@@ -412,7 +1028,8 @@ class _BrokerAccountsPageState
     } catch (error) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
         SnackBar(
           content: Text(
             _friendlyError(error),
@@ -434,7 +1051,8 @@ class _BrokerAccountsPageState
     final accountId =
         account['account_id']?.toString();
 
-    if (accountId == null || accountId.isEmpty) {
+    if (accountId == null ||
+        accountId.isEmpty) {
       return;
     }
 
@@ -443,15 +1061,15 @@ class _BrokerAccountsPageState
     });
 
     try {
-      await widget.api.disableBrokerLive(
-        accountId,
-      );
+      await widget.api
+          .disableBrokerLive(accountId);
 
       await _loadAccounts();
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
         const SnackBar(
           content: Text(
             'Live trading authorization disabled.',
@@ -461,7 +1079,8 @@ class _BrokerAccountsPageState
     } catch (error) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
         SnackBar(
           content: Text(
             _friendlyError(error),
@@ -483,7 +1102,8 @@ class _BrokerAccountsPageState
     final accountId =
         account['account_id']?.toString();
 
-    if (accountId == null || accountId.isEmpty) {
+    if (accountId == null ||
+        accountId.isEmpty) {
       return;
     }
 
@@ -493,27 +1113,33 @@ class _BrokerAccountsPageState
       builder: (context) {
         return AlertDialog(
           backgroundColor: card,
-          title: const Text('Delete account?'),
+          title:
+              const Text('Delete account?'),
           content: const Text(
             'This removes the broker account record from Raymond. A selected account cannot be deleted.',
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(
+              onPressed: () =>
+                  Navigator.pop(
                 context,
                 false,
               ),
-              child: const Text('Cancel'),
+              child:
+                  const Text('Cancel'),
             ),
             FilledButton(
-              style: FilledButton.styleFrom(
+              style:
+                  FilledButton.styleFrom(
                 backgroundColor: red,
               ),
-              onPressed: () => Navigator.pop(
+              onPressed: () =>
+                  Navigator.pop(
                 context,
                 true,
               ),
-              child: const Text('Delete'),
+              child:
+                  const Text('Delete'),
             ),
           ],
         );
@@ -529,25 +1155,25 @@ class _BrokerAccountsPageState
     });
 
     try {
-      await widget.api.deleteBrokerAccount(
-        accountId,
-      );
+      await widget.api
+          .deleteBrokerAccount(accountId);
 
       await _loadAccounts();
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
         const SnackBar(
-          content: Text(
-            'Broker account deleted.',
-          ),
+          content:
+              Text('Broker account deleted.'),
         ),
       );
     } catch (error) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
         SnackBar(
           content: Text(
             _friendlyError(error),
@@ -577,11 +1203,12 @@ class _BrokerAccountsPageState
             Text(
               'Broker Accounts',
               style: TextStyle(
-                fontWeight: FontWeight.w800,
+                fontWeight:
+                    FontWeight.w800,
               ),
             ),
             Text(
-              'MT5 connection management',
+              'Demo / Live MT5 connection',
               style: TextStyle(
                 color: muted,
                 fontSize: 11,
@@ -592,8 +1219,12 @@ class _BrokerAccountsPageState
         actions: [
           IconButton(
             onPressed:
-                loading ? null : _loadAccounts,
-            icon: const Icon(Icons.refresh),
+                loading
+                    ? null
+                    : _loadAccounts,
+            icon: const Icon(
+              Icons.refresh,
+            ),
           ),
         ],
       ),
@@ -605,11 +1236,13 @@ class _BrokerAccountsPageState
             submitting
                 ? null
                 : _showAddAccountDialog,
-        icon: const Icon(Icons.add),
+        icon:
+            const Icon(Icons.add),
         label: const Text(
           'Add Broker',
           style: TextStyle(
-            fontWeight: FontWeight.bold,
+            fontWeight:
+                FontWeight.bold,
           ),
         ),
       ),
@@ -617,7 +1250,8 @@ class _BrokerAccountsPageState
         onRefresh: _loadAccounts,
         child: loading
             ? const Center(
-                child: CircularProgressIndicator(
+                child:
+                    CircularProgressIndicator(
                   color: gold,
                 ),
               )
@@ -632,7 +1266,8 @@ class _BrokerAccountsPageState
       return ListView(
         physics:
             const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(20),
+        padding:
+            const EdgeInsets.all(20),
         children: [
           _errorCard(),
         ],
@@ -643,7 +1278,8 @@ class _BrokerAccountsPageState
       return ListView(
         physics:
             const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(20),
+        padding:
+            const EdgeInsets.all(20),
         children: [
           _introCard(),
           const SizedBox(height: 20),
@@ -655,7 +1291,8 @@ class _BrokerAccountsPageState
     return ListView(
       physics:
           const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(
+      padding:
+          const EdgeInsets.fromLTRB(
         16,
         12,
         16,
@@ -669,21 +1306,26 @@ class _BrokerAccountsPageState
           style: const TextStyle(
             color: muted,
             fontSize: 13,
-            fontWeight: FontWeight.w600,
+            fontWeight:
+                FontWeight.w600,
           ),
         ),
         const SizedBox(height: 10),
-        ...accounts.map(_accountCard),
+        ...accounts.map(
+          _accountCard,
+        ),
       ],
     );
   }
 
   Widget _introCard() {
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding:
+          const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius:
+            BorderRadius.circular(18),
         border: Border.all(
           color: border,
         ),
@@ -702,12 +1344,13 @@ class _BrokerAccountsPageState
             'Connect your broker',
             style: TextStyle(
               fontSize: 20,
-              fontWeight: FontWeight.w800,
+              fontWeight:
+                  FontWeight.w800,
             ),
           ),
           SizedBox(height: 8),
           Text(
-            'Add your MT5 broker account here. Raymond supports multiple broker records and keeps the selected account separate from live-trading authorization.',
+            'Add your MT5 broker account, then use Connect & Verify to test the account and terminal connection.',
             style: TextStyle(
               color: muted,
               height: 1.5,
@@ -720,10 +1363,12 @@ class _BrokerAccountsPageState
 
   Widget _securityBanner() {
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding:
+          const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: gold.withOpacity(.07),
-        borderRadius: BorderRadius.circular(14),
+        borderRadius:
+            BorderRadius.circular(14),
         border: Border.all(
           color: gold.withOpacity(.25),
         ),
@@ -739,7 +1384,7 @@ class _BrokerAccountsPageState
           SizedBox(width: 10),
           Expanded(
             child: Text(
-              'Security gate: selecting a broker does not authorize live trading. Raymond keeps live execution fail-closed until the complete safety, authentication and demo E2E checks pass.',
+              'Connection and verification are separate from live authorization. Raymond can connect to MT5 without creating an order. Live execution remains fail-closed.',
               style: TextStyle(
                 color: muted,
                 fontSize: 12,
@@ -754,10 +1399,12 @@ class _BrokerAccountsPageState
 
   Widget _emptyCard() {
     return Container(
-      padding: const EdgeInsets.all(30),
+      padding:
+          const EdgeInsets.all(30),
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius:
+            BorderRadius.circular(18),
         border: Border.all(
           color: border,
         ),
@@ -774,13 +1421,15 @@ class _BrokerAccountsPageState
             'No broker accounts',
             style: TextStyle(
               fontSize: 18,
-              fontWeight: FontWeight.w700,
+              fontWeight:
+                  FontWeight.w700,
             ),
           ),
           SizedBox(height: 6),
           Text(
             'Add an MT5 account to begin broker configuration.',
-            textAlign: TextAlign.center,
+            textAlign:
+                TextAlign.center,
             style: TextStyle(
               color: muted,
             ),
@@ -792,10 +1441,12 @@ class _BrokerAccountsPageState
 
   Widget _errorCard() {
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding:
+          const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: red.withOpacity(.07),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius:
+            BorderRadius.circular(16),
         border: Border.all(
           color: red.withOpacity(.3),
         ),
@@ -812,7 +1463,8 @@ class _BrokerAccountsPageState
           const Text(
             'Unable to load broker accounts',
             style: TextStyle(
-              fontWeight: FontWeight.bold,
+              fontWeight:
+                  FontWeight.bold,
             ),
           ),
           const SizedBox(height: 6),
@@ -825,9 +1477,12 @@ class _BrokerAccountsPageState
           ),
           const SizedBox(height: 14),
           FilledButton.icon(
-            onPressed: _loadAccounts,
-            icon: const Icon(Icons.refresh),
-            label: const Text('Retry'),
+            onPressed:
+                _loadAccounts,
+            icon:
+                const Icon(Icons.refresh),
+            label:
+                const Text('Retry'),
           ),
         ],
       ),
@@ -841,16 +1496,22 @@ class _BrokerAccountsPageState
         account['selected'] == true;
 
     final verified =
-        account['account_verified'] == true;
+        account['account_verified'] ==
+            true;
 
     final tradingAllowed =
-        account['trading_allowed'] == true;
+        account['trading_allowed'] ==
+            true;
 
     final liveAuthorized =
-        account['live_trading_authorized'] == true;
+        account[
+                'live_trading_authorized'] ==
+            true;
 
     final connection =
-        account['connection_status']?.toString() ??
+        account[
+                    'connection_status']
+                ?.toString() ??
             'disconnected';
 
     final broker =
@@ -858,22 +1519,35 @@ class _BrokerAccountsPageState
             'Unknown broker';
 
     final platform =
-        account['platform']?.toString() ?? 'MT5';
+        account['platform']?.toString() ??
+            'MT5';
 
     final server =
         account['server']?.toString() ??
             'Unknown server';
 
     final accountNumber =
-        account['account_number']?.toString() ??
+        account[
+                    'account_number']
+                ?.toString() ??
             '****';
 
-    final balance = account['balance'];
-    final equity = account['equity'];
+    final balance =
+        account['balance'];
+
+    final equity =
+        account['equity'];
+
+    final lastError =
+        account['last_error']
+                ?.toString() ??
+            '';
 
     return Container(
       margin:
-          const EdgeInsets.only(bottom: 14),
+          const EdgeInsets.only(
+        bottom: 14,
+      ),
       padding:
           const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -884,7 +1558,8 @@ class _BrokerAccountsPageState
           color: selected
               ? gold.withOpacity(.65)
               : border,
-          width: selected ? 1.4 : 1,
+          width:
+              selected ? 1.4 : 1,
         ),
       ),
       child: Column(
@@ -901,7 +1576,9 @@ class _BrokerAccountsPageState
                   color:
                       gold.withOpacity(.1),
                   borderRadius:
-                      BorderRadius.circular(14),
+                      BorderRadius.circular(
+                    14,
+                  ),
                 ),
                 child: const Icon(
                   Icons.account_balance,
@@ -965,7 +1642,10 @@ class _BrokerAccountsPageState
             valueColor:
                 connection == 'connected'
                     ? green
-                    : muted,
+                    : connection ==
+                            'error'
+                        ? red
+                        : muted,
           ),
           _infoRow(
             Icons.verified_outlined,
@@ -977,9 +1657,13 @@ class _BrokerAccountsPageState
           _infoRow(
             Icons.lock_outline,
             'Trading allowed',
-            tradingAllowed ? 'YES' : 'NO',
+            tradingAllowed
+                ? 'YES'
+                : 'NO',
             valueColor:
-                tradingAllowed ? green : muted,
+                tradingAllowed
+                    ? green
+                    : orange,
           ),
           _infoRow(
             Icons.shield_outlined,
@@ -988,7 +1672,9 @@ class _BrokerAccountsPageState
                 ? 'AUTHORIZED'
                 : 'DISABLED',
             valueColor:
-                liveAuthorized ? red : green,
+                liveAuthorized
+                    ? red
+                    : green,
           ),
           if (balance is num)
             _infoRow(
@@ -1003,6 +1689,8 @@ class _BrokerAccountsPageState
               'Equity',
               _money(equity),
             ),
+          if (lastError.isNotEmpty)
+            _errorInline(lastError),
           const SizedBox(height: 14),
           const Divider(
             color: border,
@@ -1012,6 +1700,42 @@ class _BrokerAccountsPageState
             spacing: 8,
             runSpacing: 8,
             children: [
+              FilledButton.icon(
+                onPressed:
+                    submitting
+                        ? null
+                        : () =>
+                            _showConnectDialog(
+                              account,
+                            ),
+                icon: Icon(
+                  verified
+                      ? Icons.refresh
+                      : Icons.link,
+                ),
+                label: Text(
+                  verified
+                      ? 'Reconnect'
+                      : 'Connect & Verify',
+                ),
+              ),
+              if (connection ==
+                      'connected' ||
+                  verified)
+                OutlinedButton.icon(
+                  onPressed:
+                      submitting
+                          ? null
+                          : () =>
+                              _disconnectAccount(
+                                account,
+                              ),
+                  icon: const Icon(
+                    Icons.link_off,
+                  ),
+                  label:
+                      const Text('Disconnect'),
+                ),
               if (!selected)
                 OutlinedButton.icon(
                   onPressed:
@@ -1022,7 +1746,8 @@ class _BrokerAccountsPageState
                                 account,
                               ),
                   icon: const Icon(
-                    Icons.check_circle_outline,
+                    Icons
+                        .check_circle_outline,
                   ),
                   label:
                       const Text('Select'),
@@ -1064,6 +1789,45 @@ class _BrokerAccountsPageState
                     const Text('Delete'),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _errorInline(String text) {
+    return Container(
+      width: double.infinity,
+      margin:
+          const EdgeInsets.only(top: 4),
+      padding:
+          const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: red.withOpacity(.06),
+        borderRadius:
+            BorderRadius.circular(10),
+        border: Border.all(
+          color: red.withOpacity(.2),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.error_outline,
+            color: red,
+            size: 17,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                color: muted,
+                fontSize: 11,
+              ),
+            ),
           ),
         ],
       ),
@@ -1133,7 +1897,8 @@ class _BrokerAccountsPageState
           Flexible(
             child: Text(
               value,
-              textAlign: TextAlign.right,
+              textAlign:
+                  TextAlign.right,
               style: TextStyle(
                 color: valueColor,
                 fontSize: 12,
