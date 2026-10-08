@@ -18,9 +18,7 @@ Responsibilities:
 
 IMPORTANT:
 
-This worker is an execution-support component.
-
-It does NOT place opening orders.
+This worker does NOT open trades.
 
 It does NOT enable LIVE_TRADING_ENABLED.
 
@@ -34,7 +32,7 @@ Recommended deployment sequence:
 
 1. Install worker.
 2. Run with protection disabled.
-3. Run demo-account E2E.
+3. Run demo-account E2E testing.
 4. Validate dry-run calculations.
 5. Enable actual protection on DEMO.
 6. Validate broker modifications.
@@ -150,6 +148,20 @@ def _env_float(
 
 
 class LivePositionProtectionWorker:
+    """
+    Continuous protection worker.
+
+    The worker is independently enabled through:
+
+        RAYMOND_LIVE_PROTECTION_WORKER_ENABLED
+
+    Actual broker SL/TP modification is independently controlled by:
+
+        RAYMOND_POSITION_PROTECTION_ENABLED
+
+    Therefore enabling the worker does not automatically enable
+    broker modification.
+    """
 
     def __init__(
         self,
@@ -343,7 +355,7 @@ class LivePositionProtectionWorker:
             )
 
         # --------------------------------------------------------------
-        # First inspect positions.
+        # Inspect current broker positions.
         # --------------------------------------------------------------
 
         monitor_result = (
@@ -395,8 +407,7 @@ class LivePositionProtectionWorker:
         )
 
         # --------------------------------------------------------------
-        # If the monitor detects critical protection problems, fail
-        # closed rather than inventing an SL/TP.
+        # Fail closed when the monitor reports critical problems.
         # --------------------------------------------------------------
 
         if (
@@ -428,7 +439,7 @@ class LivePositionProtectionWorker:
             return result
 
         # --------------------------------------------------------------
-        # Protection engine.
+        # Protection evaluation.
         #
         # When actual modification is disabled, force dry-run.
         # --------------------------------------------------------------
@@ -444,7 +455,7 @@ class LivePositionProtectionWorker:
         )
 
         # --------------------------------------------------------------
-        # Count actual modifications safely.
+        # Count modifications safely.
         # --------------------------------------------------------------
 
         modified_count = 0
@@ -670,6 +681,21 @@ class LivePositionProtectionWorker:
 
             self.running = False
 
+    # ------------------------------------------------------------------
+    # MANUAL SINGLE CYCLE
+    # ------------------------------------------------------------------
+
+    async def run_once(
+        self,
+    ) -> dict[str, Any]:
+
+        """
+        Execute one protection cycle without starting
+        the continuous background worker.
+        """
+
+        return await self.run_cycle()
+
 
 # ----------------------------------------------------------------------
 # DEFAULT WORKER
@@ -692,18 +718,29 @@ def get_live_position_protection_worker(
             DEFAULT_INTERVAL_SECONDS,
         )
 
+        try:
+
+            magic = int(
+                os.getenv(
+                    "RAYMOND_LIVE_PROTECTION_MAGIC",
+                    str(DEFAULT_MAGIC),
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            magic = DEFAULT_MAGIC
+
         _default_worker = (
             LivePositionProtectionWorker(
                 symbol=os.getenv(
                     "RAYMOND_LIVE_PROTECTION_SYMBOL",
                     DEFAULT_SYMBOL,
                 ),
-                magic=int(
-                    os.getenv(
-                        "RAYMOND_LIVE_PROTECTION_MAGIC",
-                        str(DEFAULT_MAGIC),
-                    )
-                ),
+                magic=magic,
                 interval_seconds=interval,
             )
         )
@@ -757,8 +794,6 @@ async def start_live_position_protection_worker() -> bool:
 
 async def stop_live_position_protection_worker() -> None:
 
-    global _default_worker
-
     if _default_worker is None:
 
         return
@@ -768,4 +803,4 @@ async def stop_live_position_protection_worker() -> None:
     print(
         "RAYMOND 17.6E: "
         "live protection worker stopped."
-        )
+)
