@@ -41,6 +41,7 @@ def _fake_record(**overrides):
         "execution_mode": "demo",
         "idempotency_key": "signal-1",
         "symbol": "XAUUSD",
+        "timeframe": "M15",
         "side": "BUY",
         "volume": 0.01,
         "requested_price": 3000.10,
@@ -184,8 +185,15 @@ async def test_duplicate_signal_is_blocked_before_order_send(
 
     async def fake_account():
         return {
-            "equity": 1000.0,
-            "balance": 1000.0,
+            "account": {
+                "equity": 1000.0,
+                "balance": 1000.0,
+            },
+            "terminal": {
+                "trade_allowed": True,
+                "tradeapi_disabled": False,
+            },
+            "demo": True,
         }
 
     async def fake_spec(symbol):
