@@ -1,17 +1,7 @@
 """
 RAYMOND v2.8 - Broker Integration
 
-Central integration point for Step 17 broker functionality.
-
-Provides:
-
-- Broker account management
-- MT5 broker adapter
-- Live execution gateway
-- Live reconciliation
-- Live position monitoring
-- Live position protection
-- Live protection worker status
+Central integration point for broker functionality.
 """
 
 from fastapi import APIRouter
@@ -46,6 +36,10 @@ try:
         router as live_position_protection_worker_router,
     )
 
+    from .unified_execution_api import (
+        router as unified_execution_router,
+    )
+
 except ImportError:
 
     from broker_accounts import (
@@ -76,68 +70,46 @@ except ImportError:
         router as live_position_protection_worker_router,
     )
 
+    from unified_execution_api import (
+        router as unified_execution_router,
+    )
+
 
 router = APIRouter()
 
-
-# ---------------------------------------------------------------------------
-# BROKER ACCOUNT MANAGEMENT
-# ---------------------------------------------------------------------------
 
 router.include_router(
     broker_accounts_router
 )
 
-
-# ---------------------------------------------------------------------------
-# MT5 BROKER ADAPTER
-# ---------------------------------------------------------------------------
-
 router.include_router(
     mt5_adapter_router
 )
-
-
-# ---------------------------------------------------------------------------
-# LIVE RECONCILIATION
-# ---------------------------------------------------------------------------
 
 router.include_router(
     live_reconciliation_router
 )
 
-
-# ---------------------------------------------------------------------------
-# LIVE POSITION MONITOR
-# ---------------------------------------------------------------------------
-
 router.include_router(
     live_position_monitor_router
 )
-
-
-# ---------------------------------------------------------------------------
-# LIVE POSITION PROTECTION
-# ---------------------------------------------------------------------------
 
 router.include_router(
     live_position_protection_router
 )
 
-
-# ---------------------------------------------------------------------------
-# CONTINUOUS PROTECTION WORKER API
-# ---------------------------------------------------------------------------
-
 router.include_router(
     live_position_protection_worker_router
 )
 
+router.include_router(
+    live_execution_router
+)
 
 # ---------------------------------------------------------------------------
-# LIVE EXECUTION
+# UNIFIED DEMO/LIVE EXECUTION
 # ---------------------------------------------------------------------------
 
 router.include_router(
-    live_execution_router
+    unified_execution_router
 )
