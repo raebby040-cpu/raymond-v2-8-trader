@@ -13,7 +13,7 @@ They verify:
 - clean worker shutdown
 - LIVE evaluation does not automatically execute
 - LIVE payload validation
-- broker market price remains controlled by the execution gateway
+- broker market price is not supplied by the LIVE payload
 """
 
 from __future__ import annotations
@@ -337,7 +337,10 @@ async def test_worker_run_once_fails_closed_on_execution_error(
     assert result["status"] == "error"
     assert result["execution_mode"] == "demo"
     assert result["verified"] is False
-    assert "simulated DEMO execution failure" in result["reason"]
+    assert (
+        "simulated DEMO execution failure"
+        in result["reason"]
+    )
 
 
 @pytest.mark.asyncio
@@ -413,17 +416,41 @@ def test_live_payload_rejects_non_positive_take_profit():
         )
 
 
-def test_live_payload_does_not_accept_market_price():
-    with pytest.raises(Exception):
-        LiveExecutionPayload(
-            mode=ExecutionMode.LIVE,
-            symbol="XAUUSD",
-            side="BUY",
-            volume=0.01,
-            stop_loss=2995.0,
-            take_profit=3010.0,
-            price=3000.10,
-        )
+def test_live_payload_has_no_client_supplied_market_price():
+    payload = LiveExecutionPayload(
+        mode=ExecutionMode.LIVE,
+        symbol="XAUUSD",
+        side="BUY",
+        volume=0.01,
+        stop_loss=2995.0,
+        take_profit=3010.0,
+    )
+
+    assert not hasattr(
+        payload,
+        "price",
+    )
+
+    assert "price" not in (
+        LiveExecutionPayload
+        .model_fields
+    )
+
+
+def test_live_payload_fields_are_explicit():
+    fields = set(
+        LiveExecutionPayload.model_fields.keys()
+    )
+
+    assert fields == {
+        "mode",
+        "symbol",
+        "side",
+        "volume",
+        "stop_loss",
+        "take_profit",
+        "client_order_id",
+    }
 
 
 def test_demo_result_is_explicitly_demo():
