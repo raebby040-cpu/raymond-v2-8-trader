@@ -1,0 +1,14 @@
+MT5 Bridge import snippet for manual insertion into backend/app/main.py
+
+Reference only — this file does not modify main.py automatically.
+
+============================================================
+
+MT5 BRIDGE INTEGRATION
+
+============================================================
+
+try:
+from .mt5_bridge_integration import register_mt5_bridge
+except ImportError:
+from mt5_bridge_integration import register_mt5_bridge
