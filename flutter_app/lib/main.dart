@@ -4,6 +4,7 @@ import 'analysis_page.dart';
 import 'api_service.dart';
 import 'broker_accounts_page.dart';
 import 'chart_page.dart';
+import 'canonical_api_service.dart';
 import 'positions_page.dart';
 import 'settings_page.dart';
 
@@ -66,6 +67,8 @@ class _HomePageState extends State<HomePage> {
   static const double paperStartingBalance = 1000.0;
 
   final ApiService api = ApiService();
+  final CanonicalApiService canonicalApi =
+      CanonicalApiService();
 
   int selectedIndex = 0;
 
@@ -107,45 +110,86 @@ class _HomePageState extends State<HomePage> {
     try {
       final health = await api.health();
 
-      Map<String, dynamic> status = {};
-      Map<String, dynamic> performance = {};
+      Map<String, dynamic> accountResponse = {};
+      Map<String, dynamic> account = {};
+
       List<Map<String, dynamic>> fetchedTrades = [];
       bool fetchedJournal = false;
 
+      // ========================================================
+      // CANONICAL PAPER ACCOUNT
+      // ========================================================
+      //
+      // This is now the authoritative Home-page account source.
+      //
+      // Balance:
+      //   $1,000 + realized P&L
+      //
+      // Equity:
+      //   Balance + unrealized P&L
+      //
+      // Open positions:
+      //   actual persistent paper positions
+      //
+      // This deliberately does NOT use the old Demo account.
+      //
       try {
-        status = await api.demoStatus();
-      } catch (_) {}
+        accountResponse = await canonicalApi.account(
+          mode: 'paper',
+        );
 
-      try {
-        performance = await api.demoPerformance();
-      } catch (_) {}
+        final rawAccount = accountResponse['account'];
 
+        if (rawAccount is Map) {
+          account = Map<String, dynamic>.from(
+            rawAccount,
+          );
+        }
+      } catch (_) {
+        account = {};
+      }
+
+      // ========================================================
+      // PAPER JOURNAL
+      // ========================================================
+      //
+      // The existing journal remains responsible for the
+      // Recent Paper Trades section.
+      //
       try {
-        final journalResponse = await _loadPaperJournal();
+        final journalResponse =
+            await _loadPaperJournal();
 
         fetchedTrades = journalResponse;
         fetchedJournal = true;
       } catch (_) {
+        // Do not use Demo account values for the account card.
+        //
+        // This is only a compatibility fallback for the
+        // existing Recent Trades display.
         try {
           fetchedTrades = await api.demoTrades();
-        } catch (_) {}
+        } catch (_) {
+          fetchedTrades = [];
+        }
       }
 
       if (!mounted) return;
 
       setState(() {
-        backendOnline = health['status'] == 'healthy';
+        backendOnline =
+            health['status'] == 'healthy';
 
-        /*
-         * Balance
-         *
-         * Balance is realized account value.
-         * It should NOT move merely because an open trade
-         * has an unrealized profit or loss.
-         */
+        // ======================================================
+        // BALANCE
+        // ======================================================
+        //
+        // Balance is realized account value.
+        //
+        // An open trade must NOT directly change balance.
+        //
         final balanceValue = _numberFrom(
-          status['balance'],
-          performance['balance'],
+          account['balance'],
         );
 
         if (balanceValue != null) {
@@ -154,68 +198,68 @@ class _HomePageState extends State<HomePage> {
           balance = paperStartingBalance;
         }
 
-        /*
-         * Equity
-         *
-         * Equity = Balance + Unrealized P&L.
-         *
-         * Prefer the canonical backend equity when supplied.
-         */
-        final equityValue = _numberFrom(
-          status['equity'],
-          performance['equity'],
-        );
-
+        // ======================================================
+        // UNREALIZED P&L
+        // ======================================================
+        //
+        // This is the floating P&L of currently open
+        // persistent paper positions.
+        //
         final unrealizedValue = _numberFrom(
-          status['unrealized_pnl'],
-          performance['unrealized_pnl'],
+          account['unrealized_pnl'],
         );
 
-        if (equityValue != null) {
-          equity = equityValue;
-        } else if (unrealizedValue != null) {
+        if (unrealizedValue != null) {
           unrealizedPnl = unrealizedValue;
-          equity = balance + unrealizedPnl;
         } else {
-          equity = balance;
           unrealizedPnl = 0.0;
         }
 
-        /*
-         * If both equity and unrealized P&L are available,
-         * calculate the displayed unrealized value from them
-         * so the three figures remain internally consistent.
-         */
-        if (equityValue != null) {
-          unrealizedPnl = equity - balance;
-        }
+        // ======================================================
+        // EQUITY
+        // ======================================================
+        //
+        // Always maintain:
+        //
+        // Equity = Balance + Unrealized P&L
+        //
+        equity = balance + unrealizedPnl;
 
-        final pnlValue = _numberFrom(
-          performance['total_pnl'],
-          status['total_pnl'],
+        // ======================================================
+        // REALIZED P&L
+        // ======================================================
+        final realizedValue = _numberFrom(
+          account['realized_pnl'],
         );
 
-        if (pnlValue != null) {
-          totalPnl = pnlValue;
+        if (realizedValue != null) {
+          totalPnl = realizedValue;
+        } else {
+          totalPnl = 0.0;
         }
 
+        // ======================================================
+        // OPEN POSITIONS
+        // ======================================================
         final openValue = _numberFrom(
-          performance['open_trades'],
-          status['open_trades'],
+          account['open_positions'],
         );
 
         if (openValue != null) {
           openTrades = openValue.toInt();
+        } else {
+          openTrades = 0;
         }
 
-        final totalValue = _numberFrom(
-          performance['total_trades'],
-          status['total_trades'],
-        );
-
-        if (totalValue != null) {
-          totalTrades = totalValue.toInt();
-        }
+        // ======================================================
+        // TOTAL TRADES
+        // ======================================================
+        //
+        // The account endpoint intentionally does not invent a
+        // trade-history count. Use the persistent journal count
+        // for the existing Home-page field.
+        //
+        totalTrades = fetchedTrades.length;
 
         trades = fetchedTrades;
         journalLoaded = fetchedJournal;
@@ -229,7 +273,7 @@ class _HomePageState extends State<HomePage> {
         loading = false;
         errorMessage = 'Backend unavailable';
 
-        // Never fall back to the old $10,000 value.
+        // Never fall back to the old $10,000 account.
         if (balance <= 0) {
           balance = paperStartingBalance;
         }
@@ -256,7 +300,8 @@ class _HomePageState extends State<HomePage> {
     return null;
   }
 
-  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
+  Future<List<Map<String, dynamic>>>
+      _loadPaperJournal() async {
     final response = await api.paperJournalTrades(
       limit: 50,
       offset: 0,
@@ -450,7 +495,8 @@ class _HomePageState extends State<HomePage> {
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
-        physics: const AlwaysScrollableScrollPhysics(),
+        physics:
+            const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(
           16,
           8,
@@ -458,7 +504,8 @@ class _HomePageState extends State<HomePage> {
           24,
         ),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
             if (errorMessage.isNotEmpty)
               _errorCard(),
@@ -521,15 +568,19 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _paperCard() {
-    final equityPositive = equity >= balance;
-    final unrealizedPositive = unrealizedPnl >= 0;
+    final equityPositive =
+        equity >= balance;
+    final unrealizedPositive =
+        unrealizedPnl >= 0;
 
     return _card(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
           const Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
               Text(
                 'PAPER TRADING',
@@ -573,7 +624,8 @@ class _HomePageState extends State<HomePage> {
 
           // EQUITY
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'Equity',
@@ -584,7 +636,8 @@ class _HomePageState extends State<HomePage> {
               Text(
                 '\$${equity.toStringAsFixed(2)}',
                 style: TextStyle(
-                  color: equityPositive ? green : red,
+                  color:
+                      equityPositive ? green : red,
                   fontSize: 19,
                   fontWeight: FontWeight.bold,
                 ),
@@ -596,7 +649,8 @@ class _HomePageState extends State<HomePage> {
 
           // UNREALIZED P&L
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'Unrealized P&L',
@@ -605,10 +659,13 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
               Text(
-                '${unrealizedPositive ? '+' : ''}\$${unrealizedPnl.toStringAsFixed(2)}',
+                '${unrealizedPositive ? '+' : ''}'
+                '\$${unrealizedPnl.toStringAsFixed(2)}',
                 style: TextStyle(
                   color:
-                      unrealizedPositive ? green : red,
+                      unrealizedPositive
+                          ? green
+                          : red,
                   fontWeight: FontWeight.bold,
                 ),
               ),
@@ -622,10 +679,12 @@ class _HomePageState extends State<HomePage> {
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
               color: const Color(0xFF06111C),
-              borderRadius: BorderRadius.circular(10),
+              borderRadius:
+                  BorderRadius.circular(10),
             ),
             child: const Text(
-              'Balance = realized P&L • Equity = balance + open-trade P&L',
+              'Balance = realized P&L • '
+              'Equity = balance + open-trade P&L',
               style: TextStyle(
                 color: muted,
                 fontSize: 11,
@@ -651,7 +710,8 @@ class _HomePageState extends State<HomePage> {
 
     return _card(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
           const Text(
             'PERFORMANCE',
@@ -662,7 +722,8 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 16),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'Realized P&L',
@@ -671,9 +732,11 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
               Text(
-                '${positive ? '+' : ''}\$${totalPnl.toStringAsFixed(2)}',
+                '${positive ? '+' : ''}'
+                '\$${totalPnl.toStringAsFixed(2)}',
                 style: TextStyle(
-                  color: positive ? green : red,
+                  color:
+                      positive ? green : red,
                   fontSize: 20,
                   fontWeight: FontWeight.bold,
                 ),
@@ -688,10 +751,12 @@ class _HomePageState extends State<HomePage> {
   Widget _tradesCard() {
     return _card(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'RECENT PAPER TRADES',
@@ -716,7 +781,8 @@ class _HomePageState extends State<HomePage> {
             const Center(
               child: Padding(
                 padding: EdgeInsets.all(20),
-                child: CircularProgressIndicator(),
+                child:
+                    CircularProgressIndicator(),
               ),
             )
           else if (trades.isEmpty)
@@ -734,7 +800,9 @@ class _HomePageState extends State<HomePage> {
               ),
             )
           else
-            ...trades.take(5).map(_tradeRow),
+            ...trades
+                .take(5)
+                .map(_tradeRow),
         ],
       ),
     );
@@ -744,7 +812,8 @@ class _HomePageState extends State<HomePage> {
     Map<String, dynamic> trade,
   ) {
     final direction =
-        '${trade['direction'] ?? ''}'.toUpperCase();
+        '${trade['direction'] ?? ''}'
+            .toUpperCase();
 
     final pnlValue = trade['pnl'];
 
@@ -761,7 +830,8 @@ class _HomePageState extends State<HomePage> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: const Color(0xFF06111C),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius:
+            BorderRadius.circular(10),
       ),
       child: Row(
         children: [
@@ -770,7 +840,9 @@ class _HomePageState extends State<HomePage> {
                 ? Icons.arrow_upward
                 : Icons.arrow_downward,
             color:
-                direction == 'BUY' ? green : red,
+                direction == 'BUY'
+                    ? green
+                    : red,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -779,9 +851,11 @@ class _HomePageState extends State<HomePage> {
                   CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${trade['symbol'] ?? 'XAUUSD'} $direction',
+                  '${trade['symbol'] ?? 'XAUUSD'} '
+                  '$direction',
                   style: const TextStyle(
-                    fontWeight: FontWeight.bold,
+                    fontWeight:
+                        FontWeight.bold,
                   ),
                 ),
                 Text(
@@ -795,10 +869,13 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
           Text(
-            '${positive ? '+' : ''}\$${pnl.toStringAsFixed(2)}',
+            '${positive ? '+' : ''}'
+            '\$${pnl.toStringAsFixed(2)}',
             style: TextStyle(
-              color: positive ? green : red,
-              fontWeight: FontWeight.bold,
+              color:
+                  positive ? green : red,
+              fontWeight:
+                  FontWeight.bold,
             ),
           ),
         ],
@@ -815,7 +892,8 @@ class _HomePageState extends State<HomePage> {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius:
+            BorderRadius.circular(16),
         border: Border.all(
           color: border,
         ),
@@ -859,7 +937,8 @@ class _HomePageState extends State<HomePage> {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius:
+            BorderRadius.circular(16),
         border: Border.all(
           color: border,
         ),
@@ -877,7 +956,8 @@ class _HomePageState extends State<HomePage> {
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: red.withOpacity(.10),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius:
+            BorderRadius.circular(12),
         border: Border.all(
           color: red.withOpacity(.30),
         ),
