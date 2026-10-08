@@ -62,6 +62,9 @@ class _HomePageState extends State<HomePage> {
   static const border = Color(0xFF17334D);
   static const muted = Color(0xFF8EA4B8);
 
+  // Canonical paper-account starting balance.
+  static const double paperStartingBalance = 1000.0;
+
   final ApiService api = ApiService();
 
   int selectedIndex = 0;
@@ -71,8 +74,11 @@ class _HomePageState extends State<HomePage> {
 
   String errorMessage = '';
 
-  double balance = 10000.0;
+  double balance = paperStartingBalance;
+  double equity = paperStartingBalance;
+  double unrealizedPnl = 0.0;
   double totalPnl = 0.0;
+
   int openTrades = 0;
   int totalTrades = 0;
 
@@ -115,8 +121,7 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
 
       try {
-        final journalResponse =
-            await _loadPaperJournal();
+        final journalResponse = await _loadPaperJournal();
 
         fetchedTrades = journalResponse;
         fetchedJournal = true;
@@ -129,47 +134,87 @@ class _HomePageState extends State<HomePage> {
       if (!mounted) return;
 
       setState(() {
-        backendOnline =
-            health['status'] == 'healthy';
+        backendOnline = health['status'] == 'healthy';
 
-        final balanceValue =
-            status['balance'];
+        /*
+         * Balance
+         *
+         * Balance is realized account value.
+         * It should NOT move merely because an open trade
+         * has an unrealized profit or loss.
+         */
+        final balanceValue = _numberFrom(
+          status['balance'],
+          performance['balance'],
+        );
 
-        if (balanceValue is num) {
-          balance =
-              balanceValue.toDouble();
-        }
-
-        final pnlValue =
-            performance['total_pnl'];
-
-        if (pnlValue is num) {
-          totalPnl =
-              pnlValue.toDouble();
-        }
-
-        final openValue =
-            performance['open_trades'];
-
-        if (openValue is num) {
-          openTrades =
-              openValue.toInt();
+        if (balanceValue != null) {
+          balance = balanceValue;
         } else {
-          final statusOpen =
-              status['open_trades'];
-
-          if (statusOpen is num) {
-            openTrades =
-                statusOpen.toInt();
-          }
+          balance = paperStartingBalance;
         }
 
-        final totalValue =
-            performance['total_trades'];
+        /*
+         * Equity
+         *
+         * Equity = Balance + Unrealized P&L.
+         *
+         * Prefer the canonical backend equity when supplied.
+         */
+        final equityValue = _numberFrom(
+          status['equity'],
+          performance['equity'],
+        );
 
-        if (totalValue is num) {
-          totalTrades =
-              totalValue.toInt();
+        final unrealizedValue = _numberFrom(
+          status['unrealized_pnl'],
+          performance['unrealized_pnl'],
+        );
+
+        if (equityValue != null) {
+          equity = equityValue;
+        } else if (unrealizedValue != null) {
+          unrealizedPnl = unrealizedValue;
+          equity = balance + unrealizedPnl;
+        } else {
+          equity = balance;
+          unrealizedPnl = 0.0;
+        }
+
+        /*
+         * If both equity and unrealized P&L are available,
+         * calculate the displayed unrealized value from them
+         * so the three figures remain internally consistent.
+         */
+        if (equityValue != null) {
+          unrealizedPnl = equity - balance;
+        }
+
+        final pnlValue = _numberFrom(
+          performance['total_pnl'],
+          status['total_pnl'],
+        );
+
+        if (pnlValue != null) {
+          totalPnl = pnlValue;
+        }
+
+        final openValue = _numberFrom(
+          performance['open_trades'],
+          status['open_trades'],
+        );
+
+        if (openValue != null) {
+          openTrades = openValue.toInt();
+        }
+
+        final totalValue = _numberFrom(
+          performance['total_trades'],
+          status['total_trades'],
+        );
+
+        if (totalValue != null) {
+          totalTrades = totalValue.toInt();
         }
 
         trades = fetchedTrades;
@@ -182,22 +227,42 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         backendOnline = false;
         loading = false;
-        errorMessage =
-            'Backend unavailable';
+        errorMessage = 'Backend unavailable';
+
+        // Never fall back to the old $10,000 value.
+        if (balance <= 0) {
+          balance = paperStartingBalance;
+        }
+
+        if (equity <= 0) {
+          equity = balance;
+        }
       });
     }
   }
 
-  Future<List<Map<String, dynamic>>>
-      _loadPaperJournal() async {
-    final response =
-        await api.paperJournalTrades(
+  double? _numberFrom(
+    dynamic first, [
+    dynamic second,
+  ]) {
+    if (first is num) {
+      return first.toDouble();
+    }
+
+    if (second is num) {
+      return second.toDouble();
+    }
+
+    return null;
+  }
+
+  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
+    final response = await api.paperJournalTrades(
       limit: 50,
       offset: 0,
     );
 
-    final rawTrades =
-        response['trades'];
+    final rawTrades = response['trades'];
 
     if (rawTrades is! List) {
       throw const FormatException(
@@ -208,10 +273,7 @@ class _HomePageState extends State<HomePage> {
     return rawTrades
         .whereType<Map>()
         .map(
-          (item) =>
-              Map<String, dynamic>.from(
-            item,
-          ),
+          (item) => Map<String, dynamic>.from(item),
         )
         .toList();
   }
@@ -246,29 +308,23 @@ class _HomePageState extends State<HomePage> {
           _connectionBadge(),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed:
-                loading ? null : _refresh,
+            onPressed: loading ? null : _refresh,
           ),
         ],
       ),
       body: _buildBody(),
-      bottomNavigationBar:
-          NavigationBar(
-        backgroundColor:
-            const Color(0xFF06111C),
+      bottomNavigationBar: NavigationBar(
+        backgroundColor: const Color(0xFF06111C),
         selectedIndex: selectedIndex,
-        indicatorColor:
-            gold.withOpacity(.16),
-        onDestinationSelected:
-            (index) {
+        indicatorColor: gold.withOpacity(.16),
+        onDestinationSelected: (index) {
           setState(() {
             selectedIndex = index;
           });
         },
         destinations: const [
           NavigationDestination(
-            icon:
-                Icon(Icons.home_outlined),
+            icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(
               Icons.home,
               color: gold,
@@ -329,21 +385,17 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _connectionBadge() {
-    final color =
-        backendOnline ? green : red;
+    final color = backendOnline ? green : red;
 
     return Container(
-      margin:
-          const EdgeInsets.only(right: 8),
-      padding:
-          const EdgeInsets.symmetric(
+      margin: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.symmetric(
         horizontal: 9,
         vertical: 5,
       ),
       decoration: BoxDecoration(
         color: color.withOpacity(.12),
-        borderRadius:
-            BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: color.withOpacity(.35),
         ),
@@ -357,14 +409,11 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(width: 5),
           Text(
-            backendOnline
-                ? 'ONLINE'
-                : 'OFFLINE',
+            backendOnline ? 'ONLINE' : 'OFFLINE',
             style: TextStyle(
               color: color,
               fontSize: 11,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
         ],
@@ -401,18 +450,15 @@ class _HomePageState extends State<HomePage> {
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
-        physics:
-            const AlwaysScrollableScrollPhysics(),
-        padding:
-            const EdgeInsets.fromLTRB(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(
           16,
           8,
           16,
           24,
         ),
         child: Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (errorMessage.isNotEmpty)
               _errorCard(),
@@ -431,8 +477,7 @@ class _HomePageState extends State<HomePage> {
               'Live market connection',
               style: TextStyle(
                 fontSize: 26,
-                fontWeight:
-                    FontWeight.w800,
+                fontWeight: FontWeight.w800,
               ),
             ),
 
@@ -476,42 +521,120 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _paperCard() {
+    final equityPositive = equity >= balance;
+    final unrealizedPositive = unrealizedPnl >= 0;
+
     return _card(
       child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Row(
-            mainAxisAlignment:
-                MainAxisAlignment.spaceBetween,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
                 'PAPER TRADING',
                 style: TextStyle(
                   color: gold,
-                  fontWeight:
-                      FontWeight.bold,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
               Icon(
-                Icons
-                    .account_balance_wallet_outlined,
+                Icons.account_balance_wallet_outlined,
                 color: gold,
               ),
             ],
           ),
+
           const SizedBox(height: 18),
+
+          // BALANCE
+          const Text(
+            'BALANCE',
+            style: TextStyle(
+              color: muted,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+
+          const SizedBox(height: 4),
+
           loading
               ? const LinearProgressIndicator()
               : Text(
                   '\$${balance.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontSize: 28,
-                    fontWeight:
-                        FontWeight.w800,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
+
+          const SizedBox(height: 14),
+
+          // EQUITY
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Equity',
+                style: TextStyle(
+                  color: muted,
+                ),
+              ),
+              Text(
+                '\$${equity.toStringAsFixed(2)}',
+                style: TextStyle(
+                  color: equityPositive ? green : red,
+                  fontSize: 19,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+
+          // UNREALIZED P&L
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Unrealized P&L',
+                style: TextStyle(
+                  color: muted,
+                ),
+              ),
+              Text(
+                '${unrealizedPositive ? '+' : ''}\$${unrealizedPnl.toStringAsFixed(2)}',
+                style: TextStyle(
+                  color:
+                      unrealizedPositive ? green : red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 14),
+
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF06111C),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Text(
+              'Balance = realized P&L • Equity = balance + open-trade P&L',
+              style: TextStyle(
+                color: muted,
+                fontSize: 11,
+              ),
+            ),
+          ),
+
           const SizedBox(height: 12),
+
           const Text(
             'Real-money trading is disabled.',
             style: TextStyle(
@@ -528,24 +651,21 @@ class _HomePageState extends State<HomePage> {
 
     return _card(
       child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
             'PERFORMANCE',
             style: TextStyle(
               color: gold,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
           const SizedBox(height: 16),
           Row(
-            mainAxisAlignment:
-                MainAxisAlignment.spaceBetween,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
-                'Total P&L',
+                'Realized P&L',
                 style: TextStyle(
                   color: muted,
                 ),
@@ -553,11 +673,9 @@ class _HomePageState extends State<HomePage> {
               Text(
                 '${positive ? '+' : ''}\$${totalPnl.toStringAsFixed(2)}',
                 style: TextStyle(
-                  color:
-                      positive ? green : red,
+                  color: positive ? green : red,
                   fontSize: 20,
-                  fontWeight:
-                      FontWeight.bold,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ],
@@ -570,19 +688,16 @@ class _HomePageState extends State<HomePage> {
   Widget _tradesCard() {
     return _card(
       child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment:
-                MainAxisAlignment.spaceBetween,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'RECENT PAPER TRADES',
                 style: TextStyle(
                   color: gold,
-                  fontWeight:
-                      FontWeight.bold,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
               if (journalLoaded)
@@ -591,8 +706,7 @@ class _HomePageState extends State<HomePage> {
                   style: TextStyle(
                     color: muted,
                     fontSize: 10,
-                    fontWeight:
-                        FontWeight.bold,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
             ],
@@ -601,16 +715,13 @@ class _HomePageState extends State<HomePage> {
           if (loading)
             const Center(
               child: Padding(
-                padding:
-                    EdgeInsets.all(20),
-                child:
-                    CircularProgressIndicator(),
+                padding: EdgeInsets.all(20),
+                child: CircularProgressIndicator(),
               ),
             )
           else if (trades.isEmpty)
             const Padding(
-              padding:
-                  EdgeInsets.symmetric(
+              padding: EdgeInsets.symmetric(
                 vertical: 20,
               ),
               child: Center(
@@ -623,9 +734,7 @@ class _HomePageState extends State<HomePage> {
               ),
             )
           else
-            ...trades
-                .take(5)
-                .map(_tradeRow),
+            ...trades.take(5).map(_tradeRow),
         ],
       ),
     );
@@ -635,8 +744,7 @@ class _HomePageState extends State<HomePage> {
     Map<String, dynamic> trade,
   ) {
     final direction =
-        '${trade['direction'] ?? ''}'
-            .toUpperCase();
+        '${trade['direction'] ?? ''}'.toUpperCase();
 
     final pnlValue = trade['pnl'];
 
@@ -647,17 +755,13 @@ class _HomePageState extends State<HomePage> {
     final positive = pnl >= 0;
 
     return Container(
-      margin:
-          const EdgeInsets.only(
+      margin: const EdgeInsets.only(
         bottom: 8,
       ),
-      padding:
-          const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color:
-            const Color(0xFF06111C),
-        borderRadius:
-            BorderRadius.circular(10),
+        color: const Color(0xFF06111C),
+        borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
         children: [
@@ -666,9 +770,7 @@ class _HomePageState extends State<HomePage> {
                 ? Icons.arrow_upward
                 : Icons.arrow_downward,
             color:
-                direction == 'BUY'
-                    ? green
-                    : red,
+                direction == 'BUY' ? green : red,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -678,16 +780,13 @@ class _HomePageState extends State<HomePage> {
               children: [
                 Text(
                   '${trade['symbol'] ?? 'XAUUSD'} $direction',
-                  style:
-                      const TextStyle(
-                    fontWeight:
-                        FontWeight.bold,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
                 Text(
                   '${trade['status'] ?? 'unknown'}',
-                  style:
-                      const TextStyle(
+                  style: const TextStyle(
                     color: muted,
                     fontSize: 12,
                   ),
@@ -698,10 +797,8 @@ class _HomePageState extends State<HomePage> {
           Text(
             '${positive ? '+' : ''}\$${pnl.toStringAsFixed(2)}',
             style: TextStyle(
-              color:
-                  positive ? green : red,
-              fontWeight:
-                  FontWeight.bold,
+              color: positive ? green : red,
+              fontWeight: FontWeight.bold,
             ),
           ),
         ],
@@ -715,12 +812,10 @@ class _HomePageState extends State<HomePage> {
     String subtitle,
   ) {
     return Container(
-      padding:
-          const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: card,
-        borderRadius:
-            BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: border,
         ),
@@ -740,8 +835,7 @@ class _HomePageState extends State<HomePage> {
             value,
             style: const TextStyle(
               fontSize: 23,
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
           const SizedBox(height: 4),
@@ -762,12 +856,10 @@ class _HomePageState extends State<HomePage> {
   }) {
     return Container(
       width: double.infinity,
-      padding:
-          const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: card,
-        borderRadius:
-            BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: border,
         ),
@@ -779,16 +871,13 @@ class _HomePageState extends State<HomePage> {
   Widget _errorCard() {
     return Container(
       width: double.infinity,
-      margin:
-          const EdgeInsets.only(
+      margin: const EdgeInsets.only(
         bottom: 14,
       ),
-      padding:
-          const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: red.withOpacity(.10),
-        borderRadius:
-            BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: red.withOpacity(.30),
         ),
