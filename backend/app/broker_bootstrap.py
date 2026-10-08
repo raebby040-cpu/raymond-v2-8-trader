@@ -15,6 +15,11 @@ LIVE protection worker:
 
 LIVE authorization:
     Mounted as an API route, but disabled by default.
+
+Canonical trading state:
+    Mounted as a read-only API route.
+
+The canonical state does not place orders.
 """
 
 from fastapi import FastAPI
@@ -27,7 +32,8 @@ def mount_broker_integration(
     app: FastAPI,
 ) -> None:
     """
-    Mount broker APIs and register broker worker lifecycles.
+    Mount broker APIs, canonical state APIs and register
+    broker worker lifecycles.
     """
 
     global _worker_registered
@@ -39,6 +45,10 @@ def mount_broker_integration(
 
         from .live_authorization import (
             router as live_authorization_router,
+        )
+
+        from .canonical_state import (
+            router as canonical_state_router,
         )
 
         from .live_position_protection_worker import (
@@ -60,6 +70,10 @@ def mount_broker_integration(
             router as live_authorization_router,
         )
 
+        from canonical_state import (
+            router as canonical_state_router,
+        )
+
         from live_position_protection_worker import (
             start_live_position_protection_worker,
             stop_live_position_protection_worker,
@@ -70,9 +84,9 @@ def mount_broker_integration(
             stop_demo_execution_worker,
         )
 
-    # --------------------------------------------------------------
-    # API routes
-    # --------------------------------------------------------------
+    # ----------------------------------------------------------
+    # API ROUTES
+    # ----------------------------------------------------------
 
     app.include_router(
         broker_router,
@@ -82,9 +96,13 @@ def mount_broker_integration(
         live_authorization_router,
     )
 
-    # --------------------------------------------------------------
-    # Worker lifecycle
-    # --------------------------------------------------------------
+    app.include_router(
+        canonical_state_router,
+    )
+
+    # ----------------------------------------------------------
+    # WORKER LIFECYCLE
+    # ----------------------------------------------------------
 
     if _worker_registered:
         return
