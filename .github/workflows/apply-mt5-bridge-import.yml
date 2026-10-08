@@ -1,0 +1,49 @@
+
+name: Apply MT5 Bridge Integration
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - scripts/add_mt5_bridge_import.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply-integration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ github.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Apply MT5 Bridge integration
+        run: python scripts/add_mt5_bridge_import.py
+
+      - name: Validate Python syntax
+        run: python -m py_compile backend/app/main.py
+
+      - name: Commit main.py if changed
+        run: |
+          if git diff --quiet -- backend/app/main.py; then
+            echo "main.py already contains the integration."
+            exit 0
+          fi
+
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/app/main.py
+          git commit -m "Register read-only MT5 Bridge API"
+          git push origin HEAD:main
