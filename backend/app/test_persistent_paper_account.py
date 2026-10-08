@@ -1,30 +1,41 @@
 """Stage 19 persistent paper-account tests."""
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from app.models import Base, PositionStatus, TradeDirection
 from app.position_repository import PositionRepository
 from app.persistent_paper_account import (
     PAPER_STARTING_BALANCE,
     build_persistent_paper_account,
 )
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-import pytest
 
 
 @pytest.fixture()
 def persistent_account_db(tmp_path, monkeypatch):
     path = tmp_path / "stage19_account.db"
+
     engine = create_engine(
         f"sqlite:///{path}",
         connect_args={"check_same_thread": False},
     )
+
     Base.metadata.create_all(bind=engine)
-    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    Session = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=engine,
+    )
+
     monkeypatch.setattr(
         "app.persistent_paper_account.SessionLocal",
         Session,
     )
+
     db = Session()
+
     try:
         yield db, engine
     finally:
@@ -52,7 +63,12 @@ def test_persistent_account_uses_closed_position_pnl(
 ):
     db, _ = persistent_account_db
 
-    position = _position(db, "ACC-CLOSED", "ACC-TRADE-CLOSED")
+    position = _position(
+        db,
+        "ACC-CLOSED",
+        "ACC-TRADE-CLOSED",
+    )
+
     PositionRepository.close(
         db,
         position.position_id,
@@ -66,9 +82,12 @@ def test_persistent_account_uses_closed_position_pnl(
     # XAUUSD:
     # (4305 - 4300) × 1.00 lot × 100 = $500.
     assert account["realized_pnl"] == 500.0
-    assert account["balance"] == 10500.0
+
+    # Canonical paper account starts at $1,000.
+    assert account["balance"] == 1500.0
+
     assert account["unrealized_pnl"] == 0.0
-    assert account["equity"] == 10500.0
+    assert account["equity"] == 1500.0
 
 
 def test_persistent_account_includes_open_pnl_in_equity(
@@ -76,19 +95,31 @@ def test_persistent_account_includes_open_pnl_in_equity(
 ):
     db, _ = persistent_account_db
 
-    position = _position(db, "ACC-OPEN", "ACC-TRADE-OPEN")
+    position = _position(
+        db,
+        "ACC-OPEN",
+        "ACC-TRADE-OPEN",
+    )
+
     position.current_price = 4310.0
 
-    # This test intentionally assigns the PnL manually because it is
-    # testing account aggregation, not PositionRepository price calculation.
+    # This test intentionally assigns PnL manually because it is
+    # testing account aggregation, not PositionRepository price
+    # calculation.
     position.pnl = 10.0
 
     db.commit()
 
     account = build_persistent_paper_account()
 
+    assert account["starting_balance"] == 1000.0
     assert account["realized_pnl"] == 0.0
     assert account["unrealized_pnl"] == 10.0
-    assert account["balance"] == 10000.0
-    assert account["equity"] == 10010.0
+
+    # Balance does NOT include unrealized PnL.
+    assert account["balance"] == 1000.0
+
+    # Equity DOES include unrealized PnL.
+    assert account["equity"] == 1010.0
+
     assert account["open_positions"] == 1.0
