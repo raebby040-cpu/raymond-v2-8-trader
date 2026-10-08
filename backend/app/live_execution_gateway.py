@@ -1,77 +1,46 @@
 """
 RAYMOND v2.8 - Live MT5 Execution Gateway
 
-STEP 17.4B
+STEP 17.5B
 
-Provides the real MT5 execution boundary.
+Real MT5 execution boundary with:
 
-Execution flow:
-
-    Raymond decision
-        |
-        v
-    LiveExecutionGateway
-        |
-        +--> Environment live-trading gate
-        |
-        +--> Independent Raymond LIVE ARM gate
-        |
-        +--> Selected broker account
-        |
-        +--> Explicit live authorization
-        |
-        +--> Emergency-stop safety gate
-        |
-        +--> MT5 connection health
-        |
-        +--> MT5 account trading permission
-        |
-        +--> Symbol specification
-        |
-        +--> Order validation
-        |
-        +--> MT5 order_check()
-        |
-        +--> MT5 order_send()
-        |
-        +--> Broker position verification
-        |
-        v
-    Verified execution result
+- Environment live-trading gate
+- Explicit Raymond live ARM gate
+- Selected broker account gate
+- Account verification
+- Account live authorization
+- Emergency stop
+- MT5 heartbeat
+- MT5 account permissions
+- MT5 terminal permissions
+- Broker symbol specification
+- Direction validation
+- Volume validation
+- Current market price validation
+- Stop-loss / take-profit validation
+- Risk/reward validation
+- Broker minimum stop distance
+- LIVE POSITION RECONCILIATION
+- MT5 order_check()
+- MT5 order_send()
+- Broker execution verification
+- Raymond live-position registration
+- Post-execution reconciliation
 
 IMPORTANT:
 
 This module contains the real MT5 order path.
 
-It remains fail-closed unless ALL independent safety
-conditions are satisfied.
+It remains fail-closed.
 
-Required conditions include:
+A live order requires ALL relevant safety gates to pass.
 
-1. LIVE_TRADING_ENABLED=true
-2. Raymond live execution is explicitly ARMED
-3. Selected broker account exists
-4. Selected account is explicitly live-authorized
-5. Account is marked verified
-6. Account trading permission is enabled
-7. Emergency stop is inactive
-8. MT5 heartbeat is healthy
-9. MT5 terminal allows trading
-10. Symbol allows the requested direction
-11. Volume satisfies broker constraints
-12. Stop-loss is present
-13. Take-profit is present
-14. Risk/reward requirements pass
-15. MT5 order_check() accepts the request
-16. MT5 order_send() succeeds
-17. Resulting broker position/order can be verified
+No broker password is returned.
 
-The live ARM state is intentionally independent from
-LIVE_TRADING_ENABLED.
+No strategy optimization is performed here.
 
-Restarting the backend automatically disarms live trading.
-
-This module NEVER returns broker passwords.
+No order is sent unless the complete safety chain passes.
 """
 
 from __future__ import annotations
@@ -106,6 +75,13 @@ try:
         live_safety_status,
     )
 
+    from .live_reconciliation import (
+        reconcile_live_positions,
+        require_reconciliation_safe,
+        register_live_position,
+        reconciliation_status,
+    )
+
     from .mt5_service import (
         MT5ServiceError,
         mt5,
@@ -133,6 +109,13 @@ except ImportError:
         live_safety_status,
     )
 
+    from live_reconciliation import (
+        reconcile_live_positions,
+        require_reconciliation_safe,
+        register_live_position,
+        reconciliation_status,
+    )
+
     from mt5_service import (
         MT5ServiceError,
         mt5,
@@ -154,11 +137,10 @@ class LiveExecutionError(RuntimeError):
     """
     Raised when live execution cannot safely proceed.
     """
-    pass
 
 
 # ============================================================
-# REQUEST / RESPONSE MODELS
+# REQUEST MODEL
 # ============================================================
 
 class LiveOrderRequest(BaseModel):
@@ -207,12 +189,12 @@ class LiveOrderRequest(BaseModel):
     )
 
 
+# ============================================================
+# RESULT MODEL
+# ============================================================
+
 @dataclass(frozen=True)
 class LiveExecutionResult:
-    """
-    Normalized verified execution result.
-    """
-
     status: str
 
     execution_type: str
@@ -263,9 +245,7 @@ risk_engine = RiskEngine()
 
 def _environment_live_enabled() -> bool:
     """
-    Require the explicit production live-trading switch.
-
-    This is only one gate among several.
+    Explicit production live-trading switch.
 
     Default is FALSE.
     """
@@ -282,17 +262,14 @@ def _environment_live_enabled() -> bool:
 
 
 # ============================================================
-# DATABASE ACCOUNT GATE
+# SELECTED BROKER ACCOUNT
 # ============================================================
 
 def _get_selected_account():
     """
-    Return the currently selected broker account.
+    Return selected broker account metadata.
 
-    The account must be explicitly selected before
-    live execution.
-
-    Raw credentials are never returned.
+    Credentials are never returned.
     """
 
     db = SessionLocal()
@@ -318,7 +295,8 @@ def _get_selected_account():
 
         if not account.trading_allowed:
             raise LiveExecutionError(
-                "Trading is not allowed on the selected broker account."
+                "Trading is not allowed on the selected "
+                "broker account."
             )
 
         if not account.live_trading_authorized:
@@ -344,9 +322,6 @@ def _get_selected_account():
 # ============================================================
 
 def _require_mt5() -> None:
-    """
-    Make sure the MetaTrader5 Python package is available.
-    """
 
     if mt5 is None:
         raise LiveExecutionError(
@@ -355,15 +330,10 @@ def _require_mt5() -> None:
 
 
 # ============================================================
-# ORDER TYPE HELPERS
+# ORDER TYPE
 # ============================================================
 
-def _order_type_for_side(
-    side: str,
-):
-    """
-    Convert BUY/SELL into MT5 order type.
-    """
+def _order_type_for_side(side: str):
 
     normalized = side.upper().strip()
 
@@ -378,16 +348,7 @@ def _order_type_for_side(
     )
 
 
-def _position_type_for_side(
-    side: str,
-):
-    """
-    Convert BUY/SELL into MT5 position type.
-
-    MT5:
-        BUY  = 0
-        SELL = 1
-    """
+def _position_type_for_side(side: str):
 
     normalized = side.upper().strip()
 
@@ -409,10 +370,6 @@ def _position_type_for_side(
 def _symbol_specification_from_dict(
     data: dict,
 ) -> SymbolSpecification:
-    """
-    Convert the broker specification returned by MT5Service
-    into Raymond's SymbolSpecification.
-    """
 
     required_fields = [
         "symbol",
@@ -452,25 +409,15 @@ def _symbol_specification_from_dict(
 
     try:
         return SymbolSpecification(
-            symbol=str(
-                data["symbol"]
-            ),
+            symbol=str(data["symbol"]),
 
-            digits=int(
-                data["digits"]
-            ),
+            digits=int(data["digits"]),
 
-            point=float(
-                data["point"]
-            ),
+            point=float(data["point"]),
 
-            tick_size=float(
-                data["tick_size"]
-            ),
+            tick_size=float(data["tick_size"]),
 
-            tick_value=float(
-                data["tick_value"]
-            ),
+            tick_value=float(data["tick_value"]),
 
             tick_value_profit=float(
                 data["tick_value_profit"]
@@ -549,16 +496,13 @@ def _symbol_specification_from_dict(
 
 
 # ============================================================
-# PRICE / VOLUME HELPERS
+# NORMALIZATION
 # ============================================================
 
 def _normalize_price(
     price: float,
     digits: int,
 ) -> float:
-    """
-    Normalize price to broker symbol precision.
-    """
 
     return round(
         float(price),
@@ -570,12 +514,6 @@ def _normalize_volume(
     volume: float,
     specification: SymbolSpecification,
 ) -> float:
-    """
-    Normalize requested volume to the broker volume step.
-
-    The caller separately verifies that the original
-    request was already aligned to the broker step.
-    """
 
     step = specification.volume_step
 
@@ -588,9 +526,7 @@ def _normalize_volume(
         volume / step
     )
 
-    normalized = (
-        steps * step
-    )
+    normalized = steps * step
 
     return round(
         normalized,
@@ -599,62 +535,45 @@ def _normalize_volume(
 
 
 # ============================================================
-# COMPLETE LIVE SAFETY VALIDATION
+# PRE-TRADE SAFETY GATES
 # ============================================================
 
 async def _validate_live_gate(
     request: LiveOrderRequest,
 ):
-    """
-    Validate every independent live-trading condition.
 
-    IMPORTANT:
-
-    The explicit Raymond LIVE ARM check happens FIRST.
-
-    This means a non-armed system cannot reach:
-
-        mt5.order_check()
-
-    or:
-
-        mt5.order_send()
-    """
-
-    # ========================================================
-    # GATE 1
-    # ENVIRONMENT LIVE SWITCH
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 1 - ENVIRONMENT
+    # --------------------------------------------------------
 
     if not _environment_live_enabled():
+
         raise LiveExecutionError(
             "LIVE_TRADING_ENABLED is false."
         )
 
-    # ========================================================
-    # GATE 2
-    # EXPLICIT RAYMOND LIVE ARM
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 2 - EXPLICIT LIVE ARM
+    # --------------------------------------------------------
 
     try:
         require_live_armed()
 
     except PermissionError as exc:
+
         raise LiveExecutionError(
             str(exc)
         ) from exc
 
-    # ========================================================
-    # GATE 3
-    # SELECTED BROKER ACCOUNT
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 3 - SELECTED ACCOUNT
+    # --------------------------------------------------------
 
     account = _get_selected_account()
 
-    # ========================================================
-    # GATE 4
-    # PLATFORM
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 4 - PLATFORM
+    # --------------------------------------------------------
 
     if (
         str(
@@ -662,21 +581,23 @@ async def _validate_live_gate(
         ).upper()
         != "MT5"
     ):
+
         raise LiveExecutionError(
             "The selected broker account is not an MT5 account."
         )
 
-    # ========================================================
-    # GATE 5
-    # MT5 HEARTBEAT
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 5 - MT5 HEARTBEAT
+    # --------------------------------------------------------
 
     try:
+
         heartbeat = (
             await mt5_service.heartbeat()
         )
 
     except Exception as exc:
+
         raise LiveExecutionError(
             f"Unable to verify MT5 heartbeat: {exc}"
         ) from exc
@@ -685,38 +606,39 @@ async def _validate_live_gate(
         "connected",
         False,
     ):
+
         raise LiveExecutionError(
             "MT5 connection is not healthy."
         )
 
-    # Record a successful heartbeat only after
-    # the broker service confirmed connectivity.
     safety_manager.record_heartbeat()
 
-    # ========================================================
-    # GATE 6
-    # EMERGENCY STOP
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 6 - EMERGENCY STOP
+    # --------------------------------------------------------
 
     try:
+
         safety_manager.require_trade_permission()
 
     except EmergencyStopError as exc:
+
         raise LiveExecutionError(
             str(exc)
         ) from exc
 
-    # ========================================================
-    # GATE 7
-    # BROKER ACCOUNT PERMISSION
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 7 - ACCOUNT PERMISSION
+    # --------------------------------------------------------
 
     try:
+
         account_info = (
             await mt5_service.get_account_info()
         )
 
     except MT5ServiceError as exc:
+
         raise LiveExecutionError(
             f"Unable to read broker account: {exc}"
         ) from exc
@@ -725,6 +647,7 @@ async def _validate_live_gate(
         "trade_allowed",
         False,
     ):
+
         raise LiveExecutionError(
             "Broker account does not permit trading."
         )
@@ -733,22 +656,24 @@ async def _validate_live_gate(
         "trade_expert",
         False,
     ):
+
         raise LiveExecutionError(
             "MT5 Expert Advisor/API trading permission "
             "is not enabled."
         )
 
-    # ========================================================
-    # GATE 8
-    # MT5 TERMINAL
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 8 - TERMINAL
+    # --------------------------------------------------------
 
     try:
+
         terminal = (
             await mt5_service.get_terminal_info()
         )
 
     except MT5ServiceError as exc:
+
         raise LiveExecutionError(
             f"Unable to read MT5 terminal: {exc}"
         ) from exc
@@ -757,6 +682,7 @@ async def _validate_live_gate(
         "connected",
         False,
     ):
+
         raise LiveExecutionError(
             "MT5 terminal is not connected."
         )
@@ -765,6 +691,7 @@ async def _validate_live_gate(
         "trade_allowed",
         False,
     ):
+
         raise LiveExecutionError(
             "MT5 terminal trading is disabled."
         )
@@ -773,23 +700,25 @@ async def _validate_live_gate(
         "tradeapi_disabled",
         False,
     ):
+
         raise LiveExecutionError(
             "MT5 trading API is disabled."
         )
 
-    # ========================================================
-    # GATE 9
-    # SYMBOL
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 9 - SYMBOL
+    # --------------------------------------------------------
 
     symbol = request.symbol.strip()
 
     if not symbol:
+
         raise LiveExecutionError(
             "Trading symbol cannot be empty."
         )
 
     try:
+
         specification_raw = (
             await mt5_service.get_symbol_specification(
                 symbol
@@ -797,6 +726,7 @@ async def _validate_live_gate(
         )
 
     except MT5ServiceError as exc:
+
         raise LiveExecutionError(
             f"Unable to read broker specification for "
             f"{symbol}: {exc}"
@@ -808,37 +738,45 @@ async def _validate_live_gate(
         )
     )
 
-    # ========================================================
-    # GATE 10
-    # TRADE DIRECTION
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 10 - DIRECTION
+    # --------------------------------------------------------
 
     normalized_side = (
         request.side.upper().strip()
     )
 
     try:
+
         risk_engine.validate_trade_direction(
             specification.trade_mode,
             normalized_side,
         )
 
     except RiskEngineError as exc:
+
         raise LiveExecutionError(
             str(exc)
         ) from exc
 
-    # ========================================================
-    # GATE 11
-    # VOLUME
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 11 - VOLUME
+    # --------------------------------------------------------
 
-    if request.volume < specification.volume_min:
+    if (
+        request.volume
+        < specification.volume_min
+    ):
+
         raise LiveExecutionError(
             "Requested volume is below broker minimum."
         )
 
-    if request.volume > specification.volume_max:
+    if (
+        request.volume
+        > specification.volume_max
+    ):
+
         raise LiveExecutionError(
             "Requested volume exceeds broker maximum."
         )
@@ -851,6 +789,7 @@ async def _validate_live_gate(
     )
 
     if normalized_volume <= 0:
+
         raise LiveExecutionError(
             "Requested volume cannot be aligned to "
             "the broker volume step."
@@ -860,28 +799,31 @@ async def _validate_live_gate(
         normalized_volume
         - request.volume
     ) > 1e-8:
+
         raise LiveExecutionError(
             "Requested volume is not aligned to "
             "the broker volume step."
         )
 
     try:
+
         risk_engine.validate_volume(
             request.volume,
             specification,
         )
 
     except RiskEngineError as exc:
+
         raise LiveExecutionError(
             str(exc)
         ) from exc
 
-    # ========================================================
-    # GATE 12
-    # CURRENT MARKET PRICE
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 12 - CURRENT MARKET PRICE
+    # --------------------------------------------------------
 
     try:
+
         tick = (
             await mt5_service.get_symbol_tick(
                 symbol
@@ -889,6 +831,7 @@ async def _validate_live_gate(
         )
 
     except MT5ServiceError as exc:
+
         raise LiveExecutionError(
             f"Unable to read current {symbol} price: {exc}"
         ) from exc
@@ -908,6 +851,7 @@ async def _validate_live_gate(
     )
 
     if bid <= 0 or ask <= 0:
+
         raise LiveExecutionError(
             "Broker returned an invalid bid/ask price."
         )
@@ -918,10 +862,9 @@ async def _validate_live_gate(
         else bid
     )
 
-    # ========================================================
-    # GATE 13
-    # STOP LOSS / TAKE PROFIT
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 13 - SL / TP
+    # --------------------------------------------------------
 
     stop_loss = float(
         request.stop_loss
@@ -932,21 +875,23 @@ async def _validate_live_gate(
     )
 
     if stop_loss <= 0:
+
         raise LiveExecutionError(
             "Stop-loss must be greater than zero."
         )
 
     if take_profit <= 0:
+
         raise LiveExecutionError(
             "Take-profit must be greater than zero."
         )
 
-    # ========================================================
-    # GATE 14
-    # RISK ENGINE
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 14 - RISK ENGINE
+    # --------------------------------------------------------
 
     try:
+
         risk_engine.validate_stop_loss(
             entry_price,
             stop_loss,
@@ -959,14 +904,14 @@ async def _validate_live_gate(
         )
 
     except RiskEngineError as exc:
+
         raise LiveExecutionError(
             str(exc)
         ) from exc
 
-    # ========================================================
-    # GATE 15
-    # BROKER MINIMUM STOP DISTANCE
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 15 - BROKER STOP DISTANCE
+    # --------------------------------------------------------
 
     minimum_stop_distance = (
         specification.trade_stops_level
@@ -995,18 +940,62 @@ async def _validate_live_gate(
                 "market price for the broker."
             )
 
-    # ========================================================
-    # ALL PRE-EXECUTION GATES PASSED
-    # ========================================================
+    # --------------------------------------------------------
+    # GATE 16 - RECONCILIATION
+    # --------------------------------------------------------
+    #
+    # Raymond must know the current broker position state
+    # before opening another live position.
+    #
+    # If reconciliation has never successfully completed,
+    # this gate remains CLOSED.
+    #
+
+    try:
+
+        reconciliation = (
+            await reconcile_live_positions(
+                symbol=symbol,
+                magic=int(request.magic),
+            )
+        )
+
+    except Exception as exc:
+
+        raise LiveExecutionError(
+            "Live reconciliation failed. "
+            "New live orders are blocked: "
+            f"{exc}"
+        ) from exc
+
+    if not (
+        reconciliation.safe_for_new_live_orders
+    ):
+
+        raise LiveExecutionError(
+            "Live reconciliation detected a broker/Raymond "
+            "position mismatch. New live orders are blocked."
+        )
+
+    # --------------------------------------------------------
+    # ALL PRE-TRADE GATES PASSED
+    # --------------------------------------------------------
 
     return {
         "account": account,
+
         "account_info": account_info,
+
         "terminal": terminal,
+
         "specification": specification,
+
         "tick": tick,
+
         "entry_price": entry_price,
+
         "volume": normalized_volume,
+
         "side": normalized_side,
     }
 
@@ -1023,16 +1012,9 @@ async def _verify_position(
     magic: int,
     order_id: Optional[int],
 ):
-    """
-    Verify that the broker reflects the execution.
-
-    Raymond positions are identified by magic number.
-
-    If no matching position is found, the result is
-    marked unverified rather than falsely reporting success.
-    """
 
     try:
+
         positions = (
             await mt5_service.get_positions(
                 symbol=symbol
@@ -1040,6 +1022,7 @@ async def _verify_position(
         )
 
     except MT5ServiceError as exc:
+
         raise LiveExecutionError(
             "Order may have been sent, but broker "
             "position verification failed: "
@@ -1055,6 +1038,7 @@ async def _verify_position(
     for position in positions:
 
         try:
+
             position_magic = int(
                 position.get(
                     "magic",
@@ -1076,28 +1060,25 @@ async def _verify_position(
                 )
             )
 
-            position_ticket = position.get(
-                "ticket"
-            )
-
-            position_reason = position.get(
-                "reason"
-            )
-
             if (
                 position_magic == magic
                 and position_type == expected_type
                 and position_volume > 0
             ):
+
                 matching.append(
                     {
-                        "ticket": position_ticket,
+                        "ticket": position.get(
+                            "ticket"
+                        ),
 
                         "volume": position_volume,
 
                         "type": position_type,
 
-                        "reason": position_reason,
+                        "reason": position.get(
+                            "reason"
+                        ),
 
                         "symbol": position.get(
                             "symbol"
@@ -1127,9 +1108,11 @@ async def _verify_position(
             TypeError,
             ValueError,
         ):
+
             continue
 
     if not matching:
+
         return {
             "verified": False,
             "position": None,
@@ -1139,8 +1122,6 @@ async def _verify_position(
             "order_id": order_id,
         }
 
-    # Prefer the position with the closest
-    # requested volume.
     matching.sort(
         key=lambda item: abs(
             float(
@@ -1152,10 +1133,13 @@ async def _verify_position(
 
     return {
         "verified": True,
+
         "position": matching[0],
+
         "positions_found": len(
             positions
         ),
+
         "order_id": order_id,
     }
 
@@ -1165,16 +1149,6 @@ async def _verify_position(
 # ============================================================
 
 class LiveExecutionGateway:
-    """
-    Real MT5 execution gateway.
-
-    This is the only Step 17.4 execution module
-    allowed to call:
-
-        mt5.order_check()
-
-        mt5.order_send()
-    """
 
     execution_type = "mt5_live"
 
@@ -1183,33 +1157,29 @@ class LiveExecutionGateway:
         request: LiveOrderRequest,
     ) -> LiveExecutionResult:
 
-        # ====================================================
-        # FIRST GATE:
-        # EXPLICIT RAYMOND LIVE ARM
-        # ====================================================
-        #
-        # This check happens BEFORE _require_mt5().
-        #
-        # Therefore an unarmed backend cannot proceed
-        # toward broker execution.
-        #
+        # ----------------------------------------------------
+        # FIRST ARM CHECK
+        # ----------------------------------------------------
+
         try:
+
             require_live_armed()
 
         except PermissionError as exc:
+
             raise LiveExecutionError(
                 str(exc)
             ) from exc
 
-        # ====================================================
-        # MT5 PACKAGE
-        # ====================================================
+        # ----------------------------------------------------
+        # MT5
+        # ----------------------------------------------------
 
         _require_mt5()
 
-        # ====================================================
-        # COMPLETE PRE-TRADE SAFETY GATE
-        # ====================================================
+        # ----------------------------------------------------
+        # COMPLETE PRE-TRADE VALIDATION
+        # ----------------------------------------------------
 
         gate = await _validate_live_gate(
             request
@@ -1259,16 +1229,49 @@ class LiveExecutionGateway:
             )
         )
 
-        # Raymond's magic number identifies
-        # Raymond-owned positions for later
-        # reconciliation and protection.
         magic = int(
             request.magic
         )
 
-        # ====================================================
+        # ----------------------------------------------------
+        # FINAL PRICE SAFETY CHECK
+        # ----------------------------------------------------
+
+        if side == "BUY":
+
+            if not (
+                stop_loss
+                < entry_price
+                < take_profit
+            ):
+
+                raise LiveExecutionError(
+                    "BUY order requires SL below entry "
+                    "and TP above entry."
+                )
+
+        elif side == "SELL":
+
+            if not (
+                take_profit
+                < entry_price
+                < stop_loss
+            ):
+
+                raise LiveExecutionError(
+                    "SELL order requires TP below entry "
+                    "and SL above entry."
+                )
+
+        else:
+
+            raise LiveExecutionError(
+                "Unsupported order side."
+            )
+
+        # ----------------------------------------------------
         # BUILD MT5 REQUEST
-        # ====================================================
+        # ----------------------------------------------------
 
         mt5_request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -1301,34 +1304,41 @@ class LiveExecutionGateway:
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
-        # ====================================================
-        # BROKER PRE-TRADE CHECK
-        # ====================================================
+        # ----------------------------------------------------
+        # BROKER PRE-CHECK
+        # ----------------------------------------------------
 
         try:
+
             check_result = await asyncio.to_thread(
                 mt5.order_check,
                 mt5_request,
             )
 
         except Exception as exc:
+
             raise LiveExecutionError(
                 f"MT5 order_check failed: {exc}"
             ) from exc
 
         if check_result is None:
+
             raise LiveExecutionError(
                 "MT5 order_check returned no result."
             )
 
-        check_dict = (
-            check_result._asdict()
-            if hasattr(
-                check_result,
-                "_asdict",
+        if hasattr(
+            check_result,
+            "_asdict",
+        ):
+
+            check_dict = (
+                check_result._asdict()
             )
-            else {}
-        )
+
+        else:
+
+            check_dict = {}
 
         check_retcode = check_dict.get(
             "retcode"
@@ -1341,6 +1351,7 @@ class LiveExecutionGateway:
                 mt5.TRADE_RETCODE_DONE
             )
         ):
+
             return LiveExecutionResult(
                 status="rejected_precheck",
 
@@ -1385,53 +1396,69 @@ class LiveExecutionGateway:
                 ),
             )
 
-        # ====================================================
-        # FINAL ARM CHECK BEFORE REAL ORDER
-        # ====================================================
-        #
-        # This deliberately happens immediately before
-        # order_send().
-        #
-        # If the backend was disarmed after the earlier
-        # validation, the actual broker order is blocked.
-        #
+        # ----------------------------------------------------
+        # FINAL ARM CHECK
+        # ----------------------------------------------------
 
         try:
+
             require_live_armed()
 
         except PermissionError as exc:
+
             raise LiveExecutionError(
                 str(exc)
             ) from exc
 
-        # ====================================================
-        # REAL BROKER ORDER
-        # ====================================================
+        # ----------------------------------------------------
+        # FINAL RECONCILIATION CHECK
+        # ----------------------------------------------------
 
         try:
+
+            require_reconciliation_safe()
+
+        except PermissionError as exc:
+
+            raise LiveExecutionError(
+                str(exc)
+            ) from exc
+
+        # ----------------------------------------------------
+        # REAL MT5 ORDER
+        # ----------------------------------------------------
+
+        try:
+
             send_result = await asyncio.to_thread(
                 mt5.order_send,
                 mt5_request,
             )
 
         except Exception as exc:
+
             raise LiveExecutionError(
                 f"MT5 order_send failed: {exc}"
             ) from exc
 
         if send_result is None:
+
             raise LiveExecutionError(
                 "MT5 order_send returned no result."
             )
 
-        send_dict = (
-            send_result._asdict()
-            if hasattr(
-                send_result,
-                "_asdict",
+        if hasattr(
+            send_result,
+            "_asdict",
+        ):
+
+            send_dict = (
+                send_result._asdict()
             )
-            else {}
-        )
+
+        else:
+
+            send_dict = {}
 
         retcode = send_dict.get(
             "retcode"
@@ -1457,9 +1484,9 @@ class LiveExecutionGateway:
             "volume"
         )
 
-        # ====================================================
-        # EXECUTION SUCCESS CHECK
-        # ====================================================
+        # ----------------------------------------------------
+        # SUCCESS CODES
+        # ----------------------------------------------------
 
         successful_codes = {
             int(
@@ -1480,6 +1507,7 @@ class LiveExecutionGateway:
             or int(retcode)
             not in successful_codes
         ):
+
             return LiveExecutionResult(
                 status="rejected",
 
@@ -1540,9 +1568,9 @@ class LiveExecutionGateway:
                 ),
             )
 
-        # ====================================================
+        # ----------------------------------------------------
         # VERIFY BROKER POSITION
-        # ====================================================
+        # ----------------------------------------------------
 
         verification = (
             await _verify_position(
@@ -1562,18 +1590,187 @@ class LiveExecutionGateway:
             "position"
         )
 
-        # ====================================================
-        # FINAL RESULT
-        # ====================================================
+        if not verification.get(
+            "verified",
+            False,
+        ):
+
+            # The order may have been executed even though
+            # Raymond could not verify the resulting position.
+            #
+            # NEVER report this as a successful verified trade.
+
+            return LiveExecutionResult(
+                status="sent_unverified",
+
+                execution_type=self.execution_type,
+
+                order_id=(
+                    int(order_id)
+                    if order_id is not None
+                    else None
+                ),
+
+                deal_id=(
+                    int(deal_id)
+                    if deal_id is not None
+                    else None
+                ),
+
+                position_ticket=None,
+
+                symbol=symbol,
+
+                side=side,
+
+                requested_volume=volume,
+
+                executed_volume=(
+                    float(executed_volume)
+                    if executed_volume is not None
+                    else None
+                ),
+
+                requested_stop_loss=stop_loss,
+
+                requested_take_profit=take_profit,
+
+                executed_price=(
+                    float(executed_price)
+                    if executed_price is not None
+                    else None
+                ),
+
+                client_order_id=client_order_id,
+
+                broker_retcode=(
+                    int(retcode)
+                    if retcode is not None
+                    else None
+                ),
+
+                broker_comment=broker_comment,
+
+                verified=False,
+
+                timestamp=(
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                ),
+            )
+
+        # ----------------------------------------------------
+        # REGISTER VERIFIED POSITION
+        # ----------------------------------------------------
+
+        position_ticket = None
+
+        if position is not None:
+
+            raw_ticket = position.get(
+                "ticket"
+            )
+
+            if raw_ticket is not None:
+
+                try:
+                    position_ticket = int(
+                        raw_ticket
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    position_ticket = None
+
+        try:
+
+            register_live_position(
+                client_order_id=client_order_id,
+
+                symbol=symbol,
+
+                side=side,
+
+                volume=(
+                    float(
+                        executed_volume
+                    )
+                    if executed_volume is not None
+                    else float(volume)
+                ),
+
+                stop_loss=stop_loss,
+
+                take_profit=take_profit,
+
+                position_ticket=position_ticket,
+
+                magic=magic,
+            )
+
+        except Exception as exc:
+
+            # The broker position exists, but Raymond could
+            # not register its local state.
+            #
+            # This is deliberately treated as unsafe.
+
+            raise LiveExecutionError(
+                "Broker position was verified, but Raymond "
+                "could not register the live position. "
+                "New live orders must remain blocked until "
+                "reconciliation is restored: "
+                f"{exc}"
+            ) from exc
+
+        # ----------------------------------------------------
+        # POST-EXECUTION RECONCILIATION
+        # ----------------------------------------------------
+        #
+        # The broker state is checked again after the order.
+        #
+        # This catches situations where the broker state does
+        # not match what Raymond registered.
+        #
+
+        try:
+
+            post_reconciliation = (
+                await reconcile_live_positions(
+                    symbol=symbol,
+                    magic=magic,
+                )
+            )
+
+        except Exception as exc:
+
+            raise LiveExecutionError(
+                "Live order was executed and verified, but "
+                "post-execution reconciliation failed. "
+                "Further live orders are blocked: "
+                f"{exc}"
+            ) from exc
+
+        if not (
+            post_reconciliation.safe_for_new_live_orders
+        ):
+
+            raise LiveExecutionError(
+                "Live order was executed, but post-execution "
+                "reconciliation detected a mismatch. "
+                "Further live orders are blocked."
+            )
+
+        # ----------------------------------------------------
+        # FINAL VERIFIED RESULT
+        # ----------------------------------------------------
 
         return LiveExecutionResult(
-            status=(
-                "verified"
-                if verification.get(
-                    "verified"
-                )
-                else "sent_unverified"
-            ),
+            status="verified",
 
             execution_type=self.execution_type,
 
@@ -1589,19 +1786,7 @@ class LiveExecutionGateway:
                 else None
             ),
 
-            position_ticket=(
-                int(
-                    position["ticket"]
-                )
-                if (
-                    position
-                    and position.get(
-                        "ticket"
-                    )
-                    is not None
-                )
-                else None
-            ),
+            position_ticket=position_ticket,
 
             symbol=symbol,
 
@@ -1635,11 +1820,7 @@ class LiveExecutionGateway:
 
             broker_comment=broker_comment,
 
-            verified=bool(
-                verification.get(
-                    "verified"
-                )
-            ),
+            verified=True,
 
             timestamp=(
                 datetime.now(
@@ -1674,15 +1855,6 @@ router = APIRouter(
 
 @router.get("/status")
 async def live_execution_status():
-    """
-    Report the complete live-execution state.
-
-    "order_execution_available" is only a top-level
-    indication.
-
-    An actual order must still pass every individual
-    safety gate.
-    """
 
     environment_enabled = (
         _environment_live_enabled()
@@ -1693,6 +1865,7 @@ async def live_execution_status():
     db = SessionLocal()
 
     try:
+
         account = (
             db.query(BrokerAccount)
             .filter(
@@ -1709,7 +1882,9 @@ async def live_execution_status():
             )
 
             selected_account = {
-                "account_id": account.account_id,
+                "account_id": (
+                    account.account_id
+                ),
 
                 "broker": account.broker,
 
@@ -1744,23 +1919,28 @@ async def live_execution_status():
 
     live_arm = live_safety_status()
 
+    reconciliation = (
+        reconciliation_status()
+    )
+
     all_account_gates = (
         selected_account is not None
-        and selected_account[
-            "verified"
-        ]
-        and selected_account[
-            "trading_allowed"
-        ]
-        and selected_account[
-            "live_authorized"
-        ]
+        and selected_account["verified"]
+        and selected_account["trading_allowed"]
+        and selected_account["live_authorized"]
     )
 
     emergency_gate = (
         safety.trading_allowed
         and not safety.emergency_stop_active
         and not safety.connection_stale
+    )
+
+    reconciliation_gate = (
+        reconciliation.get(
+            "safe_for_new_live_orders",
+            False,
+        )
     )
 
     order_execution_available = (
@@ -1771,6 +1951,7 @@ async def live_execution_status():
         )
         and all_account_gates
         and emergency_gate
+        and reconciliation_gate
     )
 
     return {
@@ -1830,6 +2011,32 @@ async def live_execution_status():
             "reason": safety.reason,
         },
 
+        "reconciliation": {
+            "safe_for_new_live_orders": (
+                reconciliation_gate
+            ),
+
+            "last_run_at": (
+                reconciliation.get(
+                    "last_run_at"
+                )
+            ),
+
+            "last_error": (
+                reconciliation.get(
+                    "last_error"
+                )
+            ),
+
+            "result": (
+                reconciliation.get(
+                    "result"
+                )
+            ),
+
+            "fail_closed": True,
+        },
+
         "gates": {
             "environment_enabled": (
                 environment_enabled
@@ -1881,6 +2088,10 @@ async def live_execution_status():
                 not safety.connection_stale
             ),
 
+            "reconciliation_safe": (
+                reconciliation_gate
+            ),
+
             "order_execution_available": (
                 order_execution_available
             ),
@@ -1912,32 +2123,19 @@ async def live_execution_status():
 async def execute_live_order(
     request: LiveOrderRequest,
 ):
-    """
-    Execute one real MT5 market order.
-
-    The endpoint is fail-closed.
-
-    Authentication/authorization must be added before
-    this endpoint is exposed to real users or the public
-    internet.
-
-    Even when authenticated, the complete live safety
-    chain remains mandatory.
-    """
 
     try:
-        # ====================================================
-        # FIRST API-LEVEL ARM CHECK
-        # ====================================================
-        #
-        # This prevents an unarmed request from entering
-        # the execution gateway at all.
-        #
+
+        # ----------------------------------------------------
+        # API-LEVEL ARM CHECK
+        # ----------------------------------------------------
 
         try:
+
             require_live_armed()
 
         except PermissionError as exc:
+
             raise HTTPException(
                 status_code=403,
 
@@ -1956,9 +2154,9 @@ async def execute_live_order(
                 },
             ) from exc
 
-        # ====================================================
-        # EXECUTE
-        # ====================================================
+        # ----------------------------------------------------
+        # EXECUTION
+        # ----------------------------------------------------
 
         result = (
             await live_execution_gateway.execute(
@@ -2026,6 +2224,7 @@ async def execute_live_order(
         raise
 
     except LiveExecutionError as exc:
+
         raise HTTPException(
             status_code=403,
 
@@ -2045,6 +2244,7 @@ async def execute_live_order(
         ) from exc
 
     except Exception as exc:
+
         raise HTTPException(
             status_code=500,
 
