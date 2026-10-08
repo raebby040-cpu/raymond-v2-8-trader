@@ -1,34 +1,57 @@
 """
-RAYMOND v2.8 - Canonical Persistent Paper Account
+RAYMOND v2.8 - CANONICAL PERSISTENT PAPER ACCOUNT
 
-PAPER ONLY.
+PAPER TRADING ONLY.
 
-This module is the single accounting source for the Raymond
-persistent paper-trading account.
+This module is the single source of truth for the persistent
+paper-trading account.
 
-ACCOUNTING RULES
+ACCOUNTING MODEL
 ----------------
+
 Starting balance:
     $1,000.00
 
 Balance:
-    starting balance + realized P&L
+    starting balance + REALIZED P&L
 
 Equity:
-    balance + unrealized P&L
+    balance + UNREALIZED P&L
 
-Open positions:
-    contribute unrealized P&L to equity.
+Therefore an open trade changes EQUITY continuously while
+the BALANCE remains unchanged.
 
-Closed positions:
-    contribute realized P&L to balance.
+Example:
 
-Partial closes:
-    their realized P&L contributes immediately to balance,
-    while the remaining position continues contributing
-    unrealized P&L to equity.
+    Starting balance = $1,000.00
+    Open trade floating P&L = +$12.50
 
-No second in-memory balance is used here.
+    Balance = $1,000.00
+    Equity  = $1,012.50
+
+After the trade closes at +$12.50:
+
+    Balance = $1,012.50
+    Equity  = $1,012.50
+    Unrealized P&L = $0.00
+
+
+IMPORTANT SAFETY RULES
+----------------------
+
+This module:
+
+- does NOT send broker orders
+- does NOT connect to MT5
+- does NOT enable live trading
+- does NOT modify real broker positions
+- does NOT bypass the Risk Engine
+- does NOT bypass Emergency Stop
+- is exclusively for persistent paper accounting
+
+The database is the authoritative source.
+
+No in-memory paper balance is used as the canonical balance.
 """
 
 from __future__ import annotations
@@ -36,48 +59,111 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from .database import SessionLocal
-from .models import Position, PositionStatus
+from sqlalchemy.orm import Session
+
+try:
+    from .database import SessionLocal
+    from .models import Position, PositionStatus
+except ImportError:
+    from database import SessionLocal
+    from models import Position, PositionStatus
 
 
-PAPER_STARTING_BALANCE = 1_000.0
+# ============================================================
+# CANONICAL ACCOUNT CONFIGURATION
+# ============================================================
+
+PAPER_STARTING_BALANCE = 1000.0
+
+PAPER_CURRENCY = "USD"
+
+PAPER_EXECUTION_TYPE = "paper"
+
+PAPER_MODE = "paper"
 
 
-def _float(value: Any) -> float:
+# ============================================================
+# SAFE HELPERS
+# ============================================================
+
+def _safe_float(
+    value: Any,
+    default: float = 0.0,
+) -> float:
+    """
+    Safely convert a value to float.
+    """
+
+    if value is None:
+        return default
+
     try:
-        return float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
+        return float(value)
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
 
 
-def _partial_pnl(position: Position) -> float:
-    return _float(
-        getattr(
-            position,
-            "partial_close_pnl",
-            0.0,
-        )
+def _utc_now() -> datetime:
+    """
+    Return timezone-aware UTC datetime.
+    """
+
+    return datetime.now(
+        timezone.utc
     )
 
 
-def _remaining_pnl(position: Position) -> float:
+def _normalise_datetime(
+    value: Any,
+) -> datetime | None:
     """
-    PnL of the currently remaining quantity.
+    Convert datetime-like values to timezone-aware UTC.
+    """
 
-    Position.pnl is continuously recalculated from the
-    current market price by PositionRepository.update_price().
-    """
-    return _float(
-        getattr(
-            position,
-            "pnl",
-            0.0,
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        datetime,
+    ):
+        result = value
+
+    else:
+        try:
+            result = datetime.fromisoformat(
+                str(value).replace(
+                    "Z",
+                    "+00:00",
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return None
+
+    if result.tzinfo is None:
+        result = result.replace(
+            tzinfo=timezone.utc
         )
+
+    return result.astimezone(
+        timezone.utc
     )
 
 
-def _utc_day_start() -> datetime:
-    now = datetime.now(timezone.utc)
+def _today_start() -> datetime:
+    """
+    Return start of current UTC day.
+    """
+
+    now = _utc_now()
 
     return now.replace(
         hour=0,
@@ -89,125 +175,398 @@ def _utc_day_start() -> datetime:
 
 def _is_today(
     value: Any,
-    day_start: datetime,
 ) -> bool:
+    """
+    Determine whether a datetime belongs to today UTC.
+    """
+
+    timestamp = _normalise_datetime(
+        value
+    )
+
+    if timestamp is None:
+        return False
+
+    return timestamp >= _today_start()
+
+
+def _enum_value(
+    value: Any,
+) -> Any:
+    """
+    Safely extract Enum.value.
+    """
+
     if value is None:
-        return False
+        return None
 
-    if not isinstance(value, datetime):
-        return False
-
-    if value.tzinfo is None:
-        value = value.replace(
-            tzinfo=timezone.utc
-        )
-
-    return value >= day_start
+    return getattr(
+        value,
+        "value",
+        value,
+    )
 
 
-def build_persistent_paper_account() -> dict[str, Any]:
+def _status_string(
+    value: Any,
+) -> str:
     """
-    Build the canonical persistent paper account.
-
-    IMPORTANT:
-
-    Open position PnL is NOT added to balance.
-
-    It is added only to equity.
-
-    Therefore:
-
-        balance = $1,000 + realized PnL
-
-        equity = balance + unrealized PnL
+    Normalize PositionStatus values.
     """
 
-    db = SessionLocal()
+    value = _enum_value(
+        value
+    )
 
-    try:
-        positions = (
-            db.query(Position)
-            .all()
+    if value is None:
+        return ""
+
+    return str(
+        value
+    ).strip().lower()
+
+
+# ============================================================
+# POSITION CLASSIFICATION
+# ============================================================
+
+def _is_open_position(
+    position: Position,
+) -> bool:
+    """
+    Return True when a persistent position is open.
+    """
+
+    status = _status_string(
+        getattr(
+            position,
+            "status",
+            None,
+        )
+    )
+
+    return status == "open"
+
+
+def _is_closed_position(
+    position: Position,
+) -> bool:
+    """
+    Return True when a persistent position is closed.
+    """
+
+    status = _status_string(
+        getattr(
+            position,
+            "status",
+            None,
+        )
+    )
+
+    return status == "closed"
+
+
+# ============================================================
+# PARTIAL-CLOSE REALIZED P&L
+# ============================================================
+
+def _get_partial_close_realized_pnl(
+    position: Position,
+) -> float:
+    """
+    Read realized P&L generated by partial closes.
+
+    Older database schemas may not contain this field.
+    In that case the value safely defaults to zero.
+    """
+
+    return _safe_float(
+        getattr(
+            position,
+            "partial_close_pnl",
+            0.0,
+        )
+    )
+
+
+# ============================================================
+# CURRENT REMAINING POSITION P&L
+# ============================================================
+
+def _get_current_position_pnl(
+    position: Position,
+) -> float:
+    """
+    Return P&L of the currently remaining quantity.
+
+    For an OPEN position this is unrealized P&L.
+
+    For a CLOSED position this represents the final P&L of
+    the remaining quantity, assuming the lifecycle manager
+    updates Position.pnl at closure.
+    """
+
+    return _safe_float(
+        getattr(
+            position,
+            "pnl",
+            0.0,
+        )
+    )
+
+
+# ============================================================
+# REALIZED P&L
+# ============================================================
+
+def calculate_realized_pnl(
+    positions: list[Position],
+) -> float:
+    """
+    Calculate total realized P&L.
+
+    OPEN position:
+        only partial-close P&L is realized.
+
+    CLOSED position:
+        partial-close P&L
+        +
+        final remaining-position P&L
+
+    Floating P&L from an OPEN remaining position is NOT
+    included in realized P&L.
+    """
+
+    realized = 0.0
+
+    for position in positions:
+
+        partial_pnl = (
+            _get_partial_close_realized_pnl(
+                position
+            )
         )
 
-        realized_pnl = 0.0
-        unrealized_pnl = 0.0
-        daily_realized_pnl = 0.0
-        open_positions = 0
+        if _is_open_position(
+            position
+        ):
+            realized += partial_pnl
 
-        day_start = _utc_day_start()
-
-        for position in positions:
-
-            partial_pnl = _partial_pnl(
-                position
+        elif _is_closed_position(
+            position
+        ):
+            realized += (
+                partial_pnl
+                + _get_current_position_pnl(
+                    position
+                )
             )
 
-            current_pnl = _remaining_pnl(
+    return realized
+
+
+# ============================================================
+# UNREALIZED P&L
+# ============================================================
+
+def calculate_unrealized_pnl(
+    positions: list[Position],
+) -> float:
+    """
+    Calculate total floating P&L from currently open
+    persistent positions.
+
+    CLOSED positions contribute zero.
+    """
+
+    unrealized = 0.0
+
+    for position in positions:
+
+        if not _is_open_position(
+            position
+        ):
+            continue
+
+        unrealized += (
+            _get_current_position_pnl(
                 position
             )
+        )
 
-            status = getattr(
+    return unrealized
+
+
+# ============================================================
+# OPEN POSITION COUNT
+# ============================================================
+
+def count_open_positions(
+    positions: list[Position],
+) -> int:
+    """
+    Count persistent open positions.
+    """
+
+    return sum(
+        1
+        for position in positions
+        if _is_open_position(
+            position
+        )
+    )
+
+
+# ============================================================
+# DAILY REALIZED P&L
+# ============================================================
+
+def calculate_daily_realized_pnl(
+    positions: list[Position],
+) -> float:
+    """
+    Calculate realized P&L generated today.
+
+    For a closed position:
+        final realized P&L is counted if closed today.
+
+    For an open position:
+        partial-close realized P&L is counted when the
+        partial close happened today.
+
+    Floating P&L is never counted here.
+    """
+
+    daily_realized = 0.0
+
+    for position in positions:
+
+        if _is_closed_position(
+            position
+        ):
+            closed_at = getattr(
                 position,
-                "status",
+                "closed_at",
                 None,
             )
 
-            if status == PositionStatus.OPEN:
-
-                open_positions += 1
-
-                # Partial closes have already become
-                # realized money.
-                realized_pnl += partial_pnl
-
-                # The remaining position is still floating.
-                unrealized_pnl += current_pnl
-
-                if (
-                    getattr(
-                        position,
-                        "last_management_action",
-                        None,
+            if _is_today(
+                closed_at
+            ):
+                daily_realized += (
+                    _get_partial_close_realized_pnl(
+                        position
                     )
-                    == "PARTIAL_CLOSE"
-                    and _is_today(
-                        getattr(
-                            position,
-                            "last_management_time",
-                            None,
-                        ),
-                        day_start,
-                    )
-                ):
-                    daily_realized_pnl += (
-                        partial_pnl
-                    )
-
-            elif status == PositionStatus.CLOSED:
-
-                # At closure, Position.pnl is the final PnL
-                # of the remaining quantity.
-                total_realized = (
-                    partial_pnl
-                    + current_pnl
                 )
 
-                realized_pnl += (
-                    total_realized
+                daily_realized += (
+                    _get_current_position_pnl(
+                        position
+                    )
                 )
 
-                if _is_today(
-                    getattr(
-                        position,
-                        "closed_at",
-                        None,
-                    ),
-                    day_start,
-                ):
-                    daily_realized_pnl += (
-                        total_realized
+        elif _is_open_position(
+            position
+        ):
+            management_time = getattr(
+                position,
+                "last_management_time",
+                None,
+            )
+
+            management_action = str(
+                getattr(
+                    position,
+                    "last_management_action",
+                    "",
+                )
+                or ""
+            ).strip().upper()
+
+            if (
+                management_action
+                == "PARTIAL_CLOSE"
+                and _is_today(
+                    management_time
+                )
+            ):
+                daily_realized += (
+                    _get_partial_close_realized_pnl(
+                        position
                     )
+                )
+
+    return daily_realized
+
+
+# ============================================================
+# CANONICAL ACCOUNT CALCULATION
+# ============================================================
+
+def build_persistent_paper_account(
+    db: Session | None = None,
+) -> dict[str, Any]:
+    """
+    Build the complete canonical persistent paper account.
+
+    ACCOUNTING:
+
+        realized_pnl =
+            closed P&L
+            +
+            partial-close P&L
+
+        unrealized_pnl =
+            P&L of remaining open quantities
+
+        balance =
+            starting_balance + realized_pnl
+
+        equity =
+            balance + unrealized_pnl
+
+    The caller may provide a SQLAlchemy session.
+
+    If no session is supplied, this function creates and closes
+    its own session.
+    """
+
+    owns_session = db is None
+
+    if db is None:
+        db = SessionLocal()
+
+    try:
+        positions = (
+            db.query(
+                Position
+            )
+            .all()
+        )
+
+        realized_pnl = (
+            calculate_realized_pnl(
+                positions
+            )
+        )
+
+        unrealized_pnl = (
+            calculate_unrealized_pnl(
+                positions
+            )
+        )
+
+        open_positions = (
+            count_open_positions(
+                positions
+            )
+        )
+
+        daily_realized_pnl = (
+            calculate_daily_realized_pnl(
+                positions
+            )
+        )
 
         balance = (
             PAPER_STARTING_BALANCE
@@ -220,46 +579,105 @@ def build_persistent_paper_account() -> dict[str, Any]:
         )
 
         return {
+            # ------------------------------------------------
+            # ACCOUNT IDENTITY
+            # ------------------------------------------------
+            "account_type": "persistent_paper",
+            "mode": PAPER_MODE,
+            "execution_type": PAPER_EXECUTION_TYPE,
+            "currency": PAPER_CURRENCY,
+
+            # ------------------------------------------------
+            # BALANCE / EQUITY
+            # ------------------------------------------------
             "starting_balance": (
                 PAPER_STARTING_BALANCE
             ),
+
             "balance": balance,
+
             "equity": equity,
-            "realized_pnl": realized_pnl,
-            "unrealized_pnl": unrealized_pnl,
-            "available_balance": balance,
+
+            "realized_pnl": (
+                realized_pnl
+            ),
+
+            "unrealized_pnl": (
+                unrealized_pnl
+            ),
+
+            "available_balance": (
+                balance
+            ),
+
+            # ------------------------------------------------
+            # POSITIONS
+            # ------------------------------------------------
+            "open_positions": (
+                open_positions
+            ),
+
+            # ------------------------------------------------
+            # DAILY RISK ACCOUNTING
+            # ------------------------------------------------
             "daily_realized_pnl": (
                 daily_realized_pnl
             ),
-            "open_positions": open_positions,
-            "execution_type": "paper",
-            "mode": "paper",
+
+            "daily_loss": max(
+                0.0,
+                -daily_realized_pnl,
+            ),
+
+            # ------------------------------------------------
+            # SAFETY
+            # ------------------------------------------------
+            "canonical": True,
+            "paper_only": True,
             "live_trading_enabled": False,
             "real_orders_allowed": False,
-            "canonical": True,
-            "timestamp": datetime.now(
-                timezone.utc
-            ).isoformat(),
+            "broker_orders_allowed": False,
+            "mt5_execution_allowed": False,
+
+            # ------------------------------------------------
+            # TIMESTAMP
+            # ------------------------------------------------
+            "timestamp": (
+                _utc_now().isoformat()
+            ),
         }
 
     finally:
-        db.close()
+        if owns_session:
+            db.close()
 
 
-def get_persistent_paper_equity() -> float:
+# ============================================================
+# CANONICAL EQUITY
+# ============================================================
+
+def get_persistent_paper_equity(
+    db: Session | None = None,
+) -> float:
     """
-    Return live paper equity.
+    Return current canonical paper equity.
 
-    This is the value that the Risk Engine should use
-    when calculating the next paper position size.
+    This value includes floating P&L from open positions.
+
+    The Risk Engine should use this value when calculating
+    subsequent paper-trade position sizes.
     """
 
     account = (
-        build_persistent_paper_account()
+        build_persistent_paper_account(
+            db=db
+        )
     )
 
-    equity = _float(
-        account["equity"]
+    equity = _safe_float(
+        account.get(
+            "equity"
+        )
     )
 
     if equity <= 0:
@@ -270,19 +688,29 @@ def get_persistent_paper_equity() -> float:
     return equity
 
 
-def get_persistent_paper_balance() -> float:
-    """
-    Return realized account balance.
+# ============================================================
+# CANONICAL BALANCE
+# ============================================================
 
-    Floating PnL is deliberately excluded.
+def get_persistent_paper_balance(
+    db: Session | None = None,
+) -> float:
+    """
+    Return current realized paper balance.
+
+    Floating P&L is deliberately excluded.
     """
 
     account = (
-        build_persistent_paper_account()
+        build_persistent_paper_account(
+            db=db
+        )
     )
 
-    balance = _float(
-        account["balance"]
+    balance = _safe_float(
+        account.get(
+            "balance"
+        )
     )
 
     if balance <= 0:
@@ -293,9 +721,89 @@ def get_persistent_paper_balance() -> float:
     return balance
 
 
+# ============================================================
+# CANONICAL UNREALIZED P&L
+# ============================================================
+
+def get_persistent_paper_unrealized_pnl(
+    db: Session | None = None,
+) -> float:
+    """
+    Return current floating P&L from all open positions.
+    """
+
+    account = (
+        build_persistent_paper_account(
+            db=db
+        )
+    )
+
+    return _safe_float(
+        account.get(
+            "unrealized_pnl"
+        )
+    )
+
+
+# ============================================================
+# ACCOUNT SNAPSHOT
+# ============================================================
+
+def get_persistent_paper_account_snapshot(
+    db: Session | None = None,
+) -> dict[str, Any]:
+    """
+    Compatibility alias for consumers that expect an
+    account-snapshot function.
+    """
+
+    return (
+        build_persistent_paper_account(
+            db=db
+        )
+    )
+
+
+# ============================================================
+# RESET
+# ============================================================
+
+def paper_account_reset_is_allowed() -> bool:
+    """
+    Explicitly report whether an automatic account reset is
+    permitted.
+
+    Automatic reset is intentionally disabled.
+
+    The account must not silently return to $1,000 after
+    deployment, restart, or process failure.
+    """
+
+    return False
+
+
+# ============================================================
+# PUBLIC API
+# ============================================================
+
 __all__ = [
     "PAPER_STARTING_BALANCE",
+    "PAPER_CURRENCY",
+    "PAPER_EXECUTION_TYPE",
+    "PAPER_MODE",
     "build_persistent_paper_account",
     "get_persistent_paper_equity",
     "get_persistent_paper_balance",
+    "get_persistent_paper_unrealized_pnl",
+    "get_persistent_paper_account_snapshot",
+    "calculate_realized_pnl",
+    "calculate_unrealized_pnl",
+    "calculate_daily_realized_pnl",
+    "count_open_positions",
+    "paper_account_reset_is_allowed",
 ]
+
+Commit message:
+"Fix canonical persistent paper accounting and live equity"
+
+This version deliberately keeps Balance and Equity separate: open-trade P&L changes equity continuously, while balance changes only after realized P&L. It also prevents a restart from silently resetting the account to $1,000.
