@@ -1,17 +1,34 @@
 """
-RAYMOND v2.8 - Persistent Paper Account
+RAYMOND v2.8 - Canonical Persistent Paper Account
 
-PAPER / RESEARCH ONLY.
+PAPER ONLY.
 
-The account is derived exclusively from persistent Position records.
+This module is the single accounting source for the Raymond
+persistent paper-trading account.
 
-Economic accounting:
+ACCOUNTING RULES
+----------------
+Starting balance:
+    $1,000.00
 
-    realized partial PnL
-    +
-    final remaining-position PnL
-    =
-    total trade PnL
+Balance:
+    starting balance + realized P&L
+
+Equity:
+    balance + unrealized P&L
+
+Open positions:
+    contribute unrealized P&L to equity.
+
+Closed positions:
+    contribute realized P&L to balance.
+
+Partial closes:
+    their realized P&L contributes immediately to balance,
+    while the remaining position continues contributing
+    unrealized P&L to equity.
+
+No second in-memory balance is used here.
 """
 
 from __future__ import annotations
@@ -23,10 +40,10 @@ from .database import SessionLocal
 from .models import Position, PositionStatus
 
 
-PAPER_STARTING_BALANCE = 10_000.0
+PAPER_STARTING_BALANCE = 1_000.0
 
 
-def _as_float(value: Any) -> float:
+def _float(value: Any) -> float:
     try:
         return float(value or 0.0)
     except (TypeError, ValueError):
@@ -34,39 +51,28 @@ def _as_float(value: Any) -> float:
 
 
 def _partial_pnl(position: Position) -> float:
-    return _as_float(
+    return _float(
         getattr(
             position,
             "partial_close_pnl",
-            None,
+            0.0,
         )
     )
 
 
-def _final_pnl(position: Position) -> float:
-    return _as_float(
+def _remaining_pnl(position: Position) -> float:
+    """
+    PnL of the currently remaining quantity.
+
+    Position.pnl is continuously recalculated from the
+    current market price by PositionRepository.update_price().
+    """
+    return _float(
         getattr(
             position,
             "pnl",
-            None,
+            0.0,
         )
-    )
-
-
-def _total_trade_pnl(position: Position) -> float:
-    """
-    Total economic PnL represented by a Position.
-
-    For a position with partial closes:
-
-        cumulative partial realized PnL
-        +
-        final/current remaining PnL
-    """
-
-    return (
-        _partial_pnl(position)
-        + _final_pnl(position)
     )
 
 
@@ -83,9 +89,12 @@ def _utc_day_start() -> datetime:
 
 def _is_today(
     value: Any,
-    start: datetime,
+    day_start: datetime,
 ) -> bool:
     if value is None:
+        return False
+
+    if not isinstance(value, datetime):
         return False
 
     if value.tzinfo is None:
@@ -93,25 +102,33 @@ def _is_today(
             tzinfo=timezone.utc
         )
 
-    return value >= start
+    return value >= day_start
 
 
-def build_persistent_paper_account() -> dict[str, float | str]:
+def build_persistent_paper_account() -> dict[str, Any]:
     """
-    Build the authoritative persistent paper account.
+    Build the canonical persistent paper account.
 
-    OPEN:
-        realized partial PnL contributes to balance.
-        remaining PnL contributes to unrealized PnL.
+    IMPORTANT:
 
-    CLOSED:
-        partial PnL + final PnL contributes to realized PnL.
+    Open position PnL is NOT added to balance.
+
+    It is added only to equity.
+
+    Therefore:
+
+        balance = $1,000 + realized PnL
+
+        equity = balance + unrealized PnL
     """
 
     db = SessionLocal()
 
     try:
-        positions = db.query(Position).all()
+        positions = (
+            db.query(Position)
+            .all()
+        )
 
         realized_pnl = 0.0
         unrealized_pnl = 0.0
@@ -122,24 +139,31 @@ def build_persistent_paper_account() -> dict[str, float | str]:
 
         for position in positions:
 
-            partial_pnl = _partial_pnl(position)
-            final_pnl = _final_pnl(position)
+            partial_pnl = _partial_pnl(
+                position
+            )
 
-            if position.status == PositionStatus.OPEN:
+            current_pnl = _remaining_pnl(
+                position
+            )
+
+            status = getattr(
+                position,
+                "status",
+                None,
+            )
+
+            if status == PositionStatus.OPEN:
 
                 open_positions += 1
 
-                # Partial closes are already realized.
+                # Partial closes have already become
+                # realized money.
                 realized_pnl += partial_pnl
 
-                # Remaining quantity is still unrealized.
-                unrealized_pnl += final_pnl
+                # The remaining position is still floating.
+                unrealized_pnl += current_pnl
 
-                # The existing schema does not preserve a timestamp
-                # for every partial-close event. Therefore we only
-                # count the cumulative partial PnL in daily PnL when
-                # the latest persisted management action is a partial
-                # close today.
                 if (
                     getattr(
                         position,
@@ -156,16 +180,22 @@ def build_persistent_paper_account() -> dict[str, float | str]:
                         day_start,
                     )
                 ):
-                    daily_realized_pnl += partial_pnl
+                    daily_realized_pnl += (
+                        partial_pnl
+                    )
 
-            elif position.status == PositionStatus.CLOSED:
+            elif status == PositionStatus.CLOSED:
 
-                total_pnl = (
+                # At closure, Position.pnl is the final PnL
+                # of the remaining quantity.
+                total_realized = (
                     partial_pnl
-                    + final_pnl
+                    + current_pnl
                 )
 
-                realized_pnl += total_pnl
+                realized_pnl += (
+                    total_realized
+                )
 
                 if _is_today(
                     getattr(
@@ -175,7 +205,9 @@ def build_persistent_paper_account() -> dict[str, float | str]:
                     ),
                     day_start,
                 ):
-                    daily_realized_pnl += total_pnl
+                    daily_realized_pnl += (
+                        total_realized
+                    )
 
         balance = (
             PAPER_STARTING_BALANCE
@@ -188,16 +220,26 @@ def build_persistent_paper_account() -> dict[str, float | str]:
         )
 
         return {
-            "starting_balance": PAPER_STARTING_BALANCE,
+            "starting_balance": (
+                PAPER_STARTING_BALANCE
+            ),
             "balance": balance,
+            "equity": equity,
             "realized_pnl": realized_pnl,
             "unrealized_pnl": unrealized_pnl,
-            "equity": equity,
             "available_balance": balance,
-            "daily_realized_pnl": daily_realized_pnl,
-            "open_positions": float(open_positions),
+            "daily_realized_pnl": (
+                daily_realized_pnl
+            ),
+            "open_positions": open_positions,
             "execution_type": "paper",
-            "live_trading_enabled": "false",
+            "mode": "paper",
+            "live_trading_enabled": False,
+            "real_orders_allowed": False,
+            "canonical": True,
+            "timestamp": datetime.now(
+                timezone.utc
+            ).isoformat(),
         }
 
     finally:
@@ -205,9 +247,18 @@ def build_persistent_paper_account() -> dict[str, float | str]:
 
 
 def get_persistent_paper_equity() -> float:
-    account = build_persistent_paper_account()
+    """
+    Return live paper equity.
 
-    equity = _as_float(
+    This is the value that the Risk Engine should use
+    when calculating the next paper position size.
+    """
+
+    account = (
+        build_persistent_paper_account()
+    )
+
+    equity = _float(
         account["equity"]
     )
 
@@ -217,3 +268,34 @@ def get_persistent_paper_equity() -> float:
         )
 
     return equity
+
+
+def get_persistent_paper_balance() -> float:
+    """
+    Return realized account balance.
+
+    Floating PnL is deliberately excluded.
+    """
+
+    account = (
+        build_persistent_paper_account()
+    )
+
+    balance = _float(
+        account["balance"]
+    )
+
+    if balance <= 0:
+        raise RuntimeError(
+            "Persistent paper balance must be greater than zero."
+        )
+
+    return balance
+
+
+__all__ = [
+    "PAPER_STARTING_BALANCE",
+    "build_persistent_paper_account",
+    "get_persistent_paper_equity",
+    "get_persistent_paper_balance",
+]
