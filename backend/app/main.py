@@ -270,6 +270,15 @@ trading_pipeline_service = TradingPipelineService()
 # APPLICATION
 # ============================================================
 
+# ============================================================
+# MT5 BRIDGE INTEGRATION
+# ============================================================
+
+try:
+    from .mt5_bridge_integration import register_mt5_bridge
+except ImportError:
+    from mt5_bridge_integration import register_mt5_bridge
+
 app = FastAPI(
     title="RAYMOND v2.8 Trading System",
     description=(
@@ -278,6 +287,9 @@ app = FastAPI(
     ),
     version="2.8.0",
 )
+
+# Register the read-only MT5 Bridge API.
+register_mt5_bridge(app)
 
 
 # ============================================================
