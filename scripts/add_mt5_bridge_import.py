@@ -1,118 +1,127 @@
-#!/usr/bin/env python3
-"""Safely add the MT5 Bridge import and registration to backend/app/main.py."""
 
+#!/usr/bin/env python3
+"""Safely register the read-only MT5 Bridge in backend/app/main.py."""
+
+from __future__ import annotations
+
+import ast
 from pathlib import Path
 
-MAIN_FILE = Path("backend/app/main.py")
+ROOT = Path(__file__).resolve().parents[1]
+MAIN_FILE = ROOT / "backend" / "app" / "main.py"
+HELPER_FILE = ROOT / "backend" / "app" / "mt5_bridge_integration.py"
 
 IMPORT_BLOCK = """# ============================================================
-
-MT5 BRIDGE INTEGRATION
-
-============================================================
+# MT5 BRIDGE INTEGRATION
+# ============================================================
 
 try:
-from .mt5_bridge_integration import register_mt5_bridge
+    from .mt5_bridge_integration import register_mt5_bridge
 except ImportError:
-from mt5_bridge_integration import register_mt5_bridge
+    from mt5_bridge_integration import register_mt5_bridge
 """
 
-REGISTRATION_LINE = "register_mt5_bridge(app)"
+
+def find_app_assignment(tree: ast.Module) -> ast.Assign:
+    """Find the module-level app = FastAPI(...) assignment."""
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+
+        if not any(
+            isinstance(target, ast.Name) and target.id == "app"
+            for target in node.targets
+        ):
+            continue
+
+        if (
+            isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "FastAPI"
+        ):
+            return node
+
+    raise SystemExit("ERROR: app = FastAPI(...) was not found.")
+
+
+def has_import(tree: ast.Module) -> bool:
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "mt5_bridge_integration"
+        and any(alias.name == "register_mt5_bridge" for alias in node.names)
+        for node in ast.walk(tree)
+    )
+
+
+def has_registration(tree: ast.Module) -> bool:
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "register_mt5_bridge"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "app"
+        for node in ast.walk(tree)
+    )
+
 
 def main() -> None:
-if not MAIN_FILE.is_file():
-raise SystemExit(f"ERROR: {MAIN_FILE} was not found.")
+    if not MAIN_FILE.is_file():
+        raise SystemExit(f"ERROR: Missing file: {MAIN_FILE}")
 
-source = MAIN_FILE.read_text(encoding="utf-8")
+    if not HELPER_FILE.is_file():
+        raise SystemExit(f"ERROR: Missing helper: {HELPER_FILE}")
 
-if "from .mt5_bridge_integration import register_mt5_bridge" in source:
-    print("SKIPPED: MT5 Bridge import already exists.")
-    return
+    original = MAIN_FILE.read_text(encoding="utf-8")
 
-app_marker = "app = FastAPI("
-app_start = source.find(app_marker)
+    try:
+        tree = ast.parse(original, filename=str(MAIN_FILE))
+    except SyntaxError as exc:
+        raise SystemExit(f"ERROR: main.py has a syntax error: {exc}") from exc
 
-if app_start < 0:
-    raise SystemExit("ERROR: Could not find app = FastAPI(...) in main.py.")
+    updated = original
+    changed = False
 
-# Find the end of the FastAPI constructor without assuming a fixed line number.
-opening = source.find("(", app_start)
-depth = 0
-quote = None
-escaped = False
-app_end = None
+    # Add the import if it is missing.
+    if not has_import(tree):
+        app_assignment = find_app_assignment(tree)
+        lines = updated.splitlines(keepends=True)
+        lines.insert(app_assignment.lineno - 1, IMPORT_BLOCK + "\n")
+        updated = "".join(lines)
+        changed = True
 
-for index in range(opening, len(source)):
-    char = source[index]
+    # Reparse before finding the registration insertion point.
+    tree = ast.parse(updated, filename=str(MAIN_FILE))
 
-    if quote:
-        if escaped:
-            escaped = False
-        elif char == "\\":
-            escaped = True
-        elif char == quote:
-            quote = None
-        continue
+    # Register immediately after app = FastAPI(...) if missing.
+    if not has_registration(tree):
+        app_assignment = find_app_assignment(tree)
+        lines = updated.splitlines(keepends=True)
+        lines.insert(
+            app_assignment.end_lineno,
+            "\n# Register the read-only MT5 Bridge API.\n"
+            "register_mt5_bridge(app)\n",
+        )
+        updated = "".join(lines)
+        changed = True
 
-    if char in ("'", '"'):
-        quote = char
-    elif char == "(":
-        depth += 1
-    elif char == ")":
-        depth -= 1
-        if depth == 0:
-            app_end = index + 1
-            break
+    # Never write an invalid result.
+    final_tree = ast.parse(updated, filename=str(MAIN_FILE))
 
-if app_end is None:
-    raise SystemExit("ERROR: Could not locate the end of app = FastAPI(...).")
+    if not has_import(final_tree):
+        raise SystemExit("ERROR: Import validation failed.")
+    if not has_registration(final_tree):
+        raise SystemExit("ERROR: Registration validation failed.")
 
-# Add the import before the app declaration.
-source = source[:app_start] + IMPORT_BLOCK + "\n\n" + source[app_start:]
+    if not changed:
+        print("OK: Import and registration already exist; nothing changed.")
+        return
 
-# Recalculate the app constructor end after inserting the import.
-app_start = source.find(app_marker)
-opening = source.find("(", app_start)
-depth = 0
-quote = None
-escaped = False
-app_end = None
+    MAIN_FILE.write_text(updated, encoding="utf-8")
+    print("SUCCESS: Updated backend/app/main.py.")
+    print("SUCCESS: Python syntax and both integration checks passed.")
+    print("Safety: This registers read-only endpoints only.")
 
-for index in range(opening, len(source)):
-    char = source[index]
 
-    if quote:
-        if escaped:
-            escaped = False
-        elif char == "\\":
-            escaped = True
-        elif char == quote:
-            quote = None
-        continue
-
-    if char in ("'", '"'):
-        quote = char
-    elif char == "(":
-        depth += 1
-    elif char == ")":
-        depth -= 1
-        if depth == 0:
-            app_end = index + 1
-            break
-
-if app_end is None:
-    raise SystemExit("ERROR: Could not locate the end of the FastAPI constructor.")
-
-# Register the read-only router once, immediately after app creation.
-source = (
-    source[:app_end]
-    + "\n\n# Register the read-only MT5 Bridge API.\n"
-    + REGISTRATION_LINE
-    + source[app_end:]
-)
-
-MAIN_FILE.write_text(source, encoding="utf-8")
-print("SUCCESS: Added MT5 Bridge import and router registration to main.py.")
-
-if name == "main":
-main()
+if __name__ == "__main__":
+    main()
