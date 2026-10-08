@@ -1,7 +1,7 @@
 """
 RAYMOND v2.8 - Live MT5 Execution Gateway
 
-STEP 17.5B
+STEP 17.6C
 
 Real MT5 execution boundary with:
 
@@ -21,11 +21,14 @@ Real MT5 execution boundary with:
 - Stop-loss / take-profit validation
 - Risk/reward validation
 - Broker minimum stop distance
-- LIVE POSITION RECONCILIATION
+- Live-position reconciliation
+- Live-position protection monitoring
 - MT5 order_check()
+- Final safety checks
 - MT5 order_send()
 - Broker execution verification
 - Raymond live-position registration
+- Post-execution position monitoring
 - Post-execution reconciliation
 
 IMPORTANT:
@@ -41,6 +44,8 @@ No broker password is returned.
 No strategy optimization is performed here.
 
 No order is sent unless the complete safety chain passes.
+
+LIVE_TRADING_ENABLED remains FALSE by default.
 """
 
 from __future__ import annotations
@@ -62,7 +67,6 @@ from pydantic import BaseModel, Field
 
 try:
     from .broker_accounts import BrokerAccount
-
     from .database import SessionLocal
 
     from .emergency_stop import (
@@ -82,6 +86,12 @@ try:
         reconciliation_status,
     )
 
+    from .live_position_monitor import (
+        LivePositionMonitorError,
+        monitor_live_positions,
+        protection_status,
+    )
+
     from .mt5_service import (
         MT5ServiceError,
         mt5,
@@ -96,7 +106,6 @@ try:
 
 except ImportError:
     from broker_accounts import BrokerAccount
-
     from database import SessionLocal
 
     from emergency_stop import (
@@ -114,6 +123,12 @@ except ImportError:
         require_reconciliation_safe,
         register_live_position,
         reconciliation_status,
+    )
+
+    from live_position_monitor import (
+        LivePositionMonitorError,
+        monitor_live_positions,
+        protection_status,
     )
 
     from mt5_service import (
@@ -196,37 +211,21 @@ class LiveOrderRequest(BaseModel):
 @dataclass(frozen=True)
 class LiveExecutionResult:
     status: str
-
     execution_type: str
-
     order_id: Optional[int]
-
     deal_id: Optional[int]
-
     position_ticket: Optional[int]
-
     symbol: str
-
     side: str
-
     requested_volume: float
-
     executed_volume: Optional[float]
-
     requested_stop_loss: float
-
     requested_take_profit: float
-
     executed_price: Optional[float]
-
     client_order_id: str
-
     broker_retcode: Optional[int]
-
     broker_comment: Optional[str]
-
     verified: bool
-
     timestamp: str
 
 
@@ -235,7 +234,6 @@ class LiveExecutionResult:
 # ============================================================
 
 safety_manager = EmergencyStopManager()
-
 risk_engine = RiskEngine()
 
 
@@ -322,7 +320,6 @@ def _get_selected_account():
 # ============================================================
 
 def _require_mt5() -> None:
-
     if mt5 is None:
         raise LiveExecutionError(
             "MetaTrader5 Python package is not installed."
@@ -334,7 +331,6 @@ def _require_mt5() -> None:
 # ============================================================
 
 def _order_type_for_side(side: str):
-
     normalized = side.upper().strip()
 
     if normalized == "BUY":
@@ -349,7 +345,6 @@ def _order_type_for_side(side: str):
 
 
 def _position_type_for_side(side: str):
-
     normalized = side.upper().strip()
 
     if normalized == "BUY":
@@ -370,6 +365,11 @@ def _position_type_for_side(side: str):
 def _symbol_specification_from_dict(
     data: dict,
 ) -> SymbolSpecification:
+
+    if not isinstance(data, dict):
+        raise LiveExecutionError(
+            "Broker symbol specification is invalid."
+        )
 
     required_fields = [
         "symbol",
@@ -410,75 +410,55 @@ def _symbol_specification_from_dict(
     try:
         return SymbolSpecification(
             symbol=str(data["symbol"]),
-
             digits=int(data["digits"]),
-
             point=float(data["point"]),
-
             tick_size=float(data["tick_size"]),
-
             tick_value=float(data["tick_value"]),
-
             tick_value_profit=float(
                 data["tick_value_profit"]
             ),
-
             tick_value_loss=float(
                 data["tick_value_loss"]
             ),
-
             contract_size=float(
                 data["contract_size"]
             ),
-
             volume_min=float(
                 data["volume_min"]
             ),
-
             volume_max=float(
                 data["volume_max"]
             ),
-
             volume_step=float(
                 data["volume_step"]
             ),
-
             volume_limit=float(
                 data["volume_limit"]
             ),
-
             trade_mode=int(
                 data["trade_mode"]
             ),
-
             trade_execution_mode=int(
                 data["trade_execution_mode"]
             ),
-
             trade_stops_level=int(
                 data["trade_stops_level"]
             ),
-
             trade_freeze_level=int(
                 data["trade_freeze_level"]
             ),
-
             currency_base=str(
                 data["currency_base"] or ""
             ),
-
             currency_profit=str(
                 data["currency_profit"] or ""
             ),
-
             currency_margin=str(
                 data["currency_margin"] or ""
             ),
-
             spread=int(
                 data["spread"] or 0
             ),
-
             spread_float=bool(
                 data["spread_float"]
             ),
@@ -535,6 +515,65 @@ def _normalize_volume(
 
 
 # ============================================================
+# POSITION MONITOR GATE
+# ============================================================
+
+async def _require_fresh_position_monitor(
+    *,
+    symbol: str,
+    magic: int,
+) -> dict:
+    """
+    Perform a fresh broker-position protection check.
+
+    This is intentionally run immediately before a live order.
+
+    The monitor is fail-closed.
+
+    If the broker cannot be inspected, the order is blocked.
+    """
+
+    try:
+        result = await monitor_live_positions(
+            symbol=symbol,
+            magic=magic,
+        )
+
+    except LivePositionMonitorError as exc:
+        raise LiveExecutionError(
+            "Live position monitoring failed. "
+            "New live orders are blocked: "
+            f"{exc}"
+        ) from exc
+
+    if not result.get(
+        "monitor_healthy",
+        False,
+    ):
+        raise LiveExecutionError(
+            "Live position monitor is unhealthy. "
+            "New live orders are blocked."
+        )
+
+    if not result.get(
+        "new_live_orders_allowed",
+        False,
+    ):
+        monitor_result = result.get(
+            "result",
+            {},
+        )
+
+        raise LiveExecutionError(
+            "Live position protection is unsafe. "
+            "New live orders are blocked. "
+            f"Issues: {monitor_result.get('issues', [])}"
+        )
+
+    return result
+
+
+# ============================================================
 # PRE-TRADE SAFETY GATES
 # ============================================================
 
@@ -547,7 +586,6 @@ async def _validate_live_gate(
     # --------------------------------------------------------
 
     if not _environment_live_enabled():
-
         raise LiveExecutionError(
             "LIVE_TRADING_ENABLED is false."
         )
@@ -560,7 +598,6 @@ async def _validate_live_gate(
         require_live_armed()
 
     except PermissionError as exc:
-
         raise LiveExecutionError(
             str(exc)
         ) from exc
@@ -581,7 +618,6 @@ async def _validate_live_gate(
         ).upper()
         != "MT5"
     ):
-
         raise LiveExecutionError(
             "The selected broker account is not an MT5 account."
         )
@@ -591,13 +627,9 @@ async def _validate_live_gate(
     # --------------------------------------------------------
 
     try:
-
-        heartbeat = (
-            await mt5_service.heartbeat()
-        )
+        heartbeat = await mt5_service.heartbeat()
 
     except Exception as exc:
-
         raise LiveExecutionError(
             f"Unable to verify MT5 heartbeat: {exc}"
         ) from exc
@@ -606,7 +638,6 @@ async def _validate_live_gate(
         "connected",
         False,
     ):
-
         raise LiveExecutionError(
             "MT5 connection is not healthy."
         )
@@ -618,11 +649,9 @@ async def _validate_live_gate(
     # --------------------------------------------------------
 
     try:
-
         safety_manager.require_trade_permission()
 
     except EmergencyStopError as exc:
-
         raise LiveExecutionError(
             str(exc)
         ) from exc
@@ -632,13 +661,9 @@ async def _validate_live_gate(
     # --------------------------------------------------------
 
     try:
-
-        account_info = (
-            await mt5_service.get_account_info()
-        )
+        account_info = await mt5_service.get_account_info()
 
     except MT5ServiceError as exc:
-
         raise LiveExecutionError(
             f"Unable to read broker account: {exc}"
         ) from exc
@@ -647,7 +672,6 @@ async def _validate_live_gate(
         "trade_allowed",
         False,
     ):
-
         raise LiveExecutionError(
             "Broker account does not permit trading."
         )
@@ -656,7 +680,6 @@ async def _validate_live_gate(
         "trade_expert",
         False,
     ):
-
         raise LiveExecutionError(
             "MT5 Expert Advisor/API trading permission "
             "is not enabled."
@@ -667,13 +690,9 @@ async def _validate_live_gate(
     # --------------------------------------------------------
 
     try:
-
-        terminal = (
-            await mt5_service.get_terminal_info()
-        )
+        terminal = await mt5_service.get_terminal_info()
 
     except MT5ServiceError as exc:
-
         raise LiveExecutionError(
             f"Unable to read MT5 terminal: {exc}"
         ) from exc
@@ -682,7 +701,6 @@ async def _validate_live_gate(
         "connected",
         False,
     ):
-
         raise LiveExecutionError(
             "MT5 terminal is not connected."
         )
@@ -691,7 +709,6 @@ async def _validate_live_gate(
         "trade_allowed",
         False,
     ):
-
         raise LiveExecutionError(
             "MT5 terminal trading is disabled."
         )
@@ -700,7 +717,6 @@ async def _validate_live_gate(
         "tradeapi_disabled",
         False,
     ):
-
         raise LiveExecutionError(
             "MT5 trading API is disabled."
         )
@@ -712,13 +728,11 @@ async def _validate_live_gate(
     symbol = request.symbol.strip()
 
     if not symbol:
-
         raise LiveExecutionError(
             "Trading symbol cannot be empty."
         )
 
     try:
-
         specification_raw = (
             await mt5_service.get_symbol_specification(
                 symbol
@@ -726,7 +740,6 @@ async def _validate_live_gate(
         )
 
     except MT5ServiceError as exc:
-
         raise LiveExecutionError(
             f"Unable to read broker specification for "
             f"{symbol}: {exc}"
@@ -746,15 +759,21 @@ async def _validate_live_gate(
         request.side.upper().strip()
     )
 
-    try:
+    if normalized_side not in {
+        "BUY",
+        "SELL",
+    }:
+        raise LiveExecutionError(
+            "side must be BUY or SELL."
+        )
 
+    try:
         risk_engine.validate_trade_direction(
             specification.trade_mode,
             normalized_side,
         )
 
     except RiskEngineError as exc:
-
         raise LiveExecutionError(
             str(exc)
         ) from exc
@@ -767,7 +786,6 @@ async def _validate_live_gate(
         request.volume
         < specification.volume_min
     ):
-
         raise LiveExecutionError(
             "Requested volume is below broker minimum."
         )
@@ -776,7 +794,6 @@ async def _validate_live_gate(
         request.volume
         > specification.volume_max
     ):
-
         raise LiveExecutionError(
             "Requested volume exceeds broker maximum."
         )
@@ -789,7 +806,6 @@ async def _validate_live_gate(
     )
 
     if normalized_volume <= 0:
-
         raise LiveExecutionError(
             "Requested volume cannot be aligned to "
             "the broker volume step."
@@ -799,21 +815,18 @@ async def _validate_live_gate(
         normalized_volume
         - request.volume
     ) > 1e-8:
-
         raise LiveExecutionError(
             "Requested volume is not aligned to "
             "the broker volume step."
         )
 
     try:
-
         risk_engine.validate_volume(
             request.volume,
             specification,
         )
 
     except RiskEngineError as exc:
-
         raise LiveExecutionError(
             str(exc)
         ) from exc
@@ -823,35 +836,39 @@ async def _validate_live_gate(
     # --------------------------------------------------------
 
     try:
-
-        tick = (
-            await mt5_service.get_symbol_tick(
-                symbol
-            )
+        tick = await mt5_service.get_symbol_tick(
+            symbol
         )
 
     except MT5ServiceError as exc:
-
         raise LiveExecutionError(
             f"Unable to read current {symbol} price: {exc}"
         ) from exc
 
-    bid = float(
-        tick.get(
-            "bid",
-            0,
+    try:
+        bid = float(
+            tick.get(
+                "bid",
+                0,
+            )
         )
-    )
 
-    ask = float(
-        tick.get(
-            "ask",
-            0,
+        ask = float(
+            tick.get(
+                "ask",
+                0,
+            )
         )
-    )
+
+    except (
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise LiveExecutionError(
+            "Broker returned invalid bid/ask data."
+        ) from exc
 
     if bid <= 0 or ask <= 0:
-
         raise LiveExecutionError(
             "Broker returned an invalid bid/ask price."
         )
@@ -875,23 +892,20 @@ async def _validate_live_gate(
     )
 
     if stop_loss <= 0:
-
         raise LiveExecutionError(
             "Stop-loss must be greater than zero."
         )
 
     if take_profit <= 0:
-
         raise LiveExecutionError(
             "Take-profit must be greater than zero."
         )
 
     # --------------------------------------------------------
-    # GATE 14 - RISK ENGINE
+    # GATE 14 - RISK VALIDATION
     # --------------------------------------------------------
 
     try:
-
         risk_engine.validate_stop_loss(
             entry_price,
             stop_loss,
@@ -904,13 +918,40 @@ async def _validate_live_gate(
         )
 
     except RiskEngineError as exc:
-
         raise LiveExecutionError(
             str(exc)
         ) from exc
 
     # --------------------------------------------------------
-    # GATE 15 - BROKER STOP DISTANCE
+    # GATE 15 - ORDER DIRECTION / PRICE STRUCTURE
+    # --------------------------------------------------------
+
+    if normalized_side == "BUY":
+
+        if not (
+            stop_loss
+            < entry_price
+            < take_profit
+        ):
+            raise LiveExecutionError(
+                "BUY order requires SL below entry "
+                "and TP above entry."
+            )
+
+    elif normalized_side == "SELL":
+
+        if not (
+            take_profit
+            < entry_price
+            < stop_loss
+        ):
+            raise LiveExecutionError(
+                "SELL order requires TP below entry "
+                "and SL above entry."
+            )
+
+    # --------------------------------------------------------
+    # GATE 16 - BROKER MINIMUM STOP DISTANCE
     # --------------------------------------------------------
 
     minimum_stop_distance = (
@@ -920,39 +961,35 @@ async def _validate_live_gate(
 
     if minimum_stop_distance > 0:
 
-        if abs(
-            entry_price
-            - stop_loss
-        ) < minimum_stop_distance:
-
+        if (
+            abs(
+                entry_price
+                - stop_loss
+            )
+            < minimum_stop_distance
+        ):
             raise LiveExecutionError(
                 "Stop-loss is too close to the current "
                 "market price for the broker."
             )
 
-        if abs(
-            take_profit
-            - entry_price
-        ) < minimum_stop_distance:
-
+        if (
+            abs(
+                take_profit
+                - entry_price
+            )
+            < minimum_stop_distance
+        ):
             raise LiveExecutionError(
                 "Take-profit is too close to the current "
                 "market price for the broker."
             )
 
     # --------------------------------------------------------
-    # GATE 16 - RECONCILIATION
+    # GATE 17 - FRESH RECONCILIATION
     # --------------------------------------------------------
-    #
-    # Raymond must know the current broker position state
-    # before opening another live position.
-    #
-    # If reconciliation has never successfully completed,
-    # this gate remains CLOSED.
-    #
 
     try:
-
         reconciliation = (
             await reconcile_live_positions(
                 symbol=symbol,
@@ -961,47 +998,43 @@ async def _validate_live_gate(
         )
 
     except Exception as exc:
-
         raise LiveExecutionError(
             "Live reconciliation failed. "
             "New live orders are blocked: "
             f"{exc}"
         ) from exc
 
-    if not (
-        reconciliation.safe_for_new_live_orders
-    ):
-
+    if not reconciliation.safe_for_new_live_orders:
         raise LiveExecutionError(
-            "Live reconciliation detected a broker/Raymond "
-            "position mismatch. New live orders are blocked."
+            "Live reconciliation detected a "
+            "broker/Raymond position mismatch. "
+            "New live orders are blocked."
         )
 
     # --------------------------------------------------------
-    # ALL PRE-TRADE GATES PASSED
+    # GATE 18 - FRESH POSITION PROTECTION MONITOR
     # --------------------------------------------------------
+
+    await _require_fresh_position_monitor(
+        symbol=symbol,
+        magic=int(request.magic),
+    )
 
     return {
         "account": account,
-
         "account_info": account_info,
-
         "terminal": terminal,
-
         "specification": specification,
-
         "tick": tick,
-
         "entry_price": entry_price,
-
         "volume": normalized_volume,
-
         "side": normalized_side,
+        "reconciliation": reconciliation,
     }
 
 
 # ============================================================
-# POSITION VERIFICATION
+# BROKER POSITION VERIFICATION
 # ============================================================
 
 async def _verify_position(
@@ -1012,17 +1045,12 @@ async def _verify_position(
     magic: int,
     order_id: Optional[int],
 ):
-
     try:
-
-        positions = (
-            await mt5_service.get_positions(
-                symbol=symbol
-            )
+        positions = await mt5_service.get_positions(
+            symbol=symbol
         )
 
     except MT5ServiceError as exc:
-
         raise LiveExecutionError(
             "Order may have been sent, but broker "
             "position verification failed: "
@@ -1038,7 +1066,6 @@ async def _verify_position(
     for position in positions:
 
         try:
-
             position_magic = int(
                 position.get(
                     "magic",
@@ -1065,41 +1092,31 @@ async def _verify_position(
                 and position_type == expected_type
                 and position_volume > 0
             ):
-
                 matching.append(
                     {
                         "ticket": position.get(
                             "ticket"
                         ),
-
                         "volume": position_volume,
-
                         "type": position_type,
-
                         "reason": position.get(
                             "reason"
                         ),
-
                         "symbol": position.get(
                             "symbol"
                         ),
-
                         "price_open": position.get(
                             "price_open"
                         ),
-
                         "sl": position.get(
                             "sl"
                         ),
-
                         "tp": position.get(
                             "tp"
                         ),
-
                         "profit": position.get(
                             "profit"
                         ),
-
                         "magic": position_magic,
                     }
                 )
@@ -1108,7 +1125,6 @@ async def _verify_position(
             TypeError,
             ValueError,
         ):
-
             continue
 
     if not matching:
@@ -1133,13 +1149,10 @@ async def _verify_position(
 
     return {
         "verified": True,
-
         "position": matching[0],
-
         "positions_found": len(
             positions
         ),
-
         "order_id": order_id,
     }
 
@@ -1162,11 +1175,9 @@ class LiveExecutionGateway:
         # ----------------------------------------------------
 
         try:
-
             require_live_armed()
 
         except PermissionError as exc:
-
             raise LiveExecutionError(
                 str(exc)
             ) from exc
@@ -1191,13 +1202,9 @@ class LiveExecutionGateway:
 
         symbol = request.symbol.strip()
 
-        side = gate[
-            "side"
-        ]
+        side = gate["side"]
 
-        volume = gate[
-            "volume"
-        ]
+        volume = gate["volume"]
 
         entry_price = gate[
             "entry_price"
@@ -1234,7 +1241,7 @@ class LiveExecutionGateway:
         )
 
         # ----------------------------------------------------
-        # FINAL PRICE SAFETY CHECK
+        # RECHECK PRICE STRUCTURE AFTER NORMALIZATION
         # ----------------------------------------------------
 
         if side == "BUY":
@@ -1244,7 +1251,6 @@ class LiveExecutionGateway:
                 < entry_price
                 < take_profit
             ):
-
                 raise LiveExecutionError(
                     "BUY order requires SL below entry "
                     "and TP above entry."
@@ -1257,20 +1263,18 @@ class LiveExecutionGateway:
                 < entry_price
                 < stop_loss
             ):
-
                 raise LiveExecutionError(
                     "SELL order requires TP below entry "
                     "and SL above entry."
                 )
 
         else:
-
             raise LiveExecutionError(
                 "Unsupported order side."
             )
 
         # ----------------------------------------------------
-        # BUILD MT5 REQUEST
+        # MT5 REQUEST
         # ----------------------------------------------------
 
         mt5_request = {
@@ -1305,14 +1309,16 @@ class LiveExecutionGateway:
         }
 
         # ----------------------------------------------------
-        # BROKER PRE-CHECK
+        # ORDER CHECK
         # ----------------------------------------------------
 
         try:
 
-            check_result = await asyncio.to_thread(
-                mt5.order_check,
-                mt5_request,
+            check_result = (
+                await asyncio.to_thread(
+                    mt5.order_check,
+                    mt5_request,
+                )
             )
 
         except Exception as exc:
@@ -1331,17 +1337,16 @@ class LiveExecutionGateway:
             check_result,
             "_asdict",
         ):
-
             check_dict = (
                 check_result._asdict()
             )
-
         else:
-
             check_dict = {}
 
-        check_retcode = check_dict.get(
-            "retcode"
+        check_retcode = (
+            check_dict.get(
+                "retcode"
+            )
         )
 
         if (
@@ -1389,11 +1394,9 @@ class LiveExecutionGateway:
 
                 verified=False,
 
-                timestamp=(
-                    datetime.now(
-                        timezone.utc
-                    ).isoformat()
-                ),
+                timestamp=datetime.now(
+                    timezone.utc
+                ).isoformat(),
             )
 
         # ----------------------------------------------------
@@ -1425,14 +1428,53 @@ class LiveExecutionGateway:
             ) from exc
 
         # ----------------------------------------------------
-        # REAL MT5 ORDER
+        # FINAL FRESH POSITION MONITOR
+        #
+        # This is deliberately immediately before
+        # order_send().
+        # ----------------------------------------------------
+
+        await _require_fresh_position_monitor(
+            symbol=symbol,
+            magic=magic,
+        )
+
+        # ----------------------------------------------------
+        # FINAL EMERGENCY-STOP CHECK
         # ----------------------------------------------------
 
         try:
 
-            send_result = await asyncio.to_thread(
-                mt5.order_send,
-                mt5_request,
+            safety_manager.require_trade_permission()
+
+        except EmergencyStopError as exc:
+
+            raise LiveExecutionError(
+                str(exc)
+            ) from exc
+
+        # ----------------------------------------------------
+        # FINAL ENVIRONMENT CHECK
+        # ----------------------------------------------------
+
+        if not _environment_live_enabled():
+
+            raise LiveExecutionError(
+                "LIVE_TRADING_ENABLED became false "
+                "before order submission."
+            )
+
+        # ----------------------------------------------------
+        # SEND REAL MT5 ORDER
+        # ----------------------------------------------------
+
+        try:
+
+            send_result = (
+                await asyncio.to_thread(
+                    mt5.order_send,
+                    mt5_request,
+                )
             )
 
         except Exception as exc:
@@ -1451,37 +1493,46 @@ class LiveExecutionGateway:
             send_result,
             "_asdict",
         ):
-
             send_dict = (
                 send_result._asdict()
             )
-
         else:
-
             send_dict = {}
 
-        retcode = send_dict.get(
-            "retcode"
+        retcode = (
+            send_dict.get(
+                "retcode"
+            )
         )
 
-        order_id = send_dict.get(
-            "order"
+        order_id = (
+            send_dict.get(
+                "order"
+            )
         )
 
-        deal_id = send_dict.get(
-            "deal"
+        deal_id = (
+            send_dict.get(
+                "deal"
+            )
         )
 
-        broker_comment = send_dict.get(
-            "comment"
+        broker_comment = (
+            send_dict.get(
+                "comment"
+            )
         )
 
-        executed_price = send_dict.get(
-            "price"
+        executed_price = (
+            send_dict.get(
+                "price"
+            )
         )
 
-        executed_volume = send_dict.get(
-            "volume"
+        executed_volume = (
+            send_dict.get(
+                "volume"
+            )
         )
 
         # ----------------------------------------------------
@@ -1561,15 +1612,13 @@ class LiveExecutionGateway:
 
                 verified=False,
 
-                timestamp=(
-                    datetime.now(
-                        timezone.utc
-                    ).isoformat()
-                ),
+                timestamp=datetime.now(
+                    timezone.utc
+                ).isoformat(),
             )
 
         # ----------------------------------------------------
-        # VERIFY BROKER POSITION
+        # VERIFY ACTUAL BROKER POSITION
         # ----------------------------------------------------
 
         verification = (
@@ -1595,10 +1644,9 @@ class LiveExecutionGateway:
             False,
         ):
 
-            # The order may have been executed even though
-            # Raymond could not verify the resulting position.
-            #
-            # NEVER report this as a successful verified trade.
+            # The order may have executed.
+
+            # NEVER claim verified success.
 
             return LiveExecutionResult(
                 status="sent_unverified",
@@ -1653,15 +1701,13 @@ class LiveExecutionGateway:
 
                 verified=False,
 
-                timestamp=(
-                    datetime.now(
-                        timezone.utc
-                    ).isoformat()
-                ),
+                timestamp=datetime.now(
+                    timezone.utc
+                ).isoformat(),
             )
 
         # ----------------------------------------------------
-        # REGISTER VERIFIED POSITION
+        # POSITION TICKET
         # ----------------------------------------------------
 
         position_ticket = None
@@ -1675,6 +1721,7 @@ class LiveExecutionGateway:
             if raw_ticket is not None:
 
                 try:
+
                     position_ticket = int(
                         raw_ticket
                     )
@@ -1686,6 +1733,97 @@ class LiveExecutionGateway:
 
                     position_ticket = None
 
+        if position_ticket is None:
+
+            raise LiveExecutionError(
+                "Broker position was detected but "
+                "no valid position ticket was returned. "
+                "Execution cannot be considered fully verified."
+            )
+
+        # ----------------------------------------------------
+        # VERIFY BROKER SL / TP
+        # ----------------------------------------------------
+
+        broker_sl = position.get(
+            "sl"
+        )
+
+        broker_tp = position.get(
+            "tp"
+        )
+
+        try:
+
+            broker_sl_value = float(
+                broker_sl
+            )
+
+            broker_tp_value = float(
+                broker_tp
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ) as exc:
+
+            raise LiveExecutionError(
+                "Broker position was opened but "
+                "SL/TP could not be verified."
+            ) from exc
+
+        if (
+            broker_sl_value <= 0
+            or broker_tp_value <= 0
+        ):
+
+            raise LiveExecutionError(
+                "Broker position was opened without "
+                "valid SL and TP. Further live orders "
+                "must remain blocked."
+            )
+
+        if side == "BUY":
+
+            if not (
+                broker_sl_value
+                < float(
+                    position.get(
+                        "price_open",
+                        entry_price,
+                    )
+                )
+                < broker_tp_value
+            ):
+
+                raise LiveExecutionError(
+                    "Broker BUY position has invalid "
+                    "SL/TP structure."
+                )
+
+        elif side == "SELL":
+
+            if not (
+                broker_tp_value
+                < float(
+                    position.get(
+                        "price_open",
+                        entry_price,
+                    )
+                )
+                < broker_sl_value
+            ):
+
+                raise LiveExecutionError(
+                    "Broker SELL position has invalid "
+                    "SL/TP structure."
+                )
+
+        # ----------------------------------------------------
+        # REGISTER VERIFIED POSITION
+        # ----------------------------------------------------
+
         try:
 
             register_live_position(
@@ -1696,16 +1834,14 @@ class LiveExecutionGateway:
                 side=side,
 
                 volume=(
-                    float(
-                        executed_volume
-                    )
+                    float(executed_volume)
                     if executed_volume is not None
                     else float(volume)
                 ),
 
-                stop_loss=stop_loss,
+                stop_loss=broker_sl_value,
 
-                take_profit=take_profit,
+                take_profit=broker_tp_value,
 
                 position_ticket=position_ticket,
 
@@ -1713,11 +1849,6 @@ class LiveExecutionGateway:
             )
 
         except Exception as exc:
-
-            # The broker position exists, but Raymond could
-            # not register its local state.
-            #
-            # This is deliberately treated as unsafe.
 
             raise LiveExecutionError(
                 "Broker position was verified, but Raymond "
@@ -1728,14 +1859,54 @@ class LiveExecutionGateway:
             ) from exc
 
         # ----------------------------------------------------
+        # POST-EXECUTION POSITION MONITOR
+        # ----------------------------------------------------
+
+        try:
+
+            post_monitor = (
+                await monitor_live_positions(
+                    symbol=symbol,
+                    magic=magic,
+                )
+            )
+
+        except LivePositionMonitorError as exc:
+
+            raise LiveExecutionError(
+                "Live order was executed and verified, "
+                "but post-execution position monitoring "
+                "failed. Further live orders are blocked: "
+                f"{exc}"
+            ) from exc
+
+        if not post_monitor.get(
+            "monitor_healthy",
+            False,
+        ):
+
+            raise LiveExecutionError(
+                "Live order was executed, but the "
+                "post-execution position monitor is "
+                "unhealthy. Further live orders "
+                "are blocked."
+            )
+
+        if not post_monitor.get(
+            "new_live_orders_allowed",
+            False,
+        ):
+
+            raise LiveExecutionError(
+                "Live order was executed, but the "
+                "post-execution position monitor "
+                "detected a protection mismatch. "
+                "Further live orders are blocked."
+            )
+
+        # ----------------------------------------------------
         # POST-EXECUTION RECONCILIATION
         # ----------------------------------------------------
-        #
-        # The broker state is checked again after the order.
-        #
-        # This catches situations where the broker state does
-        # not match what Raymond registered.
-        #
 
         try:
 
@@ -1749,8 +1920,8 @@ class LiveExecutionGateway:
         except Exception as exc:
 
             raise LiveExecutionError(
-                "Live order was executed and verified, but "
-                "post-execution reconciliation failed. "
+                "Live order was executed and verified, "
+                "but post-execution reconciliation failed. "
                 "Further live orders are blocked: "
                 f"{exc}"
             ) from exc
@@ -1760,9 +1931,10 @@ class LiveExecutionGateway:
         ):
 
             raise LiveExecutionError(
-                "Live order was executed, but post-execution "
-                "reconciliation detected a mismatch. "
-                "Further live orders are blocked."
+                "Live order was executed, but "
+                "post-execution reconciliation detected "
+                "a mismatch. Further live orders "
+                "are blocked."
             )
 
         # ----------------------------------------------------
@@ -1822,11 +1994,9 @@ class LiveExecutionGateway:
 
             verified=True,
 
-            timestamp=(
-                datetime.now(
-                    timezone.utc
-                ).isoformat()
-            ),
+            timestamp=datetime.now(
+                timezone.utc
+            ).isoformat(),
         )
 
 
@@ -1923,6 +2093,8 @@ async def live_execution_status():
         reconciliation_status()
     )
 
+    monitor = protection_status()
+
     all_account_gates = (
         selected_account is not None
         and selected_account["verified"]
@@ -1943,6 +2115,17 @@ async def live_execution_status():
         )
     )
 
+    monitor_gate = (
+        monitor.get(
+            "monitor_healthy",
+            False,
+        )
+        and monitor.get(
+            "new_live_orders_allowed",
+            False,
+        )
+    )
+
     order_execution_available = (
         environment_enabled
         and live_arm.get(
@@ -1952,9 +2135,11 @@ async def live_execution_status():
         and all_account_gates
         and emergency_gate
         and reconciliation_gate
+        and monitor_gate
     )
 
     return {
+
         "status": "ok",
 
         "execution_type": "mt5_live",
@@ -1964,6 +2149,7 @@ async def live_execution_status():
         ),
 
         "live_arm": {
+
             "armed": live_arm.get(
                 "armed",
                 False,
@@ -1992,6 +2178,7 @@ async def live_execution_status():
         ),
 
         "safety": {
+
             "trading_allowed": (
                 safety.trading_allowed
             ),
@@ -2012,6 +2199,7 @@ async def live_execution_status():
         },
 
         "reconciliation": {
+
             "safe_for_new_live_orders": (
                 reconciliation_gate
             ),
@@ -2037,7 +2225,45 @@ async def live_execution_status():
             "fail_closed": True,
         },
 
+        "position_monitor": {
+
+            "monitor_healthy": (
+                monitor.get(
+                    "monitor_healthy",
+                    False,
+                )
+            ),
+
+            "new_live_orders_allowed": (
+                monitor.get(
+                    "new_live_orders_allowed",
+                    False,
+                )
+            ),
+
+            "last_run_at": (
+                monitor.get(
+                    "last_run_at"
+                )
+            ),
+
+            "last_error": (
+                monitor.get(
+                    "last_error"
+                )
+            ),
+
+            "last_result": (
+                monitor.get(
+                    "last_result"
+                )
+            ),
+
+            "fail_closed": True,
+        },
+
         "gates": {
+
             "environment_enabled": (
                 environment_enabled
             ),
@@ -2090,6 +2316,10 @@ async def live_execution_status():
 
             "reconciliation_safe": (
                 reconciliation_gate
+            ),
+
+            "position_monitor_safe": (
+                monitor_gate
             ),
 
             "order_execution_available": (
@@ -2165,6 +2395,7 @@ async def execute_live_order(
         )
 
         return {
+
             "status": result.status,
 
             "execution_type": (
