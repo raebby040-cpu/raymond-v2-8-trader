@@ -365,7 +365,7 @@ class ApiService {
   }
 
   // ============================================================
-  // BROKER ACCOUNTS — STEP 17.7
+  // BROKER ACCOUNTS
   // ============================================================
 
   Future<Map<String, dynamic>>
@@ -470,6 +470,43 @@ class ApiService {
     final response =
         await _dio.delete(
       '/api/broker-accounts/$accountId',
+    );
+
+    return _asMap(response.data);
+  }
+
+  // ============================================================
+  // MT5 ACCOUNT CONNECTION — STEP 17.8
+  // ============================================================
+
+  Future<Map<String, dynamic>>
+      connectBrokerAccount({
+    required String accountId,
+    required String password,
+    String? terminalPath,
+  }) async {
+    final response =
+        await _dio.post(
+      '/api/broker-accounts/$accountId/connect',
+      data: {
+        'password': password,
+        if (terminalPath != null &&
+            terminalPath.trim().isNotEmpty)
+          'terminal_path':
+              terminalPath.trim(),
+      },
+    );
+
+    return _asMap(response.data);
+  }
+
+  Future<Map<String, dynamic>>
+      disconnectBrokerAccount(
+    String accountId,
+  ) async {
+    final response =
+        await _dio.post(
+      '/api/broker-accounts/$accountId/disconnect',
     );
 
     return _asMap(response.data);
