@@ -18,11 +18,15 @@ Pipeline:
         ->
     broker specification
         ->
+    persistent idempotency record
+        ->
     order_check
         ->
     order_send
         ->
     broker verification
+        ->
+    persistent execution record
 
 Safety:
     - DEMO account required.
@@ -31,14 +35,16 @@ Safety:
     - TP required.
     - Risk Engine remains authoritative.
     - Broker symbol specification is used.
-    - Duplicate execution is blocked by signal identity.
+    - Duplicate execution is blocked persistently.
+    - Database failure blocks a new order BEFORE order_send.
+    - LIVE trading is not handled here.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -48,13 +54,22 @@ try:
 except ImportError:
     mt5 = None
 
+try:
+    from .database import SessionLocal, engine
+    from .execution_state import ExecutionRecord
+except ImportError:
+    from database import SessionLocal, engine
+    from execution_state import ExecutionRecord
+
+from sqlalchemy import select
+
 from app.risk_engine import (
     SymbolSpecification,
 )
+
 from app.trading_pipeline_service import (
     PaperRiskState,
     TradingPipelineService,
-    TradingPipelineServiceError,
 )
 
 
@@ -89,7 +104,9 @@ class DemoMT5ExecutionEngine:
     Controlled MT5 DEMO executor.
 
     This class deliberately does not know how to authorize LIVE trading.
-    LIVE remains the responsibility of the existing live execution gateway.
+
+    LIVE remains the responsibility of the existing live execution
+    gateway and independent LIVE safety gate.
     """
 
     def __init__(
@@ -102,11 +119,6 @@ class DemoMT5ExecutionEngine:
             or TradingPipelineService()
         )
 
-        self._processed_signals: dict[
-            str,
-            float,
-        ] = {}
-
         self.magic = int(
             os.getenv(
                 "RAYMOND_MT5_DEMO_MAGIC",
@@ -114,9 +126,29 @@ class DemoMT5ExecutionEngine:
             )
         )
 
-    # ------------------------------------------------------------------
+        self.verification_attempts = max(
+            1,
+            int(
+                os.getenv(
+                    "RAYMOND_DEMO_VERIFICATION_ATTEMPTS",
+                    "5",
+                )
+            ),
+        )
+
+        self.verification_delay_seconds = max(
+            0.05,
+            float(
+                os.getenv(
+                    "RAYMOND_DEMO_VERIFICATION_DELAY_SECONDS",
+                    "0.25",
+                )
+            ),
+        )
+
+    # ==================================================================
     # BASIC VALIDATION
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     @staticmethod
     def _require_mt5() -> None:
@@ -131,9 +163,327 @@ class DemoMT5ExecutionEngine:
             timezone.utc
         ).isoformat()
 
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _utc_datetime() -> datetime:
+        return datetime.utcnow()
+
+    # ==================================================================
+    # PERSISTENT EXECUTION STATE
+    # ==================================================================
+
+    @staticmethod
+    def _ensure_execution_table() -> None:
+        """
+        Ensure the execution_records table exists.
+
+        Only the ExecutionRecord table is created here.
+
+        This keeps DEMO execution persistence independent from whether
+        another application startup path has already initialized the
+        database metadata.
+        """
+
+        try:
+            ExecutionRecord.__table__.create(
+                bind=engine,
+                checkfirst=True,
+            )
+        except Exception as exc:
+            raise DemoExecutionError(
+                "Unable to initialize persistent execution state: "
+                f"{exc}"
+            ) from exc
+
+    @classmethod
+    def _get_execution_record(
+        cls,
+        idempotency_key: str,
+    ) -> ExecutionRecord | None:
+        cls._ensure_execution_table()
+
+        try:
+            with SessionLocal() as db:
+                statement = (
+                    select(ExecutionRecord)
+                    .where(
+                        ExecutionRecord.idempotency_key
+                        == idempotency_key
+                    )
+                    .limit(1)
+                )
+
+                return db.execute(
+                    statement
+                ).scalar_one_or_none()
+
+        except Exception as exc:
+            raise DemoExecutionError(
+                "Unable to read persistent execution state: "
+                f"{exc}"
+            ) from exc
+
+    @classmethod
+    def _create_pending_execution(
+        cls,
+        *,
+        signal_id: str,
+        symbol: str,
+        timeframe: str,
+        side: str,
+        volume: float,
+        requested_price: float,
+        stop_loss: float,
+        take_profit: float,
+    ) -> ExecutionRecord:
+        """
+        Create the persistent execution record BEFORE order_send.
+
+        If this fails, no broker order is attempted.
+        """
+
+        cls._ensure_execution_table()
+
+        try:
+            with SessionLocal() as db:
+                existing = (
+                    db.execute(
+                        select(ExecutionRecord)
+                        .where(
+                            ExecutionRecord.idempotency_key
+                            == signal_id
+                        )
+                        .limit(1)
+                    )
+                    .scalar_one_or_none()
+                )
+
+                if existing is not None:
+                    return existing
+
+                record = ExecutionRecord(
+                    idempotency_key=signal_id,
+                    execution_mode="demo",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    status="pending",
+                    side=side,
+                    volume=float(volume),
+                    requested_price=float(
+                        requested_price
+                    ),
+                    executed_price=None,
+                    stop_loss=float(stop_loss),
+                    take_profit=float(take_profit),
+                    order_ticket=None,
+                    deal_ticket=None,
+                    position_ticket=None,
+                    broker_retcode=None,
+                    broker_comment=None,
+                    verified=False,
+                    reason="Persistent DEMO execution reserved.",
+                    created_at=cls._utc_datetime(),
+                    updated_at=cls._utc_datetime(),
+                )
+
+                db.add(record)
+                db.commit()
+                db.refresh(record)
+
+                return record
+
+        except Exception as exc:
+            raise DemoExecutionError(
+                "Unable to reserve persistent execution state. "
+                "DEMO order was NOT sent: "
+                f"{exc}"
+            ) from exc
+
+    @classmethod
+    def _update_execution_record(
+        cls,
+        *,
+        signal_id: str,
+        status: str,
+        executed_price: float | None = None,
+        order_ticket: int | None = None,
+        deal_ticket: int | None = None,
+        position_ticket: int | None = None,
+        broker_retcode: int | None = None,
+        broker_comment: str | None = None,
+        verified: bool = False,
+        reason: str = "",
+    ) -> ExecutionRecord:
+        cls._ensure_execution_table()
+
+        try:
+            with SessionLocal() as db:
+                record = (
+                    db.execute(
+                        select(ExecutionRecord)
+                        .where(
+                            ExecutionRecord.idempotency_key
+                            == signal_id
+                        )
+                        .limit(1)
+                    )
+                    .scalar_one_or_none()
+                )
+
+                if record is None:
+                    raise DemoExecutionError(
+                        "Persistent execution record disappeared "
+                        f"for signal {signal_id}."
+                    )
+
+                record.status = status
+
+                if executed_price is not None:
+                    record.executed_price = float(
+                        executed_price
+                    )
+
+                if order_ticket is not None:
+                    record.order_ticket = int(
+                        order_ticket
+                    )
+
+                if deal_ticket is not None:
+                    record.deal_ticket = int(
+                        deal_ticket
+                    )
+
+                if position_ticket is not None:
+                    record.position_ticket = int(
+                        position_ticket
+                    )
+
+                if broker_retcode is not None:
+                    record.broker_retcode = int(
+                        broker_retcode
+                    )
+
+                if broker_comment is not None:
+                    record.broker_comment = str(
+                        broker_comment
+                    )
+
+                record.verified = bool(
+                    verified
+                )
+
+                record.reason = reason
+                record.updated_at = cls._utc_datetime()
+
+                db.commit()
+                db.refresh(record)
+
+                return record
+
+        except DemoExecutionError:
+            raise
+
+        except Exception as exc:
+            raise DemoExecutionError(
+                "Unable to update persistent execution state "
+                f"for signal {signal_id}: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _record_to_result(
+        record: ExecutionRecord,
+        *,
+        status_override: str | None = None,
+        reason_override: str | None = None,
+        verified_override: bool | None = None,
+    ) -> DemoExecutionResult:
+        return DemoExecutionResult(
+            status=(
+                status_override
+                if status_override is not None
+                else str(record.status)
+            ),
+            execution_mode=str(
+                record.execution_mode
+            ),
+            signal_id=str(
+                record.idempotency_key
+            ),
+            symbol=str(
+                record.symbol
+            ),
+            side=str(
+                record.side
+            ),
+            volume=float(
+                record.volume
+            ),
+            requested_price=(
+                float(record.requested_price)
+                if record.requested_price is not None
+                else None
+            ),
+            executed_price=(
+                float(record.executed_price)
+                if record.executed_price is not None
+                else None
+            ),
+            stop_loss=(
+                float(record.stop_loss)
+                if record.stop_loss is not None
+                else None
+            ),
+            take_profit=(
+                float(record.take_profit)
+                if record.take_profit is not None
+                else None
+            ),
+            order_ticket=(
+                int(record.order_ticket)
+                if record.order_ticket is not None
+                else None
+            ),
+            deal_ticket=(
+                int(record.deal_ticket)
+                if record.deal_ticket is not None
+                else None
+            ),
+            position_ticket=(
+                int(record.position_ticket)
+                if record.position_ticket is not None
+                else None
+            ),
+            broker_retcode=(
+                int(record.broker_retcode)
+                if record.broker_retcode is not None
+                else None
+            ),
+            broker_comment=(
+                str(record.broker_comment)
+                if record.broker_comment is not None
+                else None
+            ),
+            verified=(
+                verified_override
+                if verified_override is not None
+                else bool(record.verified)
+            ),
+            reason=(
+                reason_override
+                if reason_override is not None
+                else str(record.reason or "")
+            ),
+            timestamp=(
+                record.updated_at.isoformat()
+                if record.updated_at is not None
+                else datetime.now(
+                    timezone.utc
+                ).isoformat()
+            ),
+        )
+
+    # ==================================================================
     # ACCOUNT
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     async def account_info(self) -> dict[str, Any]:
         self._require_mt5()
@@ -161,7 +511,9 @@ class DemoMT5ExecutionEngine:
 
         return info._asdict()
 
-    async def require_demo_account(self) -> dict[str, Any]:
+    async def require_demo_account(
+        self,
+    ) -> dict[str, Any]:
         account = await self.account_info()
         terminal = await self.terminal_info()
 
@@ -229,9 +581,9 @@ class DemoMT5ExecutionEngine:
             "demo": True,
         }
 
-    # ------------------------------------------------------------------
+    # ==================================================================
     # SYMBOL SPECIFICATION
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     async def symbol_specification(
         self,
@@ -391,9 +743,9 @@ class DemoMT5ExecutionEngine:
 
         return specification
 
-    # ------------------------------------------------------------------
+    # ==================================================================
     # SIGNAL IDENTITY
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     @staticmethod
     def build_signal_id(
@@ -424,15 +776,26 @@ class DemoMT5ExecutionEngine:
             )
         ).hexdigest()
 
-    def _already_processed(
-        self,
+    @staticmethod
+    def _broker_comment(
         signal_id: str,
-    ) -> bool:
-        return signal_id in self._processed_signals
+    ) -> str:
+        """
+        Keep a short deterministic signal fingerprint in the broker
+        comment.
 
-    # ------------------------------------------------------------------
+        This gives broker-side observability in addition to the
+        persistent database idempotency record.
+        """
+
+        return (
+            "RAYMOND_D_"
+            + signal_id[:16]
+        )
+
+    # ==================================================================
     # MARKET DATA
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     async def candles(
         self,
@@ -495,9 +858,154 @@ class DemoMT5ExecutionEngine:
             for row in rates
         ]
 
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # BROKER POSITION VERIFICATION
+    # ==================================================================
+
+    def _find_matching_position(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        signal_id: str,
+        order_ticket: int | None,
+        position_ticket: int | None,
+    ) -> Any | None:
+        """
+        Locate the broker position belonging to this DEMO execution.
+
+        Matching priority:
+            1. Explicit position ticket returned by broker.
+            2. Broker comment fingerprint.
+            3. Raymond magic + symbol + direction.
+        """
+
+        positions = (
+            mt5.positions_get(
+                symbol=symbol
+            )
+            or ()
+        )
+
+        if not positions:
+            return None
+
+        if position_ticket is not None:
+            for position in positions:
+                if int(
+                    getattr(
+                        position,
+                        "ticket",
+                        -1,
+                    )
+                ) == int(position_ticket):
+                    return position
+
+        expected_comment = self._broker_comment(
+            signal_id
+        )
+
+        for position in positions:
+            if str(
+                getattr(
+                    position,
+                    "comment",
+                    "",
+                )
+            ).startswith(
+                expected_comment
+            ):
+                return position
+
+        expected_type = (
+            getattr(
+                mt5,
+                "POSITION_TYPE_BUY",
+                0,
+            )
+            if side == "BUY"
+            else getattr(
+                mt5,
+                "POSITION_TYPE_SELL",
+                1,
+            )
+        )
+
+        candidates = []
+
+        for position in positions:
+            magic = int(
+                getattr(
+                    position,
+                    "magic",
+                    -1,
+                )
+            )
+
+            position_type = int(
+                getattr(
+                    position,
+                    "type",
+                    -1,
+                )
+            )
+
+            if (
+                magic == self.magic
+                and position_type == expected_type
+            ):
+                candidates.append(
+                    position
+                )
+
+        if not candidates:
+            return None
+
+        return candidates[-1]
+
+    async def _verify_position(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        signal_id: str,
+        order_ticket: int | None,
+        position_ticket: int | None,
+    ) -> Any | None:
+        """
+        Poll without blocking the event loop.
+
+        MT5 can require a short interval between order acceptance and
+        the position becoming visible through positions_get().
+        """
+
+        for attempt in range(
+            self.verification_attempts
+        ):
+            position = self._find_matching_position(
+                symbol=symbol,
+                side=side,
+                signal_id=signal_id,
+                order_ticket=order_ticket,
+                position_ticket=position_ticket,
+            )
+
+            if position is not None:
+                return position
+
+            if (
+                attempt
+                < self.verification_attempts - 1
+            ):
+                await asyncio.sleep(
+                    self.verification_delay_seconds
+                )
+
+        return None
+
+    # ==================================================================
     # EXECUTION
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     async def evaluate_and_execute(
         self,
@@ -510,17 +1018,29 @@ class DemoMT5ExecutionEngine:
 
         timestamp = self._utc_now()
 
+        # --------------------------------------------------------------
+        # 1. HARD DEMO ACCOUNT CHECK
+        # --------------------------------------------------------------
+
         account_state = (
             await self.require_demo_account()
         )
 
         account = account_state["account"]
 
+        # --------------------------------------------------------------
+        # 2. BROKER SYMBOL SPECIFICATION
+        # --------------------------------------------------------------
+
         specification = (
             await self.symbol_specification(
                 symbol
             )
         )
+
+        # --------------------------------------------------------------
+        # 3. MARKET DATA
+        # --------------------------------------------------------------
 
         candles = await self.candles(
             symbol=symbol,
@@ -532,6 +1052,15 @@ class DemoMT5ExecutionEngine:
             raise DemoExecutionError(
                 "No market candles were returned."
             )
+
+        # --------------------------------------------------------------
+        # 4. FROZEN RAYMOND STRATEGY + STEP 14 RISK
+        # --------------------------------------------------------------
+
+        broker_positions = (
+            mt5.positions_get()
+            or ()
+        )
 
         result = self.pipeline.evaluate_risk(
             symbol=symbol,
@@ -550,14 +1079,17 @@ class DemoMT5ExecutionEngine:
             risk_state=PaperRiskState(
                 daily_loss=0.0,
                 open_positions=len(
-                    mt5.positions_get()
-                    or ()
+                    broker_positions
                 ),
                 total_exposure=0.0,
             ),
         )
 
         decision = result.decision
+
+        # --------------------------------------------------------------
+        # 5. RAYMOND WAIT
+        # --------------------------------------------------------------
 
         if decision.proposal is None:
             return DemoExecutionResult(
@@ -581,6 +1113,12 @@ class DemoMT5ExecutionEngine:
                 timestamp=timestamp,
             )
 
+        proposal = decision.proposal
+
+        # --------------------------------------------------------------
+        # 6. RISK REJECTION
+        # --------------------------------------------------------------
+
         if (
             result.risk_decision is None
             or not result.risk_decision.allowed
@@ -592,10 +1130,10 @@ class DemoMT5ExecutionEngine:
                 symbol=symbol,
                 side=decision.direction.value,
                 volume=result.position_size,
-                requested_price=decision.proposal.entry_price,
+                requested_price=proposal.entry_price,
                 executed_price=None,
-                stop_loss=decision.proposal.stop_loss,
-                take_profit=decision.proposal.take_profit,
+                stop_loss=proposal.stop_loss,
+                take_profit=proposal.take_profit,
                 order_ticket=None,
                 deal_ticket=None,
                 position_ticket=None,
@@ -610,12 +1148,14 @@ class DemoMT5ExecutionEngine:
                 timestamp=timestamp,
             )
 
-        proposal = decision.proposal
-
         if result.position_size is None:
             raise DemoExecutionError(
                 "Approved Raymond decision has no position size."
             )
+
+        # --------------------------------------------------------------
+        # 7. CURRENT MARKET PRICE
+        # --------------------------------------------------------------
 
         tick = mt5.symbol_info_tick(
             symbol
@@ -623,7 +1163,8 @@ class DemoMT5ExecutionEngine:
 
         if tick is None:
             raise DemoExecutionError(
-                f"Unable to obtain current {symbol} tick."
+                f"Unable to obtain current {symbol} tick: "
+                f"{mt5.last_error()}"
             )
 
         side = decision.direction.value.upper()
@@ -631,13 +1172,19 @@ class DemoMT5ExecutionEngine:
         if side == "BUY":
             order_type = mt5.ORDER_TYPE_BUY
             price = float(tick.ask)
+
         elif side == "SELL":
             order_type = mt5.ORDER_TYPE_SELL
             price = float(tick.bid)
+
         else:
             raise DemoExecutionError(
                 f"Unsupported Raymond direction: {side}"
             )
+
+        # --------------------------------------------------------------
+        # 8. DETERMINISTIC SIGNAL ID
+        # --------------------------------------------------------------
 
         signal_id = self.build_signal_id(
             symbol=symbol,
@@ -649,29 +1196,71 @@ class DemoMT5ExecutionEngine:
             candle_time=candles[-1]["time"],
         )
 
-        if self._already_processed(
+        # --------------------------------------------------------------
+        # 9. PERSISTENT IDEMPOTENCY CHECK
+        # --------------------------------------------------------------
+
+        existing = self._get_execution_record(
             signal_id
-        ):
-            return DemoExecutionResult(
-                status="duplicate_blocked",
-                execution_mode="demo",
-                signal_id=signal_id,
-                symbol=symbol,
-                side=side,
-                volume=result.position_size,
-                requested_price=price,
-                executed_price=None,
-                stop_loss=proposal.stop_loss,
-                take_profit=proposal.take_profit,
-                order_ticket=None,
-                deal_ticket=None,
-                position_ticket=None,
-                broker_retcode=None,
-                broker_comment=None,
-                verified=False,
-                reason="Signal was already processed.",
-                timestamp=timestamp,
+        )
+
+        if existing is not None:
+            return self._record_to_result(
+                existing,
+                status_override="duplicate_blocked",
+                reason_override=(
+                    "Signal already has a persistent DEMO execution "
+                    f"record with status '{existing.status}'. "
+                    "No second broker order was submitted."
+                ),
+                verified_override=bool(
+                    existing.verified
+                ),
             )
+
+        # --------------------------------------------------------------
+        # 10. RESERVE EXECUTION BEFORE BROKER ORDER
+        # --------------------------------------------------------------
+
+        record = self._create_pending_execution(
+            signal_id=signal_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            side=side,
+            volume=float(
+                result.position_size
+            ),
+            requested_price=price,
+            stop_loss=float(
+                proposal.stop_loss
+            ),
+            take_profit=float(
+                proposal.take_profit
+            ),
+        )
+
+        # A concurrent execution path may have found the same signal
+        # between the first lookup and the persistent insert.
+        if (
+            record.idempotency_key
+            != signal_id
+        ):
+            return self._record_to_result(
+                record,
+                status_override="duplicate_blocked",
+                reason_override=(
+                    "Persistent idempotency prevented a duplicate "
+                    "DEMO execution."
+                ),
+            )
+
+        # --------------------------------------------------------------
+        # 11. BROKER REQUEST
+        # --------------------------------------------------------------
+
+        broker_comment = self._broker_comment(
+            signal_id
+        )
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -689,16 +1278,32 @@ class DemoMT5ExecutionEngine:
             ),
             "deviation": 20,
             "magic": self.magic,
-            "comment": "RAYMOND_DEMO",
+            "comment": broker_comment,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
+
+        # --------------------------------------------------------------
+        # 12. BROKER ORDER CHECK
+        # --------------------------------------------------------------
 
         check = mt5.order_check(
             request
         )
 
         if check is None:
+            self._update_execution_record(
+                signal_id=signal_id,
+                status="order_check_failed",
+                broker_comment=str(
+                    mt5.last_error()
+                ),
+                verified=False,
+                reason=(
+                    "MT5 order_check returned no result."
+                ),
+            )
+
             raise DemoExecutionError(
                 "MT5 order_check returned no result."
             )
@@ -713,6 +1318,22 @@ class DemoMT5ExecutionEngine:
         )
 
         if check_retcode != 0:
+            comment = str(
+                check_data.get(
+                    "comment",
+                    "",
+                )
+            )
+
+            self._update_execution_record(
+                signal_id=signal_id,
+                status="order_check_rejected",
+                broker_retcode=check_retcode,
+                broker_comment=comment,
+                verified=False,
+                reason="MT5 rejected order_check.",
+            )
+
             return DemoExecutionResult(
                 status="order_check_rejected",
                 execution_mode="demo",
@@ -728,22 +1349,33 @@ class DemoMT5ExecutionEngine:
                 deal_ticket=None,
                 position_ticket=None,
                 broker_retcode=check_retcode,
-                broker_comment=str(
-                    check_data.get(
-                        "comment",
-                        "",
-                    )
-                ),
+                broker_comment=comment,
                 verified=False,
                 reason="MT5 rejected order_check.",
                 timestamp=timestamp,
             )
+
+        # --------------------------------------------------------------
+        # 13. BROKER ORDER SEND
+        # --------------------------------------------------------------
 
         result_mt5 = mt5.order_send(
             request
         )
 
         if result_mt5 is None:
+            self._update_execution_record(
+                signal_id=signal_id,
+                status="order_send_failed",
+                broker_comment=str(
+                    mt5.last_error()
+                ),
+                verified=False,
+                reason=(
+                    "MT5 order_send returned no result."
+                ),
+            )
+
             raise DemoExecutionError(
                 "MT5 order_send returned no result."
             )
@@ -757,12 +1389,34 @@ class DemoMT5ExecutionEngine:
             )
         )
 
-        order_ticket = send_data.get(
+        order_ticket_raw = send_data.get(
             "order"
         )
 
-        deal_ticket = send_data.get(
+        deal_ticket_raw = send_data.get(
             "deal"
+        )
+
+        position_ticket_raw = send_data.get(
+            "position"
+        )
+
+        order_ticket = (
+            int(order_ticket_raw)
+            if order_ticket_raw
+            else None
+        )
+
+        deal_ticket = (
+            int(deal_ticket_raw)
+            if deal_ticket_raw
+            else None
+        )
+
+        position_ticket = (
+            int(position_ticket_raw)
+            if position_ticket_raw
+            else None
         )
 
         comment = str(
@@ -771,6 +1425,17 @@ class DemoMT5ExecutionEngine:
                 "",
             )
         )
+
+        executed_price = float(
+            send_data.get(
+                "price",
+                price,
+            )
+        )
+
+        # --------------------------------------------------------------
+        # 14. BROKER REJECTION
+        # --------------------------------------------------------------
 
         success_codes = {
             getattr(
@@ -786,6 +1451,19 @@ class DemoMT5ExecutionEngine:
         }
 
         if retcode not in success_codes:
+            self._update_execution_record(
+                signal_id=signal_id,
+                status="broker_rejected",
+                executed_price=executed_price,
+                order_ticket=order_ticket,
+                deal_ticket=deal_ticket,
+                position_ticket=position_ticket,
+                broker_retcode=retcode,
+                broker_comment=comment,
+                verified=False,
+                reason="MT5 rejected the demo order.",
+            )
+
             return DemoExecutionResult(
                 status="broker_rejected",
                 execution_mode="demo",
@@ -797,17 +1475,9 @@ class DemoMT5ExecutionEngine:
                 executed_price=None,
                 stop_loss=proposal.stop_loss,
                 take_profit=proposal.take_profit,
-                order_ticket=(
-                    int(order_ticket)
-                    if order_ticket
-                    else None
-                ),
-                deal_ticket=(
-                    int(deal_ticket)
-                    if deal_ticket
-                    else None
-                ),
-                position_ticket=None,
+                order_ticket=order_ticket,
+                deal_ticket=deal_ticket,
+                position_ticket=position_ticket,
                 broker_retcode=retcode,
                 broker_comment=comment,
                 verified=False,
@@ -815,29 +1485,55 @@ class DemoMT5ExecutionEngine:
                 timestamp=timestamp,
             )
 
-        time.sleep(0.5)
+        # --------------------------------------------------------------
+        # 15. PERSIST BROKER ACCEPTANCE IMMEDIATELY
+        # --------------------------------------------------------------
 
-        positions = (
-            mt5.positions_get(
-                symbol=symbol
-            )
-            or ()
+        self._update_execution_record(
+            signal_id=signal_id,
+            status="sent",
+            executed_price=executed_price,
+            order_ticket=order_ticket,
+            deal_ticket=deal_ticket,
+            position_ticket=position_ticket,
+            broker_retcode=retcode,
+            broker_comment=comment,
+            verified=False,
+            reason=(
+                "Broker accepted DEMO order; position verification "
+                "is in progress."
+            ),
         )
 
-        matching = [
-            p
-            for p in positions
-            if int(
-                getattr(
-                    p,
-                    "magic",
-                    -1,
-                )
-            )
-            == self.magic
-        ]
+        # --------------------------------------------------------------
+        # 16. NON-BLOCKING BROKER VERIFICATION
+        # --------------------------------------------------------------
 
-        if not matching:
+        position = await self._verify_position(
+            symbol=symbol,
+            side=side,
+            signal_id=signal_id,
+            order_ticket=order_ticket,
+            position_ticket=position_ticket,
+        )
+
+        if position is None:
+            self._update_execution_record(
+                signal_id=signal_id,
+                status="sent_unverified",
+                executed_price=executed_price,
+                order_ticket=order_ticket,
+                deal_ticket=deal_ticket,
+                position_ticket=position_ticket,
+                broker_retcode=retcode,
+                broker_comment=comment,
+                verified=False,
+                reason=(
+                    "Broker accepted the DEMO order but Raymond "
+                    "could not verify the open position."
+                ),
+            )
+
             return DemoExecutionResult(
                 status="sent_unverified",
                 execution_mode="demo",
@@ -846,40 +1542,84 @@ class DemoMT5ExecutionEngine:
                 side=side,
                 volume=result.position_size,
                 requested_price=price,
-                executed_price=float(
-                    send_data.get(
-                        "price",
-                        price,
-                    )
-                ),
+                executed_price=executed_price,
                 stop_loss=proposal.stop_loss,
                 take_profit=proposal.take_profit,
-                order_ticket=(
-                    int(order_ticket)
-                    if order_ticket
-                    else None
-                ),
-                deal_ticket=(
-                    int(deal_ticket)
-                    if deal_ticket
-                    else None
-                ),
-                position_ticket=None,
+                order_ticket=order_ticket,
+                deal_ticket=deal_ticket,
+                position_ticket=position_ticket,
                 broker_retcode=retcode,
                 broker_comment=comment,
                 verified=False,
                 reason=(
-                    "Broker accepted the request but "
-                    "Raymond could not yet verify the position."
+                    "Broker accepted the request but Raymond "
+                    "could not yet verify the position."
                 ),
                 timestamp=timestamp,
             )
 
-        position = matching[-1]
+        # --------------------------------------------------------------
+        # 17. VERIFIED POSITION DETAILS
+        # --------------------------------------------------------------
 
-        self._processed_signals[
-            signal_id
-        ] = time.time()
+        actual_position_ticket = int(
+            getattr(
+                position,
+                "ticket",
+                position_ticket
+                if position_ticket is not None
+                else 0,
+            )
+        )
+
+        actual_volume = float(
+            getattr(
+                position,
+                "volume",
+                result.position_size,
+            )
+        )
+
+        actual_open_price = float(
+            getattr(
+                position,
+                "price_open",
+                executed_price,
+            )
+        )
+
+        actual_stop_loss = float(
+            getattr(
+                position,
+                "sl",
+                proposal.stop_loss,
+            )
+        )
+
+        actual_take_profit = float(
+            getattr(
+                position,
+                "tp",
+                proposal.take_profit,
+            )
+        )
+
+        # --------------------------------------------------------------
+        # 18. FINAL PERSISTENCE
+        # --------------------------------------------------------------
+
+        self._update_execution_record(
+            signal_id=signal_id,
+            status="verified",
+            executed_price=actual_open_price,
+            order_ticket=order_ticket,
+            deal_ticket=deal_ticket,
+            position_ticket=actual_position_ticket,
+            broker_retcode=retcode,
+            broker_comment=comment,
+            verified=True,
+            reason="DEMO position verified at broker.",
+        )
 
         return DemoExecutionResult(
             status="verified",
@@ -887,45 +1627,14 @@ class DemoMT5ExecutionEngine:
             signal_id=signal_id,
             symbol=symbol,
             side=side,
-            volume=result.position_size,
+            volume=actual_volume,
             requested_price=price,
-            executed_price=float(
-                getattr(
-                    position,
-                    "price_open",
-                    price,
-                )
-            ),
-            stop_loss=float(
-                getattr(
-                    position,
-                    "sl",
-                    proposal.stop_loss,
-                )
-            ),
-            take_profit=float(
-                getattr(
-                    position,
-                    "tp",
-                    proposal.take_profit,
-                )
-            ),
-            order_ticket=(
-                int(order_ticket)
-                if order_ticket
-                else None
-            ),
-            deal_ticket=(
-                int(deal_ticket)
-                if deal_ticket
-                else None
-            ),
-            position_ticket=int(
-                getattr(
-                    position,
-                    "ticket",
-                )
-            ),
+            executed_price=actual_open_price,
+            stop_loss=actual_stop_loss,
+            take_profit=actual_take_profit,
+            order_ticket=order_ticket,
+            deal_ticket=deal_ticket,
+            position_ticket=actual_position_ticket,
             broker_retcode=retcode,
             broker_comment=comment,
             verified=True,
@@ -944,4 +1653,4 @@ __all__ = [
     "DemoExecutionResult",
     "DemoMT5ExecutionEngine",
     "demo_mt5_execution_engine",
-  ]
+            ]
