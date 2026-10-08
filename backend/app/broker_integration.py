@@ -4,16 +4,22 @@ RAYMOND v2.8 - Broker Integration
 Central integration point for Step 17 broker functionality.
 
 Provides:
+
 - Broker account management
 - MT5 broker adapter
 - Live execution gateway
+- Live position reconciliation
 
 IMPORTANT:
+
+Importing this module does NOT enable live trading.
+
 Live execution remains fail-closed and requires every
 independent safety gate.
 """
 
 from fastapi import APIRouter
+
 
 try:
     from .broker_accounts import (
@@ -28,7 +34,12 @@ try:
         router as live_execution_router,
     )
 
+    from .live_reconciliation import (
+        router as live_reconciliation_router,
+    )
+
 except ImportError:
+
     from broker_accounts import (
         router as broker_accounts_router,
     )
@@ -41,16 +52,16 @@ except ImportError:
         router as live_execution_router,
     )
 
+    from live_reconciliation import (
+        router as live_reconciliation_router,
+    )
 
-# ============================================================
-# CENTRAL BROKER ROUTER
-# ============================================================
 
 router = APIRouter()
 
 
 # ============================================================
-# BROKER ACCOUNT MANAGEMENT
+# BROKER ACCOUNTS
 # ============================================================
 
 router.include_router(
@@ -73,4 +84,13 @@ router.include_router(
 
 router.include_router(
     live_execution_router,
+)
+
+
+# ============================================================
+# LIVE RECONCILIATION
+# ============================================================
+
+router.include_router(
+    live_reconciliation_router,
 )
