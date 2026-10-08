@@ -4,16 +4,22 @@ RAYMOND v2.8 - Stage 17.6 Automatic Paper Entry Worker
 Purpose
 -------
 Continuously evaluates the existing RAYMOND trading pipeline using the
-online XAUUSD paper-market feed and, when the existing AI/risk pipeline
-authorizes a BUY or SELL, executes through the existing paper-only
-execution gateway.
+online XAUUSD paper-market feed.
 
-Important safety rules
-----------------------
+When the existing AI/Risk pipeline authorizes a BUY or SELL, execution
+is delegated to the existing paper-only execution gateway.
+
+This version additionally exposes detailed risk diagnostics so that
+automatic-entry failures are observable instead of appearing only as:
+
+    executed=False
+
+Safety
+------
 - PAPER ONLY.
 - Never sends broker orders.
 - Never enables MT5 execution.
-- Never bypasses the existing Risk Engine.
+- Never bypasses the Risk Engine.
 - Never creates a second paper account.
 - Never creates a second position repository.
 - Reuses the existing Stage 15 persistence path.
@@ -54,12 +60,17 @@ class AutomaticEntryWorker:
     """
     Stage 17.6 automatic paper-entry worker.
 
-    The worker deliberately delegates the actual trading decision,
-    risk evaluation, sizing and paper execution to the existing
-    TradingPipelineService.
+    The worker delegates:
 
-    Persistence is delegated to the existing Stage 15 persistence
-    function in app.main after a paper execution is accepted.
+    - market analysis
+    - AI decision
+    - Risk Engine validation
+    - position sizing
+    - paper execution
+
+    to the existing TradingPipelineService.
+
+    It does not implement a second trading engine.
     """
 
     def __init__(
@@ -102,12 +113,7 @@ class AutomaticEntryWorker:
     async def _fetch_market_chart(
         self,
     ) -> list[dict[str, Any]]:
-        """
-        Fetch and normalize fresh online paper-market candles.
-
-        The online market API returns a response dictionary containing
-        the actual chronological candle list under the "candles" key.
-        """
+        """Fetch and validate fresh online market candles."""
 
         chart = await _fetch_chart(
             self.config.symbol,
@@ -191,17 +197,7 @@ class AutomaticEntryWorker:
     def _normalize_enum_value(
         value: Any,
     ) -> str:
-        """
-        Normalize ordinary strings and Enum-like values.
-
-        Example:
-            ExecutionStatus.ACCEPTED
-        becomes:
-            "accepted"
-
-        This prevents persistence from rejecting a valid paper
-        execution simply because the gateway returns an Enum.
-        """
+        """Normalize Enum-like values to lowercase strings."""
 
         if value is None:
             return ""
@@ -288,16 +284,161 @@ class AutomaticEntryWorker:
             default=None,
         )
 
+    @classmethod
+    def _decision_proposal(
+        cls,
+        decision: Any,
+    ) -> Any:
+        return cls._get_value(
+            decision,
+            "proposal",
+            default=None,
+        )
+
+    @classmethod
+    def _risk_diagnostics(
+        cls,
+        result: Any,
+    ) -> dict[str, Any]:
+        """
+        Extract Risk Engine diagnostics from Step14Result.
+
+        This is read-only telemetry.
+
+        It does not modify:
+        - risk limits
+        - position sizing
+        - execution
+        - account balance
+        """
+
+        risk_decision = cls._get_value(
+            result,
+            "risk_decision",
+            "risk",
+            default=None,
+        )
+
+        diagnostics: dict[str, Any] = {
+            "risk_allowed": None,
+            "risk_reason": None,
+            "risk_amount": None,
+            "daily_loss_limit": None,
+            "total_exposure_limit": None,
+            "proposed_exposure": None,
+            "risk_open_positions": None,
+        }
+
+        if risk_decision is None:
+            return diagnostics
+
+        diagnostics["risk_allowed"] = cls._get_value(
+            risk_decision,
+            "allowed",
+            default=None,
+        )
+
+        diagnostics["risk_reason"] = cls._get_value(
+            risk_decision,
+            "reason",
+            default=None,
+        )
+
+        diagnostics["risk_amount"] = cls._get_value(
+            risk_decision,
+            "risk_amount",
+            default=None,
+        )
+
+        diagnostics["daily_loss_limit"] = cls._get_value(
+            risk_decision,
+            "daily_loss_limit",
+            default=None,
+        )
+
+        diagnostics["total_exposure_limit"] = cls._get_value(
+            risk_decision,
+            "total_exposure_limit",
+            default=None,
+        )
+
+        diagnostics["proposed_exposure"] = cls._get_value(
+            risk_decision,
+            "proposed_exposure",
+            default=None,
+        )
+
+        diagnostics["risk_open_positions"] = cls._get_value(
+            risk_decision,
+            "open_positions",
+            default=None,
+        )
+
+        return diagnostics
+
+    @classmethod
+    def _proposal_diagnostics(
+        cls,
+        decision: Any,
+    ) -> dict[str, Any]:
+        """
+        Extract the AI trade proposal.
+
+        This lets us see whether the problem is caused by:
+        - entry price
+        - stop loss
+        - take profit
+        - R:R
+        - direction
+        """
+
+        proposal = cls._decision_proposal(
+            decision
+        )
+
+        if proposal is None:
+            return {
+                "entry_price": None,
+                "stop_loss": None,
+                "take_profit": None,
+                "risk_reward": None,
+                "proposal_direction": None,
+            }
+
+        return {
+            "entry_price": cls._get_value(
+                proposal,
+                "entry_price",
+                default=None,
+            ),
+            "stop_loss": cls._get_value(
+                proposal,
+                "stop_loss",
+                default=None,
+            ),
+            "take_profit": cls._get_value(
+                proposal,
+                "take_profit",
+                default=None,
+            ),
+            "risk_reward": cls._get_value(
+                proposal,
+                "risk_reward",
+                default=None,
+            ),
+            "proposal_direction": cls._get_value(
+                proposal,
+                "direction",
+                default=None,
+            ),
+        }
+
     async def _persist_execution(
         self,
         result: Any,
     ) -> tuple[bool, Any]:
         """
-        Persist an accepted paper execution through the existing
-        Stage 15 persistence path.
-
-        The import is intentionally lazy to avoid an import cycle
-        during application startup.
+        Persist an accepted paper execution through Stage 15.
         """
 
         execution_result = self._get_value(
@@ -309,12 +450,6 @@ class AutomaticEntryWorker:
         if execution_result is None:
             return False, None
 
-        # IMPORTANT:
-        # The execution gateway may return Enum values such as:
-        #
-        #     ExecutionStatus.ACCEPTED
-        #
-        # Therefore normalize the Enum's .value before comparing it.
         execution_type = self._normalize_enum_value(
             self._get_value(
                 execution_result,
@@ -403,19 +538,17 @@ class AutomaticEntryWorker:
 
         Flow:
 
-            Online XAUUSD M15 feed
+            Online XAUUSD market
                     ↓
-            Existing AI decision
+            Technical indicators
                     ↓
-               WAIT? ───────→ no order
+                AI decision
                     ↓
-              BUY / SELL
+              Risk Engine
                     ↓
-            Existing Risk Engine
+             Paper execution
                     ↓
-            Existing paper gateway
-                    ↓
-            Existing Stage 15 persistence
+             Stage 15 persistence
         """
 
         if not self.config.enabled:
@@ -423,9 +556,7 @@ class AutomaticEntryWorker:
 
         candles = await self._fetch_market_chart()
 
-        # IMPORTANT:
-        # TradingPipelineService.evaluate_decision() is synchronous.
-        # Do NOT use "await" here.
+        # AI decision for telemetry.
         decision = self.pipeline.evaluate_decision(
             symbol=self.config.symbol,
             timeframe=self.config.timeframe,
@@ -452,8 +583,11 @@ class AutomaticEntryWorker:
             decision
         )
 
-        # WAIT / NEUTRAL / anything other than BUY or SELL
-        # must not create an order.
+        proposal_info = self._proposal_diagnostics(
+            decision
+        )
+
+        # WAIT / NEUTRAL decisions must never create orders.
         if action not in {
             "BUY",
             "SELL",
@@ -463,22 +597,24 @@ class AutomaticEntryWorker:
                 "action=%s direction=%s signal=%s "
                 "confidence=%s score=%s "
                 "executed=False status=not_executed "
-                "order_id=None persisted=False",
+                "order_id=None persisted=False "
+                "risk_allowed=None risk_reason=%s",
                 action,
                 direction,
                 signal,
                 confidence,
                 score,
+                "non_trade_decision",
             )
 
             return decision
 
-        # Use the existing paper account equity provider.
+        # Canonical persistent paper equity.
         account_equity = await self._resolve(
             self.account_equity_provider()
         )
 
-        # Use the existing paper risk-state provider.
+        # Canonical persistent paper risk state.
         risk_state = await self._resolve(
             self.risk_state_provider()
         )
@@ -491,16 +627,7 @@ class AutomaticEntryWorker:
                 "risk_state_provider must return PaperRiskState"
             )
 
-        # Execute through the existing pipeline.
-        #
-        # TradingPipelineService remains responsible for:
-        # - technical indicators
-        # - AI decision
-        # - Risk Engine
-        # - position sizing
-        # - paper execution
-        #
-        # No live broker order is allowed.
+        # Execute through the existing paper-only pipeline.
         result = await self.pipeline.execute_paper(
             symbol=self.config.symbol,
             timeframe=self.config.timeframe,
@@ -535,11 +662,19 @@ class AutomaticEntryWorker:
             default=None,
         )
 
+        position_size = self._get_value(
+            result,
+            "position_size",
+            default=None,
+        )
+
+        risk_info = self._risk_diagnostics(
+            result
+        )
+
         persisted = False
         persisted_trade = None
 
-        # Only attempt persistence after a real
-        # paper execution was returned.
         if executed:
             (
                 persisted,
@@ -548,6 +683,61 @@ class AutomaticEntryWorker:
                 result
             )
 
+        # --------------------------------------------------
+        # Detailed automatic-entry telemetry.
+        #
+        # This is the critical diagnostic output.
+        # --------------------------------------------------
+
+        logger.info(
+            "RAYMOND Stage 17.6 entry diagnostics: "
+            "symbol=%s timeframe=%s "
+            "action=%s direction=%s signal=%s "
+            "confidence=%s score=%s "
+            "equity=%s "
+            "open_positions=%s "
+            "daily_loss=%s "
+            "current_exposure=%s "
+            "entry=%s "
+            "sl=%s "
+            "tp=%s "
+            "rr=%s "
+            "position_size=%s "
+            "risk_allowed=%s "
+            "risk_reason=%s "
+            "risk_amount=%s "
+            "proposed_exposure=%s "
+            "execution_status=%s "
+            "order_id=%s "
+            "executed=%s "
+            "persisted=%s",
+            self.config.symbol,
+            self.config.timeframe,
+            action,
+            direction,
+            signal,
+            confidence,
+            score,
+            float(account_equity),
+            risk_state.open_positions,
+            risk_state.daily_loss,
+            risk_state.total_exposure,
+            proposal_info["entry_price"],
+            proposal_info["stop_loss"],
+            proposal_info["take_profit"],
+            proposal_info["risk_reward"],
+            position_size,
+            risk_info["risk_allowed"],
+            risk_info["risk_reason"],
+            risk_info["risk_amount"],
+            risk_info["proposed_exposure"],
+            status,
+            order_id,
+            executed,
+            persisted,
+        )
+
+        # Keep the original concise status line as well.
         logger.info(
             "RAYMOND Stage 17.6 entry cycle: "
             "action=%s direction=%s signal=%s "
@@ -571,14 +761,21 @@ class AutomaticEntryWorker:
             "execution_result": execution_result,
             "persisted": persisted,
             "persisted_trade": persisted_trade,
+            "diagnostics": {
+                "equity": float(account_equity),
+                "open_positions": risk_state.open_positions,
+                "daily_loss": risk_state.daily_loss,
+                "current_exposure": risk_state.total_exposure,
+                "position_size": position_size,
+                **proposal_info,
+                **risk_info,
+            },
         }
 
     async def run(
         self,
     ) -> None:
-        """
-        Run continuously until stop() is requested.
-        """
+        """Run continuously until stop() is requested."""
 
         logger.info(
             "RAYMOND Stage 17.6 automatic "
@@ -678,4 +875,4 @@ class AutomaticEntryWorker:
         return (
             self._task is not None
             and not self._task.done()
-        )
+)
