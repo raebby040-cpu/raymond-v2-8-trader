@@ -3,28 +3,15 @@ RAYMOND v2.8 - Broker Bootstrap
 
 Central bootstrap layer for broker functionality.
 
-Mounts:
+Live remains fail-closed.
 
-- Broker account management
-- MT5 broker adapter
-- Live execution gateway
-- Live reconciliation
-- Live position monitoring
-- Live position protection
-- Continuous live protection worker
+DEMO worker:
+    Disabled unless explicitly enabled with
+    RAYMOND_MT5_DEMO_WORKER_ENABLED=true.
 
-IMPORTANT:
-
-Importing this module does NOT enable live trading.
-
-Live execution remains fail-closed.
-
-The continuous protection worker is independently disabled
-unless RAYMOND_LIVE_PROTECTION_WORKER_ENABLED=true.
-
-Actual SL modification is independently disabled unless:
-
-RAYMOND_POSITION_PROTECTION_ENABLED=true
+LIVE protection worker:
+    Disabled unless explicitly enabled with
+    RAYMOND_LIVE_PROTECTION_WORKER_ENABLED=true.
 """
 
 from fastapi import FastAPI
@@ -37,17 +24,12 @@ def mount_broker_integration(
     app: FastAPI,
 ) -> None:
     """
-    Mount the complete Raymond broker API and protection layer.
-
-    main.py is intentionally untouched.
-
-    Live trading remains protected by independent gates.
+    Mount broker APIs and register broker worker lifecycles.
     """
 
     global _worker_registered
 
     try:
-
         from .broker_integration import (
             router as broker_router,
         )
@@ -57,8 +39,12 @@ def mount_broker_integration(
             stop_live_position_protection_worker,
         )
 
-    except ImportError:
+        from .demo_execution_worker import (
+            start_demo_execution_worker,
+            stop_demo_execution_worker,
+        )
 
+    except ImportError:
         from broker_integration import (
             router as broker_router,
         )
@@ -66,6 +52,11 @@ def mount_broker_integration(
         from live_position_protection_worker import (
             start_live_position_protection_worker,
             stop_live_position_protection_worker,
+        )
+
+        from demo_execution_worker import (
+            start_demo_execution_worker,
+            stop_demo_execution_worker,
         )
 
     # --------------------------------------------------------------
@@ -77,26 +68,34 @@ def mount_broker_integration(
     )
 
     # --------------------------------------------------------------
-    # Protection worker lifecycle
-    #
-    # This is registered once per FastAPI application instance.
-    #
-    # The worker itself remains disabled unless explicitly enabled
-    # by environment configuration.
+    # Worker lifecycle
     # --------------------------------------------------------------
 
-    if not _worker_registered:
+    if _worker_registered:
+        return
 
-        @app.on_event(
-            "startup"
-        )
-        async def _start_raymond_live_protection_worker():
-            await start_live_position_protection_worker()
+    @app.on_event(
+        "startup"
+    )
+    async def _start_raymond_live_protection_worker():
+        await start_live_position_protection_worker()
 
-        @app.on_event(
-            "shutdown"
-        )
-        async def _stop_raymond_live_protection_worker():
-            await stop_live_position_protection_worker()
+    @app.on_event(
+        "shutdown"
+    )
+    async def _stop_raymond_live_protection_worker():
+        await stop_live_position_protection_worker()
 
-        _worker_registered = True
+    @app.on_event(
+        "startup"
+    )
+    async def _start_raymond_demo_execution_worker():
+        await start_demo_execution_worker()
+
+    @app.on_event(
+        "shutdown"
+    )
+    async def _stop_raymond_demo_execution_worker():
+        await stop_demo_execution_worker()
+
+    _worker_registered = True
