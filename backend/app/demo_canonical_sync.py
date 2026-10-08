@@ -1,8 +1,6 @@
 """
 RAYMOND v2.8 - DEMO Canonical State Synchronization
 
-Batch 2.
-
 Synchronizes verified MT5 DEMO broker reality into Raymond's
 persistent canonical trading state.
 
@@ -40,14 +38,10 @@ except ImportError:
     mt5 = None
 
 try:
-    from .canonical_state import (
-        TradingStateRepository,
-    )
+    from .canonical_state import TradingStateRepository
     from .database import SessionLocal
 except ImportError:
-    from canonical_state import (
-        TradingStateRepository,
-    )
+    from canonical_state import TradingStateRepository
     from database import SessionLocal
 
 
@@ -59,6 +53,66 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _account_to_dict(account: Any) -> dict[str, Any]:
+    """
+    Normalize MT5 account_info() into a plain dictionary.
+
+    The real MetaTrader5 API may return a namedtuple-like object
+    exposing _asdict(), while tests/mocks may return dictionaries
+    or SimpleNamespace objects.
+
+    Supporting all three keeps the synchronization boundary robust
+    without changing broker behavior.
+    """
+
+    if account is None:
+        return {}
+
+    if isinstance(account, dict):
+        return dict(account)
+
+    asdict = getattr(account, "_asdict", None)
+
+    if callable(asdict):
+        try:
+            value = asdict()
+
+            if isinstance(value, dict):
+                return dict(value)
+        except Exception:
+            pass
+
+    values = getattr(account, "__dict__", None)
+
+    if isinstance(values, dict):
+        return dict(values)
+
+    fields = (
+        "login",
+        "trade_mode",
+        "balance",
+        "equity",
+        "margin",
+        "margin_free",
+        "currency",
+        "server",
+        "company",
+    )
+
+    result: dict[str, Any] = {}
+
+    for field in fields:
+        try:
+            result[field] = getattr(
+                account,
+                field,
+            )
+        except AttributeError:
+            continue
+
+    return result
+
+
 def _as_float(
     value: Any,
     default: float = 0.0,
@@ -66,7 +120,9 @@ def _as_float(
     try:
         if value is None:
             return default
+
         return float(value)
+
     except (TypeError, ValueError):
         return default
 
@@ -77,13 +133,16 @@ def _as_int_or_none(
     try:
         if value is None:
             return None
+
         return int(value)
+
     except (TypeError, ValueError):
         return None
 
 
 def _position_side(
     position: Any,
+    broker_api: Any = None,
 ) -> str:
     position_type = getattr(
         position,
@@ -91,8 +150,10 @@ def _position_side(
         None,
     )
 
+    api = broker_api if broker_api is not None else mt5
+
     buy_type = getattr(
-        mt5,
+        api,
         "POSITION_TYPE_BUY",
         0,
     )
@@ -122,7 +183,9 @@ def _position_ticket(
 def _broker_server(
     account_info: dict[str, Any],
 ) -> str | None:
-    server = account_info.get("server")
+    server = account_info.get(
+        "server"
+    )
 
     if server is None:
         return None
@@ -136,8 +199,8 @@ def _broker_name(
     """
     MT5 itself does not always expose a clean broker name.
 
-    Use the explicit broker field when available, otherwise
-    identify the source as MT5 DEMO.
+    Use the explicit broker/company field when available,
+    otherwise identify the source as MT5.
     """
 
     broker = account_info.get(
@@ -218,6 +281,28 @@ def _find_open_canonical_position(
     )
 
 
+def _validate_demo_account(
+    *,
+    account_data: dict[str, Any],
+    broker_api: Any,
+) -> None:
+    trade_mode = account_data.get(
+        "trade_mode"
+    )
+
+    demo_mode = getattr(
+        broker_api,
+        "ACCOUNT_TRADE_MODE_DEMO",
+        0,
+    )
+
+    if trade_mode != demo_mode:
+        raise DemoCanonicalSyncError(
+            "Canonical DEMO synchronization blocked: "
+            "connected MT5 account is not DEMO."
+        )
+
+
 def synchronize_demo_positions(
     *,
     mt5_module: Any = None,
@@ -227,6 +312,8 @@ def synchronize_demo_positions(
 
     This function is deliberately synchronous because the MetaTrader5
     Python API is synchronous.
+
+    It never sends or modifies broker orders.
     """
 
     broker_api = (
@@ -247,23 +334,19 @@ def synchronize_demo_positions(
             "Unable to read MT5 DEMO account information."
         )
 
-    account_data = account._asdict()
-
-    trade_mode = account_data.get(
-        "trade_mode"
+    account_data = _account_to_dict(
+        account
     )
 
-    demo_mode = getattr(
-        broker_api,
-        "ACCOUNT_TRADE_MODE_DEMO",
-        0,
-    )
-
-    if trade_mode != demo_mode:
+    if not account_data:
         raise DemoCanonicalSyncError(
-            "Canonical DEMO synchronization blocked: "
-            "connected MT5 account is not DEMO."
+            "Unable to normalize MT5 account information."
         )
+
+    _validate_demo_account(
+        account_data=account_data,
+        broker_api=broker_api,
+    )
 
     broker_positions = (
         broker_api.positions_get()
@@ -293,15 +376,9 @@ def synchronize_demo_positions(
             "login"
         )
 
-        broker_account_id = None
-
-        try:
-            if account_number is not None:
-                broker_account_id = int(
-                    account_number
-                )
-        except (TypeError, ValueError):
-            broker_account_id = None
+        broker_account_id = _as_int_or_none(
+            account_number
+        )
 
         for position in broker_positions:
             ticket = _position_ticket(
@@ -327,7 +404,8 @@ def synchronize_demo_positions(
                 continue
 
             side = _position_side(
-                position
+                position,
+                broker_api,
             )
 
             volume = _as_float(
@@ -359,8 +437,7 @@ def synchronize_demo_positions(
                     position,
                     "sl",
                     0.0,
-                ),
-                default=0.0,
+                )
             )
 
             take_profit = _as_float(
@@ -368,8 +445,7 @@ def synchronize_demo_positions(
                     position,
                     "tp",
                     0.0,
-                ),
-                default=0.0,
+                )
             )
 
             if (
@@ -424,8 +500,6 @@ def synchronize_demo_positions(
                     ),
                 )
 
-                # Fetch the newly created canonical row so that
-                # the market state is immediately current.
                 created_position = (
                     repository.get_position_by_ticket(
                         mode="demo",
@@ -472,10 +546,6 @@ def synchronize_demo_positions(
                 )
 
                 updated += 1
-
-        # ----------------------------------------------------------
-        # ACCOUNT SNAPSHOT
-        # ----------------------------------------------------------
 
         balance = _as_float(
             account_data.get(
@@ -539,9 +609,7 @@ def synchronize_demo_positions(
             "mode": "demo",
             "source": "mt5",
             "canonical_state": True,
-            "account_number": (
-                account_number
-            ),
+            "account_number": account_number,
             "balance": balance,
             "equity": equity,
             "floating_pnl": floating_pnl,
@@ -581,20 +649,19 @@ def synchronize_demo_position(
             "MetaTrader5 Python package is unavailable."
         )
 
-    trade_mode = account_info.get(
-        "trade_mode"
+    normalized_account = _account_to_dict(
+        account_info
     )
 
-    demo_mode = getattr(
-        broker_api,
-        "ACCOUNT_TRADE_MODE_DEMO",
-        0,
-    )
-
-    if trade_mode != demo_mode:
+    if not normalized_account:
         raise DemoCanonicalSyncError(
-            "Single-position synchronization requires a DEMO account."
+            "Unable to normalize DEMO account information."
         )
+
+    _validate_demo_account(
+        account_data=normalized_account,
+        broker_api=broker_api,
+    )
 
     ticket = _position_ticket(
         position
@@ -614,7 +681,8 @@ def synchronize_demo_position(
     ).strip()
 
     side = _position_side(
-        position
+        position,
+        broker_api,
     )
 
     volume = _as_float(
@@ -668,18 +736,13 @@ def synchronize_demo_position(
         )
     )
 
-    account_number = account_info.get(
+    account_number = normalized_account.get(
         "login"
     )
 
-    try:
-        broker_account_id = (
-            int(account_number)
-            if account_number is not None
-            else None
-        )
-    except (TypeError, ValueError):
-        broker_account_id = None
+    broker_account_id = _as_int_or_none(
+        account_number
+    )
 
     with SessionLocal() as db:
         repository = TradingStateRepository(
@@ -712,11 +775,11 @@ def synchronize_demo_position(
                     broker_account_id
                 ),
                 broker=_broker_name(
-                    account_info
+                    normalized_account
                 ),
                 platform=_platform_name(),
                 server=_broker_server(
-                    account_info
+                    normalized_account
                 ),
                 broker_position_ticket=ticket,
                 strategy_signal_id=(
@@ -777,4 +840,4 @@ __all__ = [
     "DemoCanonicalSyncError",
     "synchronize_demo_positions",
     "synchronize_demo_position",
-      ]
+]
