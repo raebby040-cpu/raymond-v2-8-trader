@@ -48,42 +48,53 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+
 try:
     from .live_position_protection import (
         LivePositionProtectionError,
         protect_live_positions,
         protection_config,
     )
+
     from .live_position_monitor import (
         LivePositionMonitorError,
         monitor_live_positions,
     )
+
     from .live_reconciliation import (
         reconcile_live_positions,
     )
+
     from .mt5_service import (
         mt5_service,
     )
+
 except ImportError:
+
     from live_position_protection import (
         LivePositionProtectionError,
         protect_live_positions,
         protection_config,
     )
+
     from live_position_monitor import (
         LivePositionMonitorError,
         monitor_live_positions,
     )
+
     from live_reconciliation import (
         reconcile_live_positions,
     )
+
     from mt5_service import (
         mt5_service,
     )
 
 
 DEFAULT_SYMBOL = "XAUUSD"
+
 DEFAULT_MAGIC = 28001703
+
 DEFAULT_INTERVAL_SECONDS = 5.0
 
 
@@ -122,6 +133,7 @@ def _env_float(
         return default
 
     try:
+
         result = float(value)
 
         if result <= 0:
@@ -133,6 +145,7 @@ def _env_float(
         TypeError,
         ValueError,
     ):
+
         return default
 
 
@@ -191,8 +204,15 @@ class LivePositionProtectionWorker:
 
         config = protection_config()
 
+        worker_enabled = _env_bool(
+            "RAYMOND_LIVE_PROTECTION_WORKER_ENABLED",
+            False,
+        )
+
         return {
             "running": self.running,
+
+            "worker_enabled": worker_enabled,
 
             "symbol": self.symbol,
 
@@ -281,7 +301,9 @@ class LivePositionProtectionWorker:
         task = self._task
 
         if task is None:
+
             self.running = False
+
             return
 
         if task is not asyncio.current_task():
@@ -289,9 +311,11 @@ class LivePositionProtectionWorker:
             task.cancel()
 
             try:
+
                 await task
 
             except asyncio.CancelledError:
+
                 pass
 
         self._task = None
@@ -320,8 +344,6 @@ class LivePositionProtectionWorker:
 
         # --------------------------------------------------------------
         # First inspect positions.
-        #
-        # This is deliberately performed before modification.
         # --------------------------------------------------------------
 
         monitor_result = (
@@ -340,20 +362,12 @@ class LivePositionProtectionWorker:
                 "Live position monitor is unhealthy."
             )
 
-        protection_safe = (
+        protection_safe = bool(
             monitor_result.get(
                 "new_live_orders_allowed",
                 False,
             )
         )
-
-        # --------------------------------------------------------------
-        # If the existing protection state is unsafe, do NOT blindly
-        # reconstruct the position.
-        #
-        # The protection engine itself deliberately refuses to invent
-        # missing original SL/TP.
-        # --------------------------------------------------------------
 
         monitor_details = (
             monitor_result.get(
@@ -381,10 +395,8 @@ class LivePositionProtectionWorker:
         )
 
         # --------------------------------------------------------------
-        # Unsafe position state:
-        #
-        # We still permit the protection engine to inspect it, but
-        # never pretend the position is safe.
+        # If the monitor detects critical protection problems, fail
+        # closed rather than inventing an SL/TP.
         # --------------------------------------------------------------
 
         if (
@@ -418,11 +430,7 @@ class LivePositionProtectionWorker:
         # --------------------------------------------------------------
         # Protection engine.
         #
-        # If modification is disabled:
-        #
-        #     dry_run=True
-        #
-        # No broker modification occurs.
+        # When actual modification is disabled, force dry-run.
         # --------------------------------------------------------------
 
         protection_result = (
@@ -436,17 +444,36 @@ class LivePositionProtectionWorker:
         )
 
         # --------------------------------------------------------------
-        # If modifications were actually performed, immediately
-        # re-read the broker position state.
+        # Count actual modifications safely.
         # --------------------------------------------------------------
 
-        modified_count = int(
-            protection_result.get(
-                "modified_count",
-                0,
-            )
-            or 0
-        )
+        modified_count = 0
+
+        if isinstance(
+            protection_result,
+            dict,
+        ):
+
+            try:
+
+                modified_count = int(
+                    protection_result.get(
+                        "modified_count",
+                        0,
+                    )
+                    or 0
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                modified_count = 0
+
+        # --------------------------------------------------------------
+        # Post-modification verification.
+        # --------------------------------------------------------------
 
         verification = None
 
@@ -484,7 +511,7 @@ class LivePositionProtectionWorker:
                 )
 
         # --------------------------------------------------------------
-        # Final reconciliation after modification.
+        # Final reconciliation.
         # --------------------------------------------------------------
 
         reconciliation = (
@@ -562,14 +589,39 @@ class LivePositionProtectionWorker:
 
                     self.successful_cycles += 1
 
+                    modified_count = 0
+
+                    protection = result.get(
+                        "protection"
+                    )
+
+                    if isinstance(
+                        protection,
+                        dict,
+                    ):
+
+                        try:
+
+                            modified_count = int(
+                                protection.get(
+                                    "modified_count",
+                                    0,
+                                )
+                                or 0
+                            )
+
+                        except (
+                            TypeError,
+                            ValueError,
+                        ):
+
+                            modified_count = 0
+
                     print(
                         "RAYMOND 17.6E: "
                         "live protection cycle completed "
                         f"status={result.get('status')} "
-                        f"modified="
-                        f"{result.get('protection', {}).get('modified_count', 0) "
-                        "if isinstance(result.get('protection'), dict) "
-                        "else 0}"
+                        f"modified={modified_count}"
                     )
 
                 except asyncio.CancelledError:
@@ -661,16 +713,13 @@ def get_live_position_protection_worker(
 
 def protection_worker_status() -> dict[str, Any]:
 
-    return get_live_position_protection_worker().status()
+    return (
+        get_live_position_protection_worker()
+        .status()
+    )
 
 
 async def start_live_position_protection_worker() -> bool:
-
-    # --------------------------------------------------------------
-    # Worker itself is opt-in.
-    #
-    # This prevents accidental background execution after deployment.
-    # --------------------------------------------------------------
 
     if not _env_bool(
         "RAYMOND_LIVE_PROTECTION_WORKER_ENABLED",
@@ -692,13 +741,15 @@ async def start_live_position_protection_worker() -> bool:
 
     if started:
 
+        config = protection_config()
+
         print(
             "RAYMOND 17.6E: "
             "live protection worker started "
             f"symbol={worker.symbol} "
             f"interval={worker.interval_seconds}s "
             f"modification_enabled="
-            f"{protection_config()['enabled']}"
+            f"{config['enabled']}"
         )
 
     return started
@@ -709,6 +760,7 @@ async def stop_live_position_protection_worker() -> None:
     global _default_worker
 
     if _default_worker is None:
+
         return
 
     await _default_worker.stop()
@@ -716,4 +768,4 @@ async def stop_live_position_protection_worker() -> None:
     print(
         "RAYMOND 17.6E: "
         "live protection worker stopped."
-    )
+        )
