@@ -20,33 +20,77 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show exact source commit
+      - name: Show exact source commit and verify paper balance
         working-directory: .
         run: |
           echo "========================================"
           echo "RAYMOND V2.8 APK SOURCE VERIFICATION"
           echo "========================================"
+
+          echo
           echo "Commit:"
           git rev-parse HEAD
+
           echo
           echo "Branch:"
           git branch --show-current
+
           echo
           echo "Flutter main.dart balance configuration:"
           grep -n "paperStartingBalance" flutter_app/lib/main.dart
+
           echo
-          echo "Searching Flutter app for old 10,000 paper balance:"
-          if grep -RInE "10000(\.0)?|10,000" flutter_app/lib flutter_app/test 2>/dev/null; then
-            echo
-            echo "ERROR: Old 10,000 value detected in Flutter application source."
-            exit 1
+          echo "Checking canonical \$1,000 paper balance..."
+
+          if grep -qE \
+            'paperStartingBalance[[:space:]]*=[[:space:]]*1000\.0' \
+            flutter_app/lib/main.dart
+          then
+            echo "Canonical Flutter paper balance verified: \$1,000.00"
           else
-            echo "No old 10,000 paper balance found in Flutter app source."
+            echo "ERROR: Canonical \$1,000 paper balance was not found."
+            exit 1
           fi
+
           echo
-          echo "Verifying canonical 1,000 balance:"
-          grep -q "paperStartingBalance = 1000.0" flutter_app/lib/main.dart
-          echo "Canonical Flutter paper balance verified: \$1,000.00"
+          echo "Checking Flutter source for executable \$10,000 balance values..."
+
+          FOUND_OLD_BALANCE=0
+
+          while IFS= read -r file; do
+            while IFS= read -r line; do
+
+              CLEAN_LINE="$(echo "$line" | sed -E 's://.*$::')"
+
+              if echo "$CLEAN_LINE" | grep -qE \
+                '(^|[^0-9])10000(\.0+)?([^0-9]|$)'
+              then
+                echo "ERROR: Possible old \$10,000 executable value:"
+                echo "$file:$line"
+                FOUND_OLD_BALANCE=1
+              fi
+
+            done < "$file"
+          done < <(
+            find flutter_app/lib flutter_app/test \
+              -type f \
+              -name "*.dart" \
+              -print 2>/dev/null
+          )
+
+          if [ "$FOUND_OLD_BALANCE" -eq 1 ]; then
+            echo
+            echo "ERROR: Old executable \$10,000 balance detected."
+            exit 1
+          fi
+
+          echo "No executable \$10,000 paper balance detected."
+
+          echo
+          echo "========================================"
+          echo "PAPER BALANCE VERIFICATION PASSED"
+          echo "Starting balance: \$1,000.00"
+          echo "========================================"
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -58,52 +102,148 @@ jobs:
       - name: Check Flutter project
         run: |
           flutter --version
-          test -f pubspec.yaml
+
+          if [ ! -f pubspec.yaml ]; then
+            echo "ERROR: pubspec.yaml not found."
+            exit 1
+          fi
+
           echo "Flutter project found."
 
       - name: Create Android platform if missing
         run: |
           if [ ! -d android ]; then
-            echo "Android directory missing. Creating it..."
+            echo "Android directory missing."
+            echo "Creating Android platform..."
+
             flutter create --platforms=android .
+
+            echo "Android platform created."
           else
             echo "Android directory already exists."
           fi
 
       - name: Ensure Android Internet permission
         run: |
-          grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml || \
-          sed -i '/<application/i\    <uses-permission android:name="android.permission.INTERNET"/>' \
-          android/app/src/main/AndroidManifest.xml
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
 
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERROR: AndroidManifest.xml not found."
+            exit 1
+          fi
+
+          if grep -q \
+            'android.permission.INTERNET' \
+            "$MANIFEST"
+          then
+            echo "Internet permission already exists."
+          else
+            echo "Adding Android Internet permission..."
+
+            sed -i \
+              '/<application/i\    <uses-permission android:name="android.permission.INTERNET"/>' \
+              "$MANIFEST"
+
+            echo "Internet permission added."
+          fi
+
+          echo
           echo "Checking Internet permission..."
-          grep 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
+
+          grep \
+            'android.permission.INTERNET' \
+            "$MANIFEST"
 
       - name: Get Flutter dependencies
-        run: flutter pub get
+        run: |
+          flutter pub get
 
       - name: Analyze Flutter project
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        run: |
+          flutter analyze \
+            --no-fatal-infos \
+            --no-fatal-warnings
 
       - name: Run Flutter tests
-        run: flutter test
+        run: |
+          flutter test
 
       - name: Build Android APKs
-        run: flutter build apk --release --split-per-abi
+        run: |
+          flutter build apk \
+            --release \
+            --split-per-abi
 
       - name: Verify APKs
         run: |
-          ls -lh build/app/outputs/flutter-apk/
+          APK_DIR="build/app/outputs/flutter-apk"
 
-          test -f build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-          test -f build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-          test -f build/app/outputs/flutter-apk/app-x86_64-release.apk
+          echo "========================================"
+          echo "RAYMOND V2.8 APK VERIFICATION"
+          echo "========================================"
 
-          echo "All APKs verified successfully."
+          if [ ! -d "$APK_DIR" ]; then
+            echo "ERROR: APK output directory does not exist."
+            exit 1
+          fi
+
+          echo
+          echo "Generated APK files:"
+          ls -lh "$APK_DIR"
+
+          echo
+          echo "Checking ARM64 APK..."
+
+          test -f \
+            "$APK_DIR/app-arm64-v8a-release.apk"
+
+          echo "ARM64 APK verified."
+
+          echo
+          echo "Checking ARMv7 APK..."
+
+          test -f \
+            "$APK_DIR/app-armeabi-v7a-release.apk"
+
+          echo "ARMv7 APK verified."
+
+          echo
+          echo "Checking x86_64 APK..."
+
+          test -f \
+            "$APK_DIR/app-x86_64-release.apk"
+
+          echo "x86_64 APK verified."
+
+          echo
+          echo "========================================"
+          echo "ALL APKs VERIFIED SUCCESSFULLY"
+          echo "========================================"
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: raymond-v2-8-apks
           path: flutter_app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
           retention-days: 30
+
+      - name: Build summary
+        if: success()
+        working-directory: .
+        run: |
+          echo "========================================"
+          echo "RAYMOND V2.8 BUILD COMPLETE"
+          echo "========================================"
+          echo
+          echo "Source commit:"
+          git rev-parse HEAD
+          echo
+          echo "Paper starting balance: \$1,000.00"
+          echo "Flutter analysis: PASSED"
+          echo "Flutter tests: PASSED"
+          echo "Android APK build: PASSED"
+          echo "APK verification: PASSED"
+          echo "Artifact upload: PASSED"
+          echo
+          echo "Raymond V2.8 APKs are ready."
