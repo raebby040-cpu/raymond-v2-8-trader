@@ -1,62 +1,85 @@
 """
-RAYMOND v2.8 - Canonical Paper Runtime Bridge.
+RAYMOND v2.8 - Canonical Persistent Paper Runtime.
 
-Connects the existing online_main.py runtime to the canonical
-persistent paper-trading account without replacing online_main.py.
+This module is the authoritative bridge between the production
+online runtime and the persistent paper-trading account.
 
 Canonical accounting:
 
     Starting balance = $1,000
-    Balance = starting balance + realized P&L
-    Equity = balance + unrealized P&L
+    Balance = $1,000 + realized P&L
+    Equity = Balance + unrealized P&L
 
 Persistent Position records are the source of truth.
 
-Live broker execution remains disabled.
+This module is PAPER ONLY.
+
+It does not:
+    - send broker orders
+    - modify MT5 positions
+    - connect to Exness for execution
+    - enable live trading
+    - bypass the Risk Engine
+    - bypass Emergency Stop
 """
 
 from __future__ import annotations
 
 from typing import Any, MutableMapping
 
+from .database import SessionLocal
+from .models import PositionStatus
 from .persistent_paper_account import (
     build_persistent_paper_account,
     get_persistent_paper_equity,
 )
-
+from .trading_pipeline_service import PaperRiskState
 from .position_repository import PositionRepository
 
 
-def canonical_paper_equity(
-    namespace: MutableMapping[str, Any],
+def _as_float(
+    value: Any,
+    default: float = 0.0,
 ) -> float:
     """
-    Return canonical persistent paper equity.
-
-    Equity includes unrealized P&L from open positions.
+    Safely convert a value to float.
     """
-
-    session_local = namespace.get(
-        "SessionLocal"
-    )
-
-    if session_local is None:
-        raise RuntimeError(
-            "SessionLocal is required for canonical "
-            "paper equity."
-        )
-
-    db = session_local()
+    if value is None:
+        return default
 
     try:
-        equity = float(
-            get_persistent_paper_equity(db)
-        )
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def canonical_paper_equity(
+    namespace: MutableMapping[str, Any] | None = None,
+) -> float:
+    """
+    Return the authoritative persistent paper equity.
+
+    Balance contains realized P&L only.
+
+    Equity contains:
+
+        balance + unrealized P&L
+
+    Persistent database positions are the source of truth.
+    """
+
+    del namespace
+
+    db = SessionLocal()
+
+    try:
+        equity = get_persistent_paper_equity(db)
+
+        equity = _as_float(equity)
 
         if equity <= 0:
             raise RuntimeError(
-                "Canonical paper equity is not greater "
-                "than zero."
+                "Canonical persistent paper equity is invalid."
             )
 
         return equity
@@ -66,100 +89,110 @@ def canonical_paper_equity(
 
 
 def canonical_paper_risk_state(
-    namespace: MutableMapping[str, Any],
-) -> Any:
+    namespace: MutableMapping[str, Any] | None = None,
+) -> PaperRiskState:
     """
-    Build the paper risk state from persistent Position records.
+    Build the authoritative paper risk state directly from the
+    persistent paper account.
 
-    The old demo_engine is deliberately excluded.
+    This implementation intentionally imports PaperRiskState
+    directly instead of requiring it to exist inside the
+    online_main.py namespace.
+
+    Open positions are loaded from the persistent Position table.
+
+    Exposure is calculated from:
+
+        entry_price × remaining_quantity
+
+    when available, with quantity/original quantity as a fallback.
+
+    No broker state is consulted.
     """
 
-    session_local = namespace.get(
-        "SessionLocal"
-    )
+    del namespace
 
-    risk_state_class = namespace.get(
-        "PaperRiskState"
-    )
-
-    if session_local is None:
-        raise RuntimeError(
-            "SessionLocal is required for canonical "
-            "paper risk state."
-        )
-
-    if risk_state_class is None:
-        raise RuntimeError(
-            "PaperRiskState is required for canonical "
-            "paper risk state."
-        )
-
-    db = session_local()
+    db = SessionLocal()
 
     try:
-        account = build_persistent_paper_account(
-            db
-        )
+        account = build_persistent_paper_account(db)
 
-        positions = (
-            PositionRepository.get_open_positions(
-                db
-            )
-        )
+        positions = PositionRepository.get_open_positions(db)
 
         total_exposure = 0.0
 
         for position in positions:
-            entry_price = float(
-                getattr(
-                    position,
-                    "entry_price",
-                    0.0,
-                )
-                or 0.0
+            status = getattr(
+                position,
+                "status",
+                None,
             )
 
-            quantity = float(
+            if status is not None:
+                if status != PositionStatus.OPEN:
+                    continue
+
+            remaining_quantity = _as_float(
                 getattr(
                     position,
                     "remaining_quantity",
-                    0.0,
+                    None,
                 )
-                or getattr(
+            )
+
+            if remaining_quantity <= 0:
+                remaining_quantity = _as_float(
+                    getattr(
+                        position,
+                        "quantity",
+                        None,
+                    )
+                )
+
+            if remaining_quantity <= 0:
+                remaining_quantity = _as_float(
+                    getattr(
+                        position,
+                        "original_quantity",
+                        None,
+                    )
+                )
+
+            entry_price = _as_float(
+                getattr(
                     position,
-                    "quantity",
-                    0.0,
+                    "entry_price",
+                    None,
                 )
-                or 0.0
             )
 
-            if entry_price <= 0:
-                raise RuntimeError(
-                    "Persistent paper position has "
-                    "an invalid entry price."
+            if remaining_quantity <= 0:
+                continue
+
+            if entry_price > 0:
+                total_exposure += (
+                    entry_price
+                    * remaining_quantity
                 )
+            else:
+                # If an older persisted record has no entry price,
+                # keep the risk state usable without inventing price
+                # information.
+                total_exposure += remaining_quantity
 
-            if quantity <= 0:
-                raise RuntimeError(
-                    "Persistent paper position has "
-                    "an invalid quantity."
-                )
-
-            total_exposure += (
-                entry_price * quantity
-            )
-
-        return risk_state_class(
-            daily_loss=float(
+        daily_loss = max(
+            0.0,
+            _as_float(
                 account.get(
                     "daily_loss",
                     0.0,
                 )
-                or 0.0
             ),
-            open_positions=len(
-                positions
-            ),
+        )
+
+        return PaperRiskState(
+            daily_loss=daily_loss,
+            open_positions=len(positions),
             total_exposure=total_exposure,
         )
 
@@ -171,33 +204,26 @@ def install_canonical_paper_runtime(
     namespace: MutableMapping[str, Any],
 ) -> None:
     """
-    Replace paper-account functions inside the running application
-    namespace with canonical persistent implementations.
+    Install canonical paper providers into a runtime namespace.
 
-    This is designed for online_main.py.
-
-    It also updates the imported function references used by
-    automatic paper-entry workers.
+    This updates the actual function references used by the
+    production online runtime.
     """
 
-    namespace[
-        "get_paper_equity"
-    ] = lambda: canonical_paper_equity(
-        namespace
+    namespace["get_paper_equity"] = (
+        lambda: canonical_paper_equity(namespace)
     )
 
-    namespace[
-        "build_paper_risk_state"
-    ] = lambda: canonical_paper_risk_state(
-        namespace
+    canonical_risk_provider = (
+        lambda: canonical_paper_risk_state(namespace)
     )
 
-    # The existing online_main.py uses the persistent risk function
-    # directly for Stage 17.6. Replace that reference as well.
-    namespace[
-        "build_persistent_paper_risk_state"
-    ] = lambda: canonical_paper_risk_state(
-        namespace
+    namespace["build_paper_risk_state"] = (
+        canonical_risk_provider
+    )
+
+    namespace["build_persistent_paper_risk_state"] = (
+        canonical_risk_provider
     )
 
 
