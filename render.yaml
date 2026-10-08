@@ -9,19 +9,47 @@ services:
     healthCheckPath: /health
 
     envVars:
-      - key: LIVE_TRADING_ENABLED
-        value: "false"
+      # ------------------------------------------------------------------
+      # Raymond environment
+      # ------------------------------------------------------------------
 
       - key: RAYMOND_ENV
         value: production
+
+      - key: LOG_LEVEL
+        value: INFO
+
+      # ------------------------------------------------------------------
+      # Database
+      # ------------------------------------------------------------------
 
       - key: DATABASE_URL
         fromDatabase:
           name: raymond-v2-8-db
           property: connectionString
 
-      - key: LOG_LEVEL
-        value: INFO
+      # ------------------------------------------------------------------
+      # LIVE TRADING SAFETY
+      # ------------------------------------------------------------------
+
+      # MUST remain disabled until DEMO E2E validation is completed.
+      - key: LIVE_TRADING_ENABLED
+        value: "false"
+
+      # ------------------------------------------------------------------
+      # Remote MT5 Execution Bridge
+      # ------------------------------------------------------------------
+
+      # These remain unset until a Windows/VPS MT5 host exists.
+      # They are supplied separately through Render environment secrets.
+      - key: MT5_BRIDGE_URL
+        sync: false
+
+      - key: MT5_BRIDGE_API_KEY
+        sync: false
+
+      - key: MT5_BRIDGE_TIMEOUT_SECONDS
+        value: "10"
 
 databases:
   - name: raymond-v2-8-db
