@@ -12,6 +12,9 @@ DEMO worker:
 LIVE protection worker:
     Disabled unless explicitly enabled with
     RAYMOND_LIVE_PROTECTION_WORKER_ENABLED=true.
+
+LIVE authorization:
+    Mounted as an API route, but disabled by default.
 """
 
 from fastapi import FastAPI
@@ -34,6 +37,10 @@ def mount_broker_integration(
             router as broker_router,
         )
 
+        from .live_authorization import (
+            router as live_authorization_router,
+        )
+
         from .live_position_protection_worker import (
             start_live_position_protection_worker,
             stop_live_position_protection_worker,
@@ -47,6 +54,10 @@ def mount_broker_integration(
     except ImportError:
         from broker_integration import (
             router as broker_router,
+        )
+
+        from live_authorization import (
+            router as live_authorization_router,
         )
 
         from live_position_protection_worker import (
@@ -65,6 +76,10 @@ def mount_broker_integration(
 
     app.include_router(
         broker_router,
+    )
+
+    app.include_router(
+        live_authorization_router,
     )
 
     # --------------------------------------------------------------
