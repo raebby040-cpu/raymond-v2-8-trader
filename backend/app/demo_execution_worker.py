@@ -25,6 +25,15 @@ Safety:
 - Uses the existing Risk Engine.
 - Synchronizes broker positions into canonical state.
 - Stops cleanly on application shutdown.
+
+Important:
+- DEMO execution and canonical synchronization are separate
+  operations.
+- A synchronization failure must never rewrite a broker execution
+  result.
+- The worker exposes both nested execution details and the
+  important execution status/reason at the top level so API/tests
+  have a stable response contract.
 """
 
 from __future__ import annotations
@@ -50,6 +59,15 @@ def _env_bool(
     name: str,
     default: bool = False,
 ) -> bool:
+    """
+    Read a boolean environment variable safely.
+
+    Accepted true values:
+        1, true, yes, on
+
+    Everything else is false.
+    """
+
     value = os.getenv(name)
 
     if value is None:
@@ -68,6 +86,11 @@ def _env_int(
     default: int,
     minimum: int,
 ) -> int:
+    """
+    Read an integer environment variable and enforce
+    a minimum safe value.
+    """
+
     try:
         value = int(
             os.getenv(
@@ -94,6 +117,8 @@ class DemoExecutionWorker:
     Canonical synchronization happens after each execution cycle
     and therefore updates running positions even when no new
     order is generated.
+
+    LIVE trading is deliberately unavailable from this worker.
     """
 
     def __init__(self) -> None:
@@ -144,12 +169,12 @@ class DemoExecutionWorker:
 
         self._last_run_at: Optional[str] = None
 
-    # ------------------------------------------------------------------
-    # STATUS
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _utc_now() -> str:
+        """
+        Return the current UTC timestamp.
+        """
+
         return datetime.now(
             timezone.utc
         ).isoformat()
@@ -158,6 +183,13 @@ class DemoExecutionWorker:
     def _serialize_result(
         result: DemoExecutionResult,
     ) -> dict[str, Any]:
+        """
+        Convert DemoExecutionResult into a plain dictionary.
+
+        Keeping this boundary explicit prevents broker/execution
+        objects from leaking into the API layer.
+        """
+
         return {
             "status": result.status,
             "execution_mode": result.execution_mode,
@@ -180,6 +212,13 @@ class DemoExecutionWorker:
         }
 
     def status(self) -> dict[str, Any]:
+        """
+        Return safe worker status for API/dashboard use.
+
+        This method does not expose credentials or authorization
+        tokens.
+        """
+
         return {
             "enabled": self.enabled,
             "running": self._running,
@@ -197,10 +236,6 @@ class DemoExecutionWorker:
             "live_trading_enabled": False,
             "strategy_frozen": True,
         }
-
-    # ------------------------------------------------------------------
-    # CANONICAL SYNCHRONIZATION
-    # ------------------------------------------------------------------
 
     async def synchronize_canonical_state(
         self,
@@ -230,10 +265,6 @@ class DemoExecutionWorker:
                 f"{exc}"
             ) from exc
 
-    # ------------------------------------------------------------------
-    # SINGLE EXECUTION CYCLE
-    # ------------------------------------------------------------------
-
     async def run_once(
         self,
     ) -> dict[str, Any]:
@@ -246,13 +277,25 @@ class DemoExecutionWorker:
         floating P/L.
 
         A canonical synchronization failure never rewrites the
-        broker execution result. The two outcomes remain distinct.
+        broker execution result.
+
+        The returned dictionary deliberately exposes:
+
+            status
+            verified
+            reason
+
+        at the top level as well as inside "execution".
         """
 
         self._last_run_at = self._utc_now()
         self._last_error = None
 
         execution_result: dict[str, Any]
+
+        # ---------------------------------------------------------
+        # 1. Execute frozen Raymond DEMO pipeline
+        # ---------------------------------------------------------
 
         try:
             result = (
@@ -298,11 +341,13 @@ class DemoExecutionWorker:
                 "timestamp": self._utc_now(),
             }
 
+        # Preserve the exact execution outcome independently
+        # of canonical synchronization.
         self._last_result = execution_result
 
-        # --------------------------------------------------------------
-        # CANONICAL SYNC
-        # --------------------------------------------------------------
+        # ---------------------------------------------------------
+        # 2. Synchronize canonical broker state
+        # ---------------------------------------------------------
 
         sync_result: Optional[
             dict[str, Any]
@@ -316,10 +361,6 @@ class DemoExecutionWorker:
         except DemoCanonicalSyncError as exc:
             self._last_error = str(exc)
 
-            # Preserve the execution outcome.
-            #
-            # A synchronization problem does not mean the broker
-            # execution itself failed.
             sync_result = {
                 "status": "sync_error",
                 "mode": "demo",
@@ -342,6 +383,10 @@ class DemoExecutionWorker:
                 "timestamp": self._utc_now(),
             }
 
+        # ---------------------------------------------------------
+        # 3. Normalize stable top-level execution contract
+        # ---------------------------------------------------------
+
         execution_status = execution_result.get(
             "status",
             "unknown",
@@ -354,27 +399,32 @@ class DemoExecutionWorker:
             )
         )
 
+        reason = execution_result.get(
+            "reason",
+            "",
+        )
+
+        if reason is None:
+            reason = ""
+
+        reason = str(reason)
+
+        # ---------------------------------------------------------
+        # 4. Return complete worker result
+        # ---------------------------------------------------------
+
         return {
-            # Backward-compatible top-level fields.
             "status": execution_status,
             "verified": verified,
-
-            # Full canonical execution result.
+            "reason": reason,
             "execution": execution_result,
-
-            # Canonical synchronization result.
             "canonical_sync": sync_result,
-
             "execution_mode": "demo",
             "live_authorization": False,
             "live_trading_enabled": False,
             "strategy_frozen": True,
             "timestamp": self._utc_now(),
         }
-
-    # ------------------------------------------------------------------
-    # WORKER LOOP
-    # ------------------------------------------------------------------
 
     async def run(
         self,
@@ -408,17 +458,13 @@ class DemoExecutionWorker:
         finally:
             self._running = False
 
-    # ------------------------------------------------------------------
-    # START / STOP
-    # ------------------------------------------------------------------
-
     async def start(
         self,
     ) -> None:
         """
         Start the DEMO worker if explicitly enabled.
 
-        Starting the worker never arms LIVE trading.
+        Starting the worker never arms or enables LIVE trading.
         """
 
         if not self.enabled:
@@ -468,24 +514,18 @@ class DemoExecutionWorker:
             self._running = False
 
 
-# ----------------------------------------------------------------------
-# SINGLETON
-# ----------------------------------------------------------------------
-
+# Global worker instance used by the production application.
 demo_execution_worker = (
     DemoExecutionWorker()
 )
 
 
-# ----------------------------------------------------------------------
-# PUBLIC LIFECYCLE HELPERS
-# ----------------------------------------------------------------------
-
 async def start_demo_execution_worker() -> None:
     """
     Start the global DEMO worker.
 
-    Disabled by default through configuration.
+    The worker remains disabled unless explicitly enabled by
+    the existing DEMO configuration.
     """
 
     await demo_execution_worker.start()
@@ -513,4 +553,4 @@ __all__ = [
     "start_demo_execution_worker",
     "stop_demo_execution_worker",
     "demo_execution_worker_status",
-            ]
+    ]
