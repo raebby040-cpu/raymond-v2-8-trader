@@ -1,20 +1,20 @@
-"""Online deployment entrypoint for RAYMOND v2.8.
+"""
+Online deployment entrypoint for RAYMOND v2.8.
 
 Stages started here:
 - 17.4.3 lifecycle-aware paper-position market loop
 - 17.5 automatic paper trade management
 - 17.6 automatic paper entry worker
 - 17.6 automatic-entry read-only telemetry
-- Phase 1 read-only monthly trade audit API
+- Phase 1 read-only monthly trade audit
+- Step 17 broker integration bootstrap
 
 SAFETY:
-- Paper trading only.
-- No broker orders.
-- No MT5 execution.
-- No live trading.
-- Stage 17.6 delegates risk, sizing, execution and persistence to the
-  existing TradingPipelineService / Step 14 path.
-- Telemetry is read-only and cannot execute trades.
+- Paper workers remain paper-only.
+- Broker routes are mounted but live trading is NOT automatically enabled.
+- Live execution remains fail-closed.
+- LIVE_TRADING_ENABLED remains controlled by the environment.
+- Broker credentials are never returned by these routes.
 - Monthly audit is research-only and read-only.
 """
 
@@ -28,6 +28,31 @@ from app.main import (
     app,
     build_symbol_specification,
     get_paper_equity,
+)
+
+# ---------------------------------------------------------------------------
+# STEP 17 - BROKER INTEGRATION BOOTSTRAP
+# ---------------------------------------------------------------------------
+#
+# This is intentionally mounted here instead of modifying app/main.py.
+#
+# Render starts:
+#
+#     uvicorn online_main:app
+#
+# Therefore online_main.py is the production application entrypoint.
+#
+# The bootstrap imports broker_integration, which in turn registers:
+#
+# - broker_accounts
+# - mt5_broker_adapter
+# - live_execution_gateway
+#
+# Mounting these routes does NOT enable live trading.
+# ---------------------------------------------------------------------------
+
+from app.broker_bootstrap import (
+    mount_broker_integration,
 )
 
 from app.persistent_paper_risk import (
@@ -72,6 +97,7 @@ from app.automatic_entry_telemetry import (
 from app.database import SessionLocal
 
 # Phase 1 research auditor.
+#
 # IMPORTANT:
 # These functions only read closed Position records and build a report.
 from scripts.monthly_trade_audit import (
@@ -82,42 +108,48 @@ from scripts.monthly_trade_audit import (
 )
 
 
-# ---------------------------------------------------------------------------
-# ROUTERS
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# STEP 17 - BROKER ROUTES
+# ===========================================================================
+#
+# Mount broker functionality through the dedicated bootstrap layer.
+#
+# This keeps main.py unchanged.
+#
+# IMPORTANT:
+# Route registration does NOT mean live orders are allowed.
+#
+# The live execution gateway remains responsible for its independent
+# safety checks.
+# ===========================================================================
 
-app.include_router(online_market_router)
-app.include_router(advisory_analysis_router)
-app.include_router(paper_position_management_router)
-app.include_router(automatic_entry_telemetry_router)
+mount_broker_integration(app)
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# EXISTING ONLINE ROUTERS
+# ===========================================================================
+
+app.include_router(
+    online_market_router,
+)
+
+app.include_router(
+    advisory_analysis_router,
+)
+
+app.include_router(
+    paper_position_management_router,
+)
+
+app.include_router(
+    automatic_entry_telemetry_router,
+)
+
+
+# ===========================================================================
 # PHASE 1 - READ-ONLY MONTHLY TRADE AUDIT
-# ---------------------------------------------------------------------------
-#
-# This endpoint:
-#
-# - reads CLOSED paper positions;
-# - runs the existing Phase 1 monthly auditor;
-# - returns aggregated research findings;
-# - optionally returns the complete individual trade records;
-# - never modifies positions;
-# - never modifies strategy parameters;
-# - never places orders;
-# - never contacts MT5 for execution;
-# - never promotes a research candidate.
-#
-# Normal request:
-#
-#   /api/research/monthly-audit?month=2026-09
-#
-# For price-path forensics:
-#
-#   /api/research/monthly-audit?month=2026-09&include_trades=true
-#
-# ---------------------------------------------------------------------------
-
+# ===========================================================================
 
 @app.get(
     "/api/research/monthly-audit",
@@ -148,9 +180,6 @@ def monthly_trade_audit(
     When include_trades=true, the complete trade records produced by
     the existing monthly auditor are preserved in the API response.
 
-    This is required by the research-only forensic workflow so it can
-    reconstruct the actual price path of every closed trade.
-
     SAFETY:
     - No broker orders.
     - No MT5 execution.
@@ -161,15 +190,17 @@ def monthly_trade_audit(
     """
 
     try:
-        # ---------------------------------------------------------------
+        # ------------------------------------------------------------------
         # Determine requested month.
-        # ---------------------------------------------------------------
+        # ------------------------------------------------------------------
 
-        start, end, label = month_bounds(month)
+        start, end, label = month_bounds(
+            month
+        )
 
-        # ---------------------------------------------------------------
+        # ------------------------------------------------------------------
         # Load authoritative closed PAPER positions.
-        # ---------------------------------------------------------------
+        # ------------------------------------------------------------------
 
         trades = load_closed_positions(
             start=start,
@@ -177,9 +208,9 @@ def monthly_trade_audit(
             symbol=DEFAULT_SYMBOL,
         )
 
-        # ---------------------------------------------------------------
-        # Build the existing monthly research audit.
-        # ---------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Build existing monthly research audit.
+        # ------------------------------------------------------------------
 
         report = build_report(
             trades=trades,
@@ -187,39 +218,42 @@ def monthly_trade_audit(
             symbol=DEFAULT_SYMBOL,
         )
 
-        if not isinstance(report, dict):
+        if not isinstance(
+            report,
+            dict,
+        ):
             raise RuntimeError(
                 "Monthly trade auditor returned an invalid report."
             )
 
-        # ---------------------------------------------------------------
-        # CRITICAL RESEARCH FIX
-        #
-        # Previously the endpoint ALWAYS removed:
-        #
-        #     report["trades"]
-        #
-        # That meant the GitHub forensic workflow could never receive
-        # the individual trades even when it requested:
-        #
-        #     include_trades=true
-        #
-        # Now the trade records are removed ONLY for the normal
-        # lightweight endpoint request.
-        # ---------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Preserve individual trade records only when explicitly requested.
+        # ------------------------------------------------------------------
 
         if not include_trades:
-            report.pop("trades", None)
-            report.pop("loss_trade_ids", None)
+            report.pop(
+                "trades",
+                None,
+            )
 
-        # ---------------------------------------------------------------
-        # When forensic trade records are requested, validate them.
-        # ---------------------------------------------------------------
+            report.pop(
+                "loss_trade_ids",
+                None,
+            )
+
+        # ------------------------------------------------------------------
+        # Validate forensic trade records.
+        # ------------------------------------------------------------------
 
         if include_trades:
-            trade_records = report.get("trades")
+            trade_records = report.get(
+                "trades"
+            )
 
-            if not isinstance(trade_records, list):
+            if not isinstance(
+                trade_records,
+                list,
+            ):
                 raise RuntimeError(
                     "include_trades=true was requested, but the "
                     "monthly audit did not return a valid 'trades' list."
@@ -230,7 +264,10 @@ def monthly_trade_audit(
                 {},
             )
 
-            if not isinstance(performance, dict):
+            if not isinstance(
+                performance,
+                dict,
+            ):
                 raise RuntimeError(
                     "Monthly audit performance section is missing "
                     "or invalid."
@@ -240,11 +277,17 @@ def monthly_trade_audit(
                 "total_trades"
             )
 
-            actual_trade_count = len(trade_records)
+            actual_trade_count = len(
+                trade_records
+            )
 
             if (
-                isinstance(expected_trade_count, int)
-                and actual_trade_count != expected_trade_count
+                isinstance(
+                    expected_trade_count,
+                    int,
+                )
+                and actual_trade_count
+                != expected_trade_count
             ):
                 raise RuntimeError(
                     "Monthly audit trade-record count mismatch: "
@@ -252,17 +295,24 @@ def monthly_trade_audit(
                     f"received {actual_trade_count}."
                 )
 
-        # ---------------------------------------------------------------
-        # Build final response.
-        # ---------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Final response.
+        # ------------------------------------------------------------------
 
-        response: dict[str, Any] = {
+        return {
             **report,
 
-            "trade_records_included": include_trades,
+            "trade_records_included": (
+                include_trades
+            ),
 
             "trade_record_count": (
-                len(report.get("trades", []))
+                len(
+                    report.get(
+                        "trades",
+                        [],
+                    )
+                )
                 if include_trades
                 else 0
             ),
@@ -278,12 +328,6 @@ def monthly_trade_audit(
             },
         }
 
-        return response
-
-    # -------------------------------------------------------------------
-    # INPUT / MONTH VALIDATION
-    # -------------------------------------------------------------------
-
     except ValueError as exc:
         return {
             "accepted": False,
@@ -296,10 +340,6 @@ def monthly_trade_audit(
             "orders_created": False,
             "candidates_promoted": False,
         }
-
-    # -------------------------------------------------------------------
-    # SAFE RESEARCH ERROR
-    # -------------------------------------------------------------------
 
     except Exception as exc:
         return {
@@ -316,9 +356,9 @@ def monthly_trade_audit(
         }
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # XAUUSD PAPER SYMBOL SPECIFICATION
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 _XAUUSD_SPECIFICATION = build_symbol_specification(
     {
@@ -347,34 +387,47 @@ _XAUUSD_SPECIFICATION = build_symbol_specification(
 )
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # STAGE 17.4.3
 # LIFECYCLE-AWARE AUTOMATIC PAPER POSITION MARKET LOOP
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 _paper_market_loop = None
+
 _paper_market_loop_db = None
 
 
-async def _paper_market_price_provider(symbol: str) -> float:
-    """Return the latest public market price. Never executes a trade."""
+async def _paper_market_price_provider(
+    symbol: str,
+) -> float:
+    """
+    Return the latest public market price.
 
-    market_data = await _fetch_price(symbol)
+    This provider never executes a broker order.
+    """
 
-    price = market_data.get("price")
+    market_data = await _fetch_price(
+        symbol
+    )
+
+    price = market_data.get(
+        "price"
+    )
 
     if price is None:
         raise RuntimeError(
             "Online market feed returned no usable price"
         )
 
-    return float(price)
+    return float(
+        price
+    )
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # STAGE 17.5
 # AUTOMATIC TRADE MANAGEMENT WORKER
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 _automatic_management_task = None
 
@@ -434,19 +487,23 @@ async def _automatic_trade_management_worker():
         finally:
             db.close()
 
-        await asyncio.sleep(30.0)
+        await asyncio.sleep(
+            30.0
+        )
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # STAGE 17.6
 # AUTOMATIC PAPER ENTRY WORKER
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 _automatic_entry_worker = None
 
 
 async def _automatic_entry_worker_task():
-    """Run Stage 17.6 automatic paper entries every 30 seconds."""
+    """
+    Run Stage 17.6 automatic paper entries every 30 seconds.
+    """
 
     global _automatic_entry_worker
 
@@ -461,19 +518,22 @@ async def _automatic_entry_worker_task():
     db = SessionLocal()
 
     try:
-        _automatic_entry_worker = TelemetryAutomaticEntryWorker(
-            db=db,
-            specification=_XAUUSD_SPECIFICATION,
-            account_equity_provider=get_paper_equity,
+        _automatic_entry_worker = (
+            TelemetryAutomaticEntryWorker(
+                db=db,
+                specification=_XAUUSD_SPECIFICATION,
+                account_equity_provider=get_paper_equity,
 
-            # IMPORTANT:
-            # Stage 17.6 uses persistent Position records for:
-            # - open-position count;
-            # - monetary exposure;
-            # - daily closed loss.
-            risk_state_provider=build_persistent_paper_risk_state,
+                # Stage 17.6 uses persistent Position records for:
+                # - open-position count;
+                # - monetary exposure;
+                # - daily closed loss.
+                risk_state_provider=(
+                    build_persistent_paper_risk_state
+                ),
 
-            config=config,
+                config=config,
+            )
         )
 
         await _automatic_entry_worker.run()
@@ -496,22 +556,31 @@ async def _automatic_entry_worker_task():
 _automatic_entry_task = None
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # STARTUP
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
-@app.on_event("startup")
+@app.on_event(
+    "startup"
+)
 async def start_paper_position_market_loop():
-    """Start all automatic paper-position and paper-entry workers."""
+    """
+    Start all automatic paper-position and paper-entry workers.
+
+    Broker routes were mounted above at module initialization.
+    """
 
     global _paper_market_loop
+
     global _paper_market_loop_db
+
     global _automatic_management_task
+
     global _automatic_entry_task
 
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
     # STAGE 17.4.3
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     config = PaperPositionMarketLoopConfig.from_values(
         symbol="XAUUSD",
@@ -521,10 +590,12 @@ async def start_paper_position_market_loop():
 
     _paper_market_loop_db = SessionLocal()
 
-    _paper_market_loop = LifecycleAwarePaperPositionMarketLoop(
-        db=_paper_market_loop_db,
-        price_provider=_paper_market_price_provider,
-        config=config,
+    _paper_market_loop = (
+        LifecycleAwarePaperPositionMarketLoop(
+            db=_paper_market_loop_db,
+            price_provider=_paper_market_price_provider,
+            config=config,
+        )
     )
 
     started = _paper_market_loop.start()
@@ -541,16 +612,18 @@ async def start_paper_position_market_loop():
             "lifecycle-aware paper-position market loop was not started"
         )
 
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
     # STAGE 17.5
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     if (
         _automatic_management_task is None
         or _automatic_management_task.done()
     ):
-        _automatic_management_task = asyncio.create_task(
-            _automatic_trade_management_worker()
+        _automatic_management_task = (
+            asyncio.create_task(
+                _automatic_trade_management_worker()
+            )
         )
 
         print(
@@ -559,16 +632,18 @@ async def start_paper_position_market_loop():
             "(XAUUSD / M15 / 30s / PAPER ONLY)"
         )
 
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
     # STAGE 17.6
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     if (
         _automatic_entry_task is None
         or _automatic_entry_task.done()
     ):
-        _automatic_entry_task = asyncio.create_task(
-            _automatic_entry_worker_task()
+        _automatic_entry_task = (
+            asyncio.create_task(
+                _automatic_entry_worker_task()
+            )
         )
 
         print(
@@ -578,27 +653,36 @@ async def start_paper_position_market_loop():
         )
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # SHUTDOWN
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
-@app.on_event("shutdown")
+@app.on_event(
+    "shutdown"
+)
 async def stop_paper_position_market_loop():
-    """Stop all automatic paper workers cleanly."""
+    """
+    Stop all automatic paper workers cleanly.
+    """
 
     global _paper_market_loop
+
     global _paper_market_loop_db
+
     global _automatic_management_task
+
     global _automatic_entry_task
+
     global _automatic_entry_worker
 
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
     # STOP STAGE 17.6
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     if _automatic_entry_worker is not None:
         try:
             await _automatic_entry_worker.stop()
+
         except Exception as exc:
             print(
                 "RAYMOND Stage 17.6: "
@@ -610,6 +694,7 @@ async def stop_paper_position_market_loop():
 
         try:
             await _automatic_entry_task
+
         except asyncio.CancelledError:
             pass
 
@@ -617,111 +702,220 @@ async def stop_paper_position_market_loop():
 
     _automatic_entry_worker = None
 
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
     # STOP STAGE 17.5
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     if _automatic_management_task is not None:
         _automatic_management_task.cancel()
 
         try:
             await _automatic_management_task
+
         except asyncio.CancelledError:
             pass
 
         _automatic_management_task = None
 
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
     # STOP STAGE 17.4.3
-    # ---------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     if _paper_market_loop is not None:
         await _paper_market_loop.stop()
+
         _paper_market_loop = None
 
     if _paper_market_loop_db is not None:
         _paper_market_loop_db.close()
+
         _paper_market_loop_db = None
 
     print(
-        "RAYMOND: paper-position and paper-entry workers stopped"
+        "RAYMOND: "
+        "paper-position and paper-entry workers stopped"
     )
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # HEALTH
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
-@app.get("/health", tags=["Health"])
+@app.get(
+    "/health",
+    tags=["Health"],
+)
 async def health():
-    """Lightweight Render health check with worker status."""
+    """
+    Lightweight Render health check with worker and broker status.
+
+    This endpoint never executes a trade.
+    """
+
+    # ---------------------------------------------------------------
+    # Broker route registration status
+    # ---------------------------------------------------------------
+
+    broker_routes_mounted = True
+
+    # ---------------------------------------------------------------
+    # Health response
+    # ---------------------------------------------------------------
 
     return {
         "status": "healthy",
+
         "service": "raymond-v2-8-trader",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+
+        "timestamp": (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        ),
+
+        # -----------------------------------------------------------
+        # SAFETY
+        # -----------------------------------------------------------
+
         "live_trading_enabled": False,
+
         "paper_trading_enabled": True,
+
+        # -----------------------------------------------------------
+        # STEP 17
+        # -----------------------------------------------------------
+
+        "broker_integration": {
+            "mounted": broker_routes_mounted,
+
+            "account_management": True,
+
+            "mt5_adapter": True,
+
+            "live_execution_gateway": True,
+
+            "live_orders_authorized": False,
+
+            "execution_mode": (
+                "fail_closed"
+            ),
+        },
+
+        # -----------------------------------------------------------
+        # PAPER POSITION MARKET LOOP
+        # -----------------------------------------------------------
 
         "paper_position_market_loop": {
             "enabled": True,
+
             "running": (
                 _paper_market_loop.running
                 if _paper_market_loop is not None
                 else False
             ),
+
             "symbol": "XAUUSD",
+
             "interval_seconds": 30.0,
+
             "lifecycle_enabled": True,
         },
 
+        # -----------------------------------------------------------
+        # AUTOMATIC MANAGEMENT
+        # -----------------------------------------------------------
+
         "automatic_trade_management": {
             "enabled": True,
+
             "running": (
                 _automatic_management_task is not None
                 and not _automatic_management_task.done()
             ),
+
             "symbol": "XAUUSD",
+
             "timeframe": "M15",
+
             "interval_seconds": 30.0,
+
             "close_execution_enabled": False,
         },
 
+        # -----------------------------------------------------------
+        # AUTOMATIC PAPER ENTRY
+        # -----------------------------------------------------------
+
         "automatic_paper_entry": {
             "enabled": True,
+
             "running": (
                 _automatic_entry_task is not None
                 and not _automatic_entry_task.done()
             ),
+
             "symbol": "XAUUSD",
+
             "timeframe": "M15",
+
             "interval_seconds": 30.0,
+
             "paper_only": True,
         },
+
+        # -----------------------------------------------------------
+        # AUTOMATIC ENTRY TELEMETRY
+        # -----------------------------------------------------------
 
         "automatic_entry_telemetry": {
             "enabled": True,
-            "endpoint": "/api/online/automatic-entry-status",
+
+            "endpoint": (
+                "/api/online/automatic-entry-status"
+            ),
+
             "read_only": True,
         },
+
+        # -----------------------------------------------------------
+        # MONTHLY TRADE AUDIT
+        # -----------------------------------------------------------
 
         "monthly_trade_audit": {
             "enabled": True,
-            "endpoint": "/api/research/monthly-audit",
+
+            "endpoint": (
+                "/api/research/monthly-audit"
+            ),
+
             "research_only": True,
+
             "read_only": True,
+
             "strategy_modification": False,
+
             "position_modification": False,
+
             "order_creation": False,
+
             "trade_records_supported": True,
         },
 
+        # -----------------------------------------------------------
+        # SAFETY
+        # -----------------------------------------------------------
+
         "safety": {
             "paper_only": True,
+
             "read_only": True,
+
             "execution_authorized": False,
+
             "broker_orders_allowed": False,
+
             "mt5_execution_allowed": False,
+
             "risk_engine_bypass": False,
         },
-    }
+}
