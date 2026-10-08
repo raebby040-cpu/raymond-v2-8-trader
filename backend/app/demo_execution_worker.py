@@ -3,7 +3,7 @@ RAYMOND v2.8 - MT5 DEMO Execution Worker
 
 Continuous DEMO-only execution worker.
 
-Batch 2 integration:
+Architecture:
 
     MT5 DEMO execution
             |
@@ -244,6 +244,9 @@ class DemoExecutionWorker:
         Synchronization happens even when Raymond returns WAIT,
         because an existing MT5 position can still have changed
         floating P/L.
+
+        A canonical synchronization failure never rewrites the
+        broker execution result. The two outcomes remain distinct.
         """
 
         self._last_run_at = self._utc_now()
@@ -265,10 +268,6 @@ class DemoExecutionWorker:
                 self._serialize_result(
                     result
                 )
-            )
-
-            self._last_result = (
-                execution_result
             )
 
         except DemoExecutionError as exc:
@@ -299,6 +298,8 @@ class DemoExecutionWorker:
                 "timestamp": self._utc_now(),
             }
 
+        self._last_result = execution_result
+
         # --------------------------------------------------------------
         # CANONICAL SYNC
         # --------------------------------------------------------------
@@ -315,9 +316,10 @@ class DemoExecutionWorker:
         except DemoCanonicalSyncError as exc:
             self._last_error = str(exc)
 
-            # The execution result is preserved. A synchronization
-            # failure must NOT be interpreted as a broker failure.
-            # It is reported explicitly so the state can be repaired.
+            # Preserve the execution outcome.
+            #
+            # A synchronization problem does not mean the broker
+            # execution itself failed.
             sync_result = {
                 "status": "sync_error",
                 "mode": "demo",
@@ -340,13 +342,29 @@ class DemoExecutionWorker:
                 "timestamp": self._utc_now(),
             }
 
+        execution_status = execution_result.get(
+            "status",
+            "unknown",
+        )
+
+        verified = bool(
+            execution_result.get(
+                "verified",
+                False,
+            )
+        )
+
         return {
-            "status": execution_result.get(
-                "status",
-                "unknown",
-            ),
+            # Backward-compatible top-level fields.
+            "status": execution_status,
+            "verified": verified,
+
+            # Full canonical execution result.
             "execution": execution_result,
+
+            # Canonical synchronization result.
             "canonical_sync": sync_result,
+
             "execution_mode": "demo",
             "live_authorization": False,
             "live_trading_enabled": False,
@@ -380,6 +398,7 @@ class DemoExecutionWorker:
                             self.interval_seconds
                         ),
                     )
+
                 except asyncio.TimeoutError:
                     pass
 
@@ -440,8 +459,10 @@ class DemoExecutionWorker:
 
         try:
             await task
+
         except asyncio.CancelledError:
             pass
+
         finally:
             self._task = None
             self._running = False
