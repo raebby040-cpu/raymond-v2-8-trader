@@ -3,8 +3,8 @@ RAYMOND v2.8 - Canonical Trading State
 
 Batch 1 - Canonical Trading State Foundation
 
-This module establishes the single persistent application-level
-source of truth for Raymond trading positions and account snapshots.
+This module establishes the persistent application-level
+source of truth for Raymond trading positions and account state.
 
 Architecture:
 
@@ -27,12 +27,11 @@ IMPORTANT:
 - This module does NOT place broker orders.
 - This module does NOT modify MT5 positions.
 - This module does NOT enable live trading.
-- It does NOT replace broker reality.
+- PAPER accounting is sourced from the persistent paper account.
+- DEMO/LIVE account snapshots remain available through the
+  canonical trading-state snapshot table.
+- PostgreSQL remains the application persistence layer.
 - MT5 remains authoritative for actual broker execution.
-- PostgreSQL is authoritative for Raymond application state.
-- Reconciliation keeps the two synchronized.
-
-The strategy is intentionally not implemented here.
 """
 
 from __future__ import annotations
@@ -49,6 +48,15 @@ try:
     from .database import Base, SessionLocal
 except ImportError:
     from database import Base, SessionLocal
+
+try:
+    from .persistent_paper_account import (
+        build_persistent_paper_account,
+    )
+except ImportError:
+    from persistent_paper_account import (
+        build_persistent_paper_account,
+    )
 
 
 # ============================================================
@@ -84,7 +92,6 @@ def utc_now() -> datetime:
     """
     Return a timezone-aware UTC timestamp.
     """
-
     return datetime.now(timezone.utc)
 
 
@@ -96,9 +103,9 @@ class CanonicalTradingPosition(Base):
     """
     Canonical persistent application state for one trading position.
 
-    This table intentionally uses String values for mode/side/status
-    instead of SQLAlchemy enums so that PAPER, DEMO and LIVE can
-    evolve without destructive enum migrations.
+    String values are intentionally used for mode/side/status so
+    PAPER, DEMO and LIVE can evolve without destructive enum
+    migrations.
     """
 
     __tablename__ = "canonical_trading_positions"
@@ -397,10 +404,11 @@ class TradingAccountSnapshot(Base):
     """
     Persistent account-level trading state.
 
-    One snapshot row represents the latest known account state for
-    a mode/account combination.
+    DEMO/LIVE may use this snapshot representation.
 
-    The latest row is the authoritative Raymond application snapshot.
+    PAPER does not use this table as its authoritative account
+    calculation. PAPER is calculated directly from the persistent
+    paper position/account system.
     """
 
     __tablename__ = "trading_account_snapshots"
@@ -584,7 +592,8 @@ def calculate_unrealized_pnl(
         return 0.0
 
     movement = (
-        float(current_price) - float(entry_price)
+        float(current_price)
+        - float(entry_price)
     )
 
     if normalize_side(side) == "sell":
@@ -638,7 +647,8 @@ def calculate_current_r(
         return None
 
     movement = (
-        float(current_price) - float(entry_price)
+        float(current_price)
+        - float(entry_price)
     )
 
     if normalize_side(side) == "sell":
@@ -703,16 +713,36 @@ def serialize_position(
         "partial_close_applied": bool(
             position.partial_close_applied
         ),
-        "partial_close_quantity": position.partial_close_quantity,
-        "partial_close_price": position.partial_close_price,
-        "management_status": position.management_status,
-        "protection_status": position.protection_status,
-        "reconciliation_status": position.reconciliation_status,
-        "broker_position_ticket": position.broker_position_ticket,
-        "broker_order_ticket": position.broker_order_ticket,
-        "broker_deal_ticket": position.broker_deal_ticket,
-        "client_order_id": position.client_order_id,
-        "strategy_signal_id": position.strategy_signal_id,
+        "partial_close_quantity": (
+            position.partial_close_quantity
+        ),
+        "partial_close_price": (
+            position.partial_close_price
+        ),
+        "management_status": (
+            position.management_status
+        ),
+        "protection_status": (
+            position.protection_status
+        ),
+        "reconciliation_status": (
+            position.reconciliation_status
+        ),
+        "broker_position_ticket": (
+            position.broker_position_ticket
+        ),
+        "broker_order_ticket": (
+            position.broker_order_ticket
+        ),
+        "broker_deal_ticket": (
+            position.broker_deal_ticket
+        ),
+        "client_order_id": (
+            position.client_order_id
+        ),
+        "strategy_signal_id": (
+            position.strategy_signal_id
+        ),
         "magic": position.magic,
         "comment": position.comment,
         "trade_thesis": position.trade_thesis,
@@ -755,8 +785,12 @@ def serialize_account(
         "broker": snapshot.broker,
         "server": snapshot.server,
         "currency": snapshot.currency,
-        "balance": float(snapshot.balance or 0.0),
-        "equity": float(snapshot.equity or 0.0),
+        "balance": float(
+            snapshot.balance or 0.0
+        ),
+        "equity": float(
+            snapshot.equity or 0.0
+        ),
         "floating_pnl": float(
             snapshot.floating_pnl or 0.0
         ),
@@ -766,7 +800,9 @@ def serialize_account(
         "available_balance": float(
             snapshot.available_balance or 0.0
         ),
-        "margin": float(snapshot.margin or 0.0),
+        "margin": float(
+            snapshot.margin or 0.0
+        ),
         "free_margin": float(
             snapshot.free_margin or 0.0
         ),
@@ -788,13 +824,13 @@ def serialize_account(
 
 class TradingStateRepository:
     """
-    The canonical application-state repository.
+    Canonical application-state repository.
 
-    All application-level position mutations should eventually
-    pass through this class.
+    Application-level position mutations should eventually pass
+    through this class.
 
-    Broker execution code should not maintain a second competing
-    persistent position representation.
+    Broker execution code must not create a second competing
+    persistent representation.
     """
 
     def __init__(self, db: Session):
@@ -873,7 +909,12 @@ class TradingStateRepository:
             .order_by(
                 CanonicalTradingPosition.updated_at.desc()
             )
-            .limit(max(1, min(int(limit), 500)))
+            .limit(
+                max(
+                    1,
+                    min(int(limit), 500),
+                )
+            )
             .all()
         )
 
@@ -924,7 +965,10 @@ class TradingStateRepository:
         now = utc_now()
 
         position = CanonicalTradingPosition(
-            canonical_id=f"RAYMOND-{mode.upper()}-{uuid4().hex}",
+            canonical_id=(
+                f"RAYMOND-{mode.upper()}-"
+                f"{uuid4().hex}"
+            ),
             mode=mode,
             broker_account_id=broker_account_id,
             broker=broker,
@@ -939,9 +983,11 @@ class TradingStateRepository:
             current_price=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            take_profit_1=take_profit_1
-            if take_profit_1 is not None
-            else take_profit,
+            take_profit_1=(
+                take_profit_1
+                if take_profit_1 is not None
+                else take_profit
+            ),
             take_profit_2=take_profit_2,
             realized_pnl=float(realized_pnl),
             unrealized_pnl=0.0,
@@ -1139,7 +1185,8 @@ class TradingStateRepository:
 
         if close_volume > float(position.volume):
             raise ValueError(
-                "Partial-close volume exceeds remaining position volume."
+                "Partial-close volume exceeds remaining "
+                "position volume."
             )
 
         realized_delta = calculate_unrealized_pnl(
@@ -1238,14 +1285,16 @@ class TradingStateRepository:
         position.last_price_update = utc_now()
         position.updated_at = utc_now()
 
-        position.pnl_percent = calculate_pnl_percent(
-            symbol=position.symbol,
-            entry_price=position.entry_price,
-            volume=max(
-                float(position.original_volume),
-                0.00000001,
-            ),
-            total_pnl=position.total_pnl,
+        position.pnl_percent = (
+            calculate_pnl_percent(
+                symbol=position.symbol,
+                entry_price=position.entry_price,
+                volume=max(
+                    float(position.original_volume),
+                    0.00000001,
+                ),
+                total_pnl=position.total_pnl,
+            )
         )
 
         self.db.commit()
@@ -1325,6 +1374,7 @@ class TradingStateRepository:
         snapshot.broker = broker
         snapshot.server = server
         snapshot.currency = currency
+
         snapshot.balance = float(balance)
         snapshot.equity = float(equity)
         snapshot.floating_pnl = float(floating_pnl)
@@ -1372,6 +1422,10 @@ router = APIRouter(
 )
 
 
+# ============================================================
+# POSITIONS
+# ============================================================
+
 @router.get("/positions")
 def canonical_positions(
     mode: Optional[str] = Query(
@@ -1390,9 +1444,9 @@ def canonical_positions(
     ),
 ):
     """
-    Read the canonical Raymond position state.
+    Read canonical Raymond positions.
 
-    This endpoint is intentionally read-only.
+    This endpoint is read-only.
     """
 
     db = SessionLocal()
@@ -1409,7 +1463,9 @@ def canonical_positions(
 
         return {
             "status": "ok",
-            "source_of_truth": "raymond_canonical_trading_state",
+            "source_of_truth": (
+                "raymond_canonical_trading_state"
+            ),
             "positions": [
                 serialize_position(position)
                 for position in positions
@@ -1424,6 +1480,12 @@ def canonical_positions(
 def canonical_position(
     canonical_id: str,
 ):
+    """
+    Read one canonical position.
+
+    This endpoint is read-only.
+    """
+
     db = SessionLocal()
 
     try:
@@ -1437,7 +1499,9 @@ def canonical_position(
             raise HTTPException(
                 status_code=404,
                 detail={
-                    "error": "CANONICAL_POSITION_NOT_FOUND",
+                    "error": (
+                        "CANONICAL_POSITION_NOT_FOUND"
+                    ),
                     "canonical_id": canonical_id,
                 },
             )
@@ -1447,12 +1511,18 @@ def canonical_position(
             "source_of_truth": (
                 "raymond_canonical_trading_state"
             ),
-            "position": serialize_position(position),
+            "position": serialize_position(
+                position
+            ),
         }
 
     finally:
         db.close()
 
+
+# ============================================================
+# ACCOUNT
+# ============================================================
 
 @router.get("/account/{mode}")
 def canonical_account(
@@ -1461,16 +1531,27 @@ def canonical_account(
         default=None,
     ),
 ):
+    """
+    Return the canonical account state.
+
+    PAPER:
+        Calculated directly from the persistent paper account.
+
+        balance = $1,000 + realized P&L
+        equity  = balance + unrealized P&L
+
+    DEMO/LIVE:
+        Read from TradingAccountSnapshot.
+
+    This prevents the Flutter PAPER dashboard from receiving
+    stale account values from an unrelated snapshot row.
+    """
+
     db = SessionLocal()
 
     try:
-        repository = TradingStateRepository(db)
-
         try:
-            snapshot = repository.get_latest_account(
-                mode=mode,
-                broker_account_id=broker_account_id,
-            )
+            normalized_mode = normalize_mode(mode)
         except ValueError as exc:
             raise HTTPException(
                 status_code=400,
@@ -1479,6 +1560,36 @@ def canonical_account(
                     "message": str(exc),
                 },
             ) from exc
+
+        # ====================================================
+        # PAPER ACCOUNT
+        # ====================================================
+        #
+        # PAPER is calculated from persistent paper positions.
+        #
+        # This is the authoritative paper accounting path.
+        #
+        if normalized_mode == "paper":
+            account = build_persistent_paper_account(db)
+
+            return {
+                "status": "ok",
+                "source_of_truth": (
+                    "persistent_paper_positions"
+                ),
+                "account": account,
+            }
+
+        # ====================================================
+        # DEMO / LIVE ACCOUNT
+        # ====================================================
+
+        repository = TradingStateRepository(db)
+
+        snapshot = repository.get_latest_account(
+            mode=normalized_mode,
+            broker_account_id=broker_account_id,
+        )
 
         if snapshot is None:
             return {
@@ -1503,6 +1614,10 @@ def canonical_account(
         db.close()
 
 
+# ============================================================
+# HEALTH
+# ============================================================
+
 @router.get("/health")
 def canonical_health():
     return {
@@ -1511,10 +1626,17 @@ def canonical_health():
         "application_source_of_truth": (
             "postgresql_or_runtime_sqlalchemy_database"
         ),
+        "paper_account_source_of_truth": (
+            "persistent_paper_positions"
+        ),
         "broker_reality_source": "mt5_broker",
         "live_trading_enabled": False,
     }
 
+
+# ============================================================
+# PUBLIC EXPORTS
+# ============================================================
 
 __all__ = [
     "CanonicalTradingPosition",
@@ -1526,4 +1648,4 @@ __all__ = [
     "serialize_position",
     "serialize_account",
     "router",
-  ]
+]
