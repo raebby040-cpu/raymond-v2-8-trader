@@ -47,8 +47,7 @@ class _BrokerAccountsPageState
     });
 
     try {
-      final response =
-          await widget.api.brokerAccounts();
+      final response = await widget.api.brokerAccounts();
 
       final rawAccounts = response['accounts'];
 
@@ -75,8 +74,7 @@ class _BrokerAccountsPageState
 
       setState(() {
         loading = false;
-        errorMessage =
-            _friendlyError(error);
+        errorMessage = _friendlyError(error);
       });
     }
   }
@@ -133,65 +131,47 @@ class _BrokerAccountsPageState
               ),
               content: SingleChildScrollView(
                 child: Column(
-                  mainAxisSize:
-                      MainAxisSize.min,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     _dialogField(
-                      controller:
-                          brokerController,
+                      controller: brokerController,
                       label: 'Broker',
                       hint: 'Exness',
-                      icon:
-                          Icons.business_outlined,
+                      icon: Icons.business_outlined,
                     ),
                     const SizedBox(height: 12),
                     _dialogField(
-                      controller:
-                          platformController,
+                      controller: platformController,
                       label: 'Platform',
                       hint: 'MT5',
-                      icon:
-                          Icons.devices_outlined,
+                      icon: Icons.devices_outlined,
                     ),
                     const SizedBox(height: 12),
                     _dialogField(
-                      controller:
-                          serverController,
+                      controller: serverController,
                       label: 'MT5 Server',
-                      hint:
-                          'Example: Exness-MT5Real',
-                      icon:
-                          Icons.dns_outlined,
+                      hint: 'Example: Exness-MT5Real',
+                      icon: Icons.dns_outlined,
                     ),
                     const SizedBox(height: 12),
                     _dialogField(
-                      controller:
-                          accountNumberController,
+                      controller: accountNumberController,
                       label: 'Account Number',
                       hint: 'MT5 account number',
-                      icon:
-                          Icons.badge_outlined,
-                      keyboardType:
-                          TextInputType.number,
+                      icon: Icons.badge_outlined,
+                      keyboardType: TextInputType.number,
                     ),
                     const SizedBox(height: 12),
                     TextField(
-                      controller:
-                          credentialController,
-                      obscureText:
-                          obscureCredential,
-                      decoration:
-                          InputDecoration(
-                        labelText:
-                            'Credential Reference',
-                        hintText:
-                            'Secure secret reference',
-                        prefixIcon:
-                            const Icon(
+                      controller: credentialController,
+                      obscureText: obscureCredential,
+                      decoration: InputDecoration(
+                        labelText: 'Credential Reference',
+                        hintText: 'Secure secret reference',
+                        prefixIcon: const Icon(
                           Icons.key_outlined,
                         ),
-                        suffixIcon:
-                            IconButton(
+                        suffixIcon: IconButton(
                           onPressed: () {
                             setDialogState(() {
                               obscureCredential =
@@ -200,10 +180,8 @@ class _BrokerAccountsPageState
                           },
                           icon: Icon(
                             obscureCredential
-                                ? Icons.visibility
-                                    .outlined
-                                : Icons
-                                    .visibility_off_outlined,
+                                ? Icons.visibility_outlined
+                                : Icons.visibility_off_outlined,
                           ),
                         ),
                         border:
@@ -219,11 +197,8 @@ class _BrokerAccountsPageState
                         color:
                             gold.withOpacity(.08),
                         borderRadius:
-                            BorderRadius.circular(
-                          12,
-                        ),
-                        border:
-                            Border.all(
+                            BorderRadius.circular(12),
+                        border: Border.all(
                           color:
                               gold.withOpacity(.25),
                         ),
@@ -256,111 +231,95 @@ class _BrokerAccountsPageState
               ),
               actions: [
                 TextButton(
-                  onPressed:
-                      dialogSubmitting
-                          ? null
-                          : () {
-                              Navigator.of(
-                                dialogContext,
-                              ).pop(false);
-                            },
-                  child:
-                      const Text('Cancel'),
+                  onPressed: dialogSubmitting
+                      ? null
+                      : () {
+                          Navigator.of(
+                            dialogContext,
+                          ).pop(false);
+                        },
+                  child: const Text('Cancel'),
                 ),
                 FilledButton.icon(
-                  onPressed:
-                      dialogSubmitting
-                          ? null
-                          : () async {
-                              final broker =
-                                  brokerController
-                                      .text
-                                      .trim();
+                  onPressed: dialogSubmitting
+                      ? null
+                      : () async {
+                          final broker =
+                              brokerController.text.trim();
 
-                              final platform =
-                                  platformController
-                                      .text
-                                      .trim();
+                          final platform =
+                              platformController.text.trim();
 
-                              final server =
-                                  serverController
-                                      .text
-                                      .trim();
+                          final server =
+                              serverController.text.trim();
 
-                              final accountNumber =
-                                  accountNumberController
-                                      .text
-                                      .trim();
+                          final accountNumber =
+                              accountNumberController
+                                  .text
+                                  .trim();
 
-                              final credentialRef =
-                                  credentialController
-                                      .text
-                                      .trim();
+                          final credentialRef =
+                              credentialController
+                                  .text
+                                  .trim();
 
-                              if (broker.isEmpty ||
-                                  platform.isEmpty ||
-                                  server.isEmpty ||
-                                  accountNumber.isEmpty ||
-                                  credentialRef.isEmpty) {
-                                ScaffoldMessenger
-                                    .of(
-                                  dialogContext,
-                                ).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      'Please complete all fields.',
-                                    ),
-                                  ),
-                                );
+                          if (broker.isEmpty ||
+                              platform.isEmpty ||
+                              server.isEmpty ||
+                              accountNumber.isEmpty ||
+                              credentialRef.isEmpty) {
+                            ScaffoldMessenger.of(
+                              dialogContext,
+                            ).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Please complete all fields.',
+                                ),
+                              ),
+                            );
 
-                                return;
-                              }
+                            return;
+                          }
 
-                              setDialogState(() {
-                                dialogSubmitting =
-                                    true;
-                              });
+                          setDialogState(() {
+                            dialogSubmitting = true;
+                          });
 
-                              try {
-                                await widget.api
-                                    .createBrokerAccount(
-                                  broker: broker,
-                                  platform:
-                                      platform,
-                                  server: server,
-                                  accountNumber:
-                                      accountNumber,
-                                  credentialRef:
-                                      credentialRef,
-                                );
+                          try {
+                            await widget.api
+                                .createBrokerAccount(
+                              broker: broker,
+                              platform: platform,
+                              server: server,
+                              accountNumber:
+                                  accountNumber,
+                              credentialRef:
+                                  credentialRef,
+                            );
 
-                                if (!mounted) {
-                                  return;
-                                }
+                            if (!mounted) {
+                              return;
+                            }
 
-                                Navigator.of(
-                                  dialogContext,
-                                ).pop(true);
-                              } catch (error) {
-                                setDialogState(() {
-                                  dialogSubmitting =
-                                      false;
-                                });
+                            Navigator.of(
+                              dialogContext,
+                            ).pop(true);
+                          } catch (error) {
+                            setDialogState(() {
+                              dialogSubmitting = false;
+                            });
 
-                                ScaffoldMessenger
-                                    .of(
-                                  dialogContext,
-                                ).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      _friendlyError(
-                                        error,
-                                      ),
-                                    ),
-                                  ),
-                                );
-                              }
-                            },
+                            ScaffoldMessenger.of(
+                              dialogContext,
+                            ).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  _friendlyError(error),
+                                ),
+                              ),
+                            );
+                          }
+                        },
                   icon: dialogSubmitting
                       ? const SizedBox(
                           width: 16,
@@ -370,12 +329,8 @@ class _BrokerAccountsPageState
                             strokeWidth: 2,
                           ),
                         )
-                      : const Icon(
-                          Icons.add,
-                        ),
-                  label: const Text(
-                    'Add Account',
-                  ),
+                      : const Icon(Icons.add),
+                  label: const Text('Add Account'),
                 ),
               ],
             );
@@ -395,8 +350,7 @@ class _BrokerAccountsPageState
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
             'Broker account added successfully.',
@@ -420,8 +374,7 @@ class _BrokerAccountsPageState
         labelText: label,
         hintText: hint,
         prefixIcon: Icon(icon),
-        border:
-            const OutlineInputBorder(),
+        border: const OutlineInputBorder(),
       ),
     );
   }
@@ -432,8 +385,7 @@ class _BrokerAccountsPageState
     final accountId =
         account['account_id']?.toString();
 
-    if (accountId == null ||
-        accountId.isEmpty) {
+    if (accountId == null || accountId.isEmpty) {
       return;
     }
 
@@ -442,8 +394,7 @@ class _BrokerAccountsPageState
     });
 
     try {
-      await widget.api
-          .selectBrokerAccount(
+      await widget.api.selectBrokerAccount(
         accountId,
       );
 
@@ -451,8 +402,7 @@ class _BrokerAccountsPageState
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
             'Broker account selected. Live authorization remains disabled.',
@@ -462,8 +412,7 @@ class _BrokerAccountsPageState
     } catch (error) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             _friendlyError(error),
@@ -485,8 +434,7 @@ class _BrokerAccountsPageState
     final accountId =
         account['account_id']?.toString();
 
-    if (accountId == null ||
-        accountId.isEmpty) {
+    if (accountId == null || accountId.isEmpty) {
       return;
     }
 
@@ -495,8 +443,7 @@ class _BrokerAccountsPageState
     });
 
     try {
-      await widget.api
-          .disableBrokerLive(
+      await widget.api.disableBrokerLive(
         accountId,
       );
 
@@ -504,8 +451,7 @@ class _BrokerAccountsPageState
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
             'Live trading authorization disabled.',
@@ -515,8 +461,7 @@ class _BrokerAccountsPageState
     } catch (error) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             _friendlyError(error),
@@ -538,8 +483,7 @@ class _BrokerAccountsPageState
     final accountId =
         account['account_id']?.toString();
 
-    if (accountId == null ||
-        accountId.isEmpty) {
+    if (accountId == null || accountId.isEmpty) {
       return;
     }
 
@@ -549,33 +493,27 @@ class _BrokerAccountsPageState
       builder: (context) {
         return AlertDialog(
           backgroundColor: card,
-          title:
-              const Text('Delete account?'),
+          title: const Text('Delete account?'),
           content: const Text(
             'This removes the broker account record from Raymond. A selected account cannot be deleted.',
           ),
           actions: [
             TextButton(
-              onPressed: () =>
-                  Navigator.pop(
+              onPressed: () => Navigator.pop(
                 context,
                 false,
               ),
-              child:
-                  const Text('Cancel'),
+              child: const Text('Cancel'),
             ),
             FilledButton(
-              style:
-                  FilledButton.styleFrom(
+              style: FilledButton.styleFrom(
                 backgroundColor: red,
               ),
-              onPressed: () =>
-                  Navigator.pop(
+              onPressed: () => Navigator.pop(
                 context,
                 true,
               ),
-              child:
-                  const Text('Delete'),
+              child: const Text('Delete'),
             ),
           ],
         );
@@ -591,8 +529,7 @@ class _BrokerAccountsPageState
     });
 
     try {
-      await widget.api
-          .deleteBrokerAccount(
+      await widget.api.deleteBrokerAccount(
         accountId,
       );
 
@@ -600,8 +537,7 @@ class _BrokerAccountsPageState
 
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
             'Broker account deleted.',
@@ -611,8 +547,7 @@ class _BrokerAccountsPageState
     } catch (error) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             _friendlyError(error),
@@ -642,8 +577,7 @@ class _BrokerAccountsPageState
             Text(
               'Broker Accounts',
               style: TextStyle(
-                fontWeight:
-                    FontWeight.w800,
+                fontWeight: FontWeight.w800,
               ),
             ),
             Text(
@@ -659,9 +593,7 @@ class _BrokerAccountsPageState
           IconButton(
             onPressed:
                 loading ? null : _loadAccounts,
-            icon: const Icon(
-              Icons.refresh,
-            ),
+            icon: const Icon(Icons.refresh),
           ),
         ],
       ),
@@ -673,14 +605,11 @@ class _BrokerAccountsPageState
             submitting
                 ? null
                 : _showAddAccountDialog,
-        icon: const Icon(
-          Icons.add,
-        ),
+        icon: const Icon(Icons.add),
         label: const Text(
           'Add Broker',
           style: TextStyle(
-            fontWeight:
-                FontWeight.bold,
+            fontWeight: FontWeight.bold,
           ),
         ),
       ),
@@ -688,8 +617,7 @@ class _BrokerAccountsPageState
         onRefresh: _loadAccounts,
         child: loading
             ? const Center(
-                child:
-                    CircularProgressIndicator(
+                child: CircularProgressIndicator(
                   color: gold,
                 ),
               )
@@ -741,14 +669,11 @@ class _BrokerAccountsPageState
           style: const TextStyle(
             color: muted,
             fontSize: 13,
-            fontWeight:
-                FontWeight.w600,
+            fontWeight: FontWeight.w600,
           ),
         ),
         const SizedBox(height: 10),
-        ...accounts.map(
-          _accountCard,
-        ),
+        ...accounts.map(_accountCard),
       ],
     );
   }
@@ -758,8 +683,7 @@ class _BrokerAccountsPageState
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: card,
-        borderRadius:
-            BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(
           color: border,
         ),
@@ -778,8 +702,7 @@ class _BrokerAccountsPageState
             'Connect your broker',
             style: TextStyle(
               fontSize: 20,
-              fontWeight:
-                  FontWeight.w800,
+              fontWeight: FontWeight.w800,
             ),
           ),
           SizedBox(height: 8),
@@ -800,8 +723,7 @@ class _BrokerAccountsPageState
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: gold.withOpacity(.07),
-        borderRadius:
-            BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: gold.withOpacity(.25),
         ),
@@ -835,8 +757,7 @@ class _BrokerAccountsPageState
       padding: const EdgeInsets.all(30),
       decoration: BoxDecoration(
         color: card,
-        borderRadius:
-            BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(
           color: border,
         ),
@@ -853,8 +774,7 @@ class _BrokerAccountsPageState
             'No broker accounts',
             style: TextStyle(
               fontSize: 18,
-              fontWeight:
-                  FontWeight.w700,
+              fontWeight: FontWeight.w700,
             ),
           ),
           SizedBox(height: 6),
@@ -875,8 +795,7 @@ class _BrokerAccountsPageState
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: red.withOpacity(.07),
-        borderRadius:
-            BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: red.withOpacity(.3),
         ),
@@ -893,8 +812,7 @@ class _BrokerAccountsPageState
           const Text(
             'Unable to load broker accounts',
             style: TextStyle(
-              fontWeight:
-                  FontWeight.bold,
+              fontWeight: FontWeight.bold,
             ),
           ),
           const SizedBox(height: 6),
@@ -908,11 +826,8 @@ class _BrokerAccountsPageState
           const SizedBox(height: 14),
           FilledButton.icon(
             onPressed: _loadAccounts,
-            icon: const Icon(
-              Icons.refresh,
-            ),
-            label:
-                const Text('Retry'),
+            icon: const Icon(Icons.refresh),
+            label: const Text('Retry'),
           ),
         ],
       ),
@@ -932,42 +847,33 @@ class _BrokerAccountsPageState
         account['trading_allowed'] == true;
 
     final liveAuthorized =
-        account['live_trading_authorized'] ==
-            true;
+        account['live_trading_authorized'] == true;
 
     final connection =
-        account['connection_status']
-            ?.toString() ??
-        'disconnected';
+        account['connection_status']?.toString() ??
+            'disconnected';
 
     final broker =
         account['broker']?.toString() ??
-        'Unknown broker';
+            'Unknown broker';
 
     final platform =
-        account['platform']?.toString() ??
-        'MT5';
+        account['platform']?.toString() ?? 'MT5';
 
     final server =
         account['server']?.toString() ??
-        'Unknown server';
+            'Unknown server';
 
     final accountNumber =
-        account['account_number']
-            ?.toString() ??
-        '****';
+        account['account_number']?.toString() ??
+            '****';
 
-    final balance =
-        account['balance'];
-
-    final equity =
-        account['equity'];
+    final balance = account['balance'];
+    final equity = account['equity'];
 
     return Container(
       margin:
-          const EdgeInsets.only(
-        bottom: 14,
-      ),
+          const EdgeInsets.only(bottom: 14),
       padding:
           const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -995,9 +901,7 @@ class _BrokerAccountsPageState
                   color:
                       gold.withOpacity(.1),
                   borderRadius:
-                      BorderRadius.circular(
-                    14,
-                  ),
+                      BorderRadius.circular(14),
                 ),
                 child: const Icon(
                   Icons.account_balance,
@@ -1059,32 +963,23 @@ class _BrokerAccountsPageState
             'Connection',
             connection.toUpperCase(),
             valueColor:
-                connection ==
-                        'connected'
+                connection == 'connected'
                     ? green
                     : muted,
           ),
           _infoRow(
             Icons.verified_outlined,
             'Account verified',
-            verified
-                ? 'YES'
-                : 'NO',
+            verified ? 'YES' : 'NO',
             valueColor:
-                verified
-                    ? green
-                    : muted,
+                verified ? green : muted,
           ),
           _infoRow(
             Icons.lock_outline,
             'Trading allowed',
-            tradingAllowed
-                ? 'YES'
-                : 'NO',
+            tradingAllowed ? 'YES' : 'NO',
             valueColor:
-                tradingAllowed
-                    ? green
-                    : muted,
+                tradingAllowed ? green : muted,
           ),
           _infoRow(
             Icons.shield_outlined,
@@ -1093,13 +988,12 @@ class _BrokerAccountsPageState
                 ? 'AUTHORIZED'
                 : 'DISABLED',
             valueColor:
-                liveAuthorized
-                    ? red
-                    : green,
+                liveAuthorized ? red : green,
           ),
           if (balance is num)
             _infoRow(
-              Icons.account_balance_wallet_outlined,
+              Icons
+                  .account_balance_wallet_outlined,
               'Balance',
               _money(balance),
             ),
@@ -1145,16 +1039,13 @@ class _BrokerAccountsPageState
                   Icons.lock_outline,
                 ),
                 label:
-                    const Text(
-                  'Disable Live',
-                ),
+                    const Text('Disable Live'),
               ),
               OutlinedButton.icon(
                 style:
                     OutlinedButton.styleFrom(
                   foregroundColor: red,
-                  side:
-                      BorderSide(
+                  side: BorderSide(
                     color:
                         red.withOpacity(.4),
                   ),
@@ -1242,8 +1133,7 @@ class _BrokerAccountsPageState
           Flexible(
             child: Text(
               value,
-              textAlign:
-                  TextAlign.right,
+              textAlign: TextAlign.right,
               style: TextStyle(
                 color: valueColor,
                 fontSize: 12,
