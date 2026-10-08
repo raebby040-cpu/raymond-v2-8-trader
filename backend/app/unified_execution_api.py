@@ -1,14 +1,16 @@
 """
 RAYMOND v2.8 - Unified Execution API
 
-One API for both DEMO and LIVE.
+One authenticated API surface for DEMO and LIVE execution.
 
 DEMO:
     Uses the controlled MT5 DEMO executor.
 
 LIVE:
-    Uses the existing LiveExecutionGateway and therefore retains
-    the existing independent live safety architecture.
+    Uses the existing LiveExecutionGateway and its independent
+    fail-closed safety architecture.
+
+This module does not modify the Raymond strategy.
 """
 
 from __future__ import annotations
@@ -28,17 +30,13 @@ from app.demo_mt5_execution import (
     DemoExecutionError,
     demo_mt5_execution_engine,
 )
-from app.execution_mode import (
-    ExecutionMode,
-)
+from app.execution_mode import ExecutionMode
 from app.live_execution_gateway import (
     LiveExecutionError,
     LiveOrderRequest,
     live_execution_gateway,
 )
-from app.live_safety_gate import (
-    require_live_armed,
-)
+from app.live_safety_gate import require_live_armed
 
 
 router = APIRouter(
@@ -76,29 +74,147 @@ class ExecutionRequest(BaseModel):
 
 
 class LiveExecutionPayload(BaseModel):
+    """
+    Explicit LIVE order request.
+
+    Price is deliberately NOT accepted here.
+
+    The live gateway obtains and validates the current broker
+    market price immediately before order submission.
+    """
+
     mode: ExecutionMode
 
-    symbol: str
+    symbol: str = Field(
+        min_length=1,
+        max_length=32,
+    )
 
-    side: str
+    side: str = Field(
+        min_length=3,
+        max_length=4,
+    )
 
-    volume: float
+    volume: float = Field(
+        gt=0,
+    )
 
-    price: float
+    stop_loss: float = Field(
+        gt=0,
+    )
 
-    stop_loss: float
+    take_profit: float = Field(
+        gt=0,
+    )
 
-    take_profit: float
+    client_order_id: str | None = Field(
+        default=None,
+        max_length=128,
+    )
 
-    client_order_id: str | None = None
+
+def _result_to_dict(
+    result: Any,
+) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "execution_mode": result.execution_mode,
+        "signal_id": getattr(
+            result,
+            "signal_id",
+            None,
+        ),
+        "symbol": result.symbol,
+        "side": result.side,
+        "volume": getattr(
+            result,
+            "volume",
+            getattr(
+                result,
+                "requested_volume",
+                None,
+            ),
+        ),
+        "requested_price": getattr(
+            result,
+            "requested_price",
+            None,
+        ),
+        "executed_price": getattr(
+            result,
+            "executed_price",
+            None,
+        ),
+        "stop_loss": getattr(
+            result,
+            "stop_loss",
+            getattr(
+                result,
+                "requested_stop_loss",
+                None,
+            ),
+        ),
+        "take_profit": getattr(
+            result,
+            "take_profit",
+            getattr(
+                result,
+                "requested_take_profit",
+                None,
+            ),
+        ),
+        "order_ticket": getattr(
+            result,
+            "order_ticket",
+            getattr(
+                result,
+                "order_id",
+                None,
+            ),
+        ),
+        "deal_ticket": getattr(
+            result,
+            "deal_ticket",
+            getattr(
+                result,
+                "deal_id",
+                None,
+            ),
+        ),
+        "position_ticket": getattr(
+            result,
+            "position_ticket",
+            None,
+        ),
+        "broker_retcode": getattr(
+            result,
+            "broker_retcode",
+            None,
+        ),
+        "broker_comment": getattr(
+            result,
+            "broker_comment",
+            None,
+        ),
+        "verified": result.verified,
+        "reason": getattr(
+            result,
+            "reason",
+            "",
+        ),
+        "client_order_id": getattr(
+            result,
+            "client_order_id",
+            None,
+        ),
+        "timestamp": result.timestamp,
+    }
 
 
-@router.get(
-    "/status"
-)
+@router.get("/status")
 async def execution_status() -> dict[str, Any]:
     """
-    Return the unified execution state.
+    Return unified execution state.
 
     This endpoint never creates or modifies an order.
     """
@@ -115,6 +231,7 @@ async def execution_status() -> dict[str, Any]:
                 "available": True,
                 "existing_live_gateway": True,
                 "independent_safety_gate": True,
+                "fail_closed": True,
             },
         },
         "strategy": {
@@ -127,16 +244,19 @@ async def execution_status() -> dict[str, Any]:
     }
 
 
-@router.post(
-    "/evaluate"
-)
+@router.post("/evaluate")
 async def evaluate_execution(
     request: ExecutionRequest,
 ) -> dict[str, Any]:
     """
-    Run the frozen strategy and, for DEMO mode, execute the result.
+    Evaluate the frozen strategy.
 
-    LIVE is deliberately not automatically executed by this endpoint.
+    DEMO:
+        Evaluate and execute through the controlled DEMO executor.
+
+    LIVE:
+        Evaluation only. Actual LIVE execution requires the explicit
+        /live-order endpoint plus all existing LIVE gates.
     """
 
     if request.mode is ExecutionMode.LIVE:
@@ -144,8 +264,8 @@ async def evaluate_execution(
             "status": "live_requires_explicit_order",
             "execution_mode": "live",
             "message": (
-                "LIVE mode uses the existing live execution gateway "
-                "and explicit live authorization."
+                "LIVE evaluation does not automatically create an order. "
+                "Use the explicit LIVE order path after authorization."
             ),
             "strategy_frozen": True,
         }
@@ -161,25 +281,8 @@ async def evaluate_execution(
         )
 
         return {
-            "status": result.status,
-            "execution_mode": result.execution_mode,
-            "signal_id": result.signal_id,
-            "symbol": result.symbol,
-            "side": result.side,
-            "volume": result.volume,
-            "requested_price": result.requested_price,
-            "executed_price": result.executed_price,
-            "stop_loss": result.stop_loss,
-            "take_profit": result.take_profit,
-            "order_ticket": result.order_ticket,
-            "deal_ticket": result.deal_ticket,
-            "position_ticket": result.position_ticket,
-            "broker_retcode": result.broker_retcode,
-            "broker_comment": result.broker_comment,
-            "verified": result.verified,
-            "reason": result.reason,
+            **_result_to_dict(result),
             "strategy_frozen": True,
-            "timestamp": result.timestamp,
         }
 
     except DemoExecutionError as exc:
@@ -195,16 +298,14 @@ async def evaluate_execution(
         ) from exc
 
 
-@router.post(
-    "/live-order"
-)
+@router.post("/live-order")
 async def execute_live_order(
     request: LiveExecutionPayload,
 ) -> dict[str, Any]:
     """
     Explicit LIVE execution endpoint.
 
-    This does NOT bypass the existing live safety gate.
+    This endpoint never bypasses the independent LIVE safety gate.
     """
 
     if request.mode is not ExecutionMode.LIVE:
@@ -221,21 +322,10 @@ async def execute_live_order(
     try:
         require_live_armed()
 
-    except PermissionError as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "LIVE_EXECUTION_NOT_ARMED",
-                "message": str(exc),
-            },
-        ) from exc
-
-    try:
         live_request = LiveOrderRequest(
             symbol=request.symbol,
             side=request.side,
             volume=request.volume,
-            price=request.price,
             stop_loss=request.stop_loss,
             take_profit=request.take_profit,
             client_order_id=request.client_order_id,
@@ -257,8 +347,12 @@ async def execute_live_order(
             "side": result.side,
             "requested_volume": result.requested_volume,
             "executed_volume": result.executed_volume,
-            "requested_stop_loss": result.requested_stop_loss,
-            "requested_take_profit": result.requested_take_profit,
+            "requested_stop_loss": (
+                result.requested_stop_loss
+            ),
+            "requested_take_profit": (
+                result.requested_take_profit
+            ),
             "executed_price": result.executed_price,
             "client_order_id": result.client_order_id,
             "broker_retcode": result.broker_retcode,
@@ -266,6 +360,15 @@ async def execute_live_order(
             "verified": result.verified,
             "timestamp": result.timestamp,
         }
+
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "LIVE_EXECUTION_NOT_ARMED",
+                "message": str(exc),
+            },
+        ) from exc
 
     except LiveExecutionError as exc:
         raise HTTPException(
@@ -279,4 +382,4 @@ async def execute_live_order(
 
 __all__ = [
     "router",
-      ]
+]
