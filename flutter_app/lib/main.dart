@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'analysis_page.dart';
 import 'api_service.dart';
+import 'broker_accounts_page.dart';
 import 'chart_page.dart';
 import 'positions_page.dart';
 import 'settings_page.dart';
@@ -31,6 +32,7 @@ class RaymondApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
         fontFamily: 'Roboto',
+        useMaterial3: true,
       ),
       home: HomePage(
         startupRefreshEnabled: startupRefreshEnabled,
@@ -83,6 +85,8 @@ class _HomePageState extends State<HomePage> {
 
     if (widget.startupRefreshEnabled) {
       _refresh();
+    } else {
+      loading = false;
     }
   }
 
@@ -111,7 +115,9 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
 
       try {
-        final journalResponse = await _loadPaperJournal();
+        final journalResponse =
+            await _loadPaperJournal();
+
         fetchedTrades = journalResponse;
         fetchedJournal = true;
       } catch (_) {
@@ -123,31 +129,47 @@ class _HomePageState extends State<HomePage> {
       if (!mounted) return;
 
       setState(() {
-        backendOnline = health['status'] == 'healthy';
+        backendOnline =
+            health['status'] == 'healthy';
 
-        final balanceValue = status['balance'];
+        final balanceValue =
+            status['balance'];
+
         if (balanceValue is num) {
-          balance = balanceValue.toDouble();
+          balance =
+              balanceValue.toDouble();
         }
 
-        final pnlValue = performance['total_pnl'];
+        final pnlValue =
+            performance['total_pnl'];
+
         if (pnlValue is num) {
-          totalPnl = pnlValue.toDouble();
+          totalPnl =
+              pnlValue.toDouble();
         }
 
-        final openValue = performance['open_trades'];
+        final openValue =
+            performance['open_trades'];
+
         if (openValue is num) {
-          openTrades = openValue.toInt();
+          openTrades =
+              openValue.toInt();
         } else {
-          final statusOpen = status['open_trades'];
+          final statusOpen =
+              status['open_trades'];
+
           if (statusOpen is num) {
-            openTrades = statusOpen.toInt();
+            openTrades =
+                statusOpen.toInt();
           }
         }
 
-        final totalValue = performance['total_trades'];
+        final totalValue =
+            performance['total_trades'];
+
         if (totalValue is num) {
-          totalTrades = totalValue.toInt();
+          totalTrades =
+              totalValue.toInt();
         }
 
         trades = fetchedTrades;
@@ -160,19 +182,22 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         backendOnline = false;
         loading = false;
-        errorMessage = 'Backend unavailable';
+        errorMessage =
+            'Backend unavailable';
       });
     }
   }
 
-  Future<List<Map<String, dynamic>>> _loadPaperJournal() async {
-    final response = await api.paperJournalTrades(
+  Future<List<Map<String, dynamic>>>
+      _loadPaperJournal() async {
+    final response =
+        await api.paperJournalTrades(
       limit: 50,
       offset: 0,
     );
 
-    final data = response;
-    final rawTrades = data['trades'];
+    final rawTrades =
+        response['trades'];
 
     if (rawTrades is! List) {
       throw const FormatException(
@@ -182,7 +207,12 @@ class _HomePageState extends State<HomePage> {
 
     return rawTrades
         .whereType<Map>()
-        .map((item) => Map<String, dynamic>.from(item))
+        .map(
+          (item) =>
+              Map<String, dynamic>.from(
+            item,
+          ),
+        )
         .toList();
   }
 
@@ -216,23 +246,29 @@ class _HomePageState extends State<HomePage> {
           _connectionBadge(),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: loading ? null : _refresh,
+            onPressed:
+                loading ? null : _refresh,
           ),
         ],
       ),
       body: _buildBody(),
-      bottomNavigationBar: NavigationBar(
-        backgroundColor: const Color(0xFF06111C),
+      bottomNavigationBar:
+          NavigationBar(
+        backgroundColor:
+            const Color(0xFF06111C),
         selectedIndex: selectedIndex,
-        indicatorColor: gold.withOpacity(.16),
-        onDestinationSelected: (index) {
+        indicatorColor:
+            gold.withOpacity(.16),
+        onDestinationSelected:
+            (index) {
           setState(() {
             selectedIndex = index;
           });
         },
         destinations: const [
           NavigationDestination(
-            icon: Icon(Icons.home_outlined),
+            icon:
+                Icon(Icons.home_outlined),
             selectedIcon: Icon(
               Icons.home,
               color: gold,
@@ -269,6 +305,16 @@ class _HomePageState extends State<HomePage> {
           ),
           NavigationDestination(
             icon: Icon(
+              Icons.account_balance_outlined,
+            ),
+            selectedIcon: Icon(
+              Icons.account_balance,
+              color: gold,
+            ),
+            label: 'Brokers',
+          ),
+          NavigationDestination(
+            icon: Icon(
               Icons.settings_outlined,
             ),
             selectedIcon: Icon(
@@ -283,19 +329,23 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _connectionBadge() {
+    final color =
+        backendOnline ? green : red;
+
     return Container(
-      margin: const EdgeInsets.only(right: 8),
-      padding: const EdgeInsets.symmetric(
+      margin:
+          const EdgeInsets.only(right: 8),
+      padding:
+          const EdgeInsets.symmetric(
         horizontal: 9,
         vertical: 5,
       ),
       decoration: BoxDecoration(
-        color: (backendOnline ? green : red)
-            .withOpacity(.12),
-        borderRadius: BorderRadius.circular(20),
+        color: color.withOpacity(.12),
+        borderRadius:
+            BorderRadius.circular(20),
         border: Border.all(
-          color: (backendOnline ? green : red)
-              .withOpacity(.35),
+          color: color.withOpacity(.35),
         ),
       ),
       child: Row(
@@ -303,15 +353,18 @@ class _HomePageState extends State<HomePage> {
           Icon(
             Icons.circle,
             size: 8,
-            color: backendOnline ? green : red,
+            color: color,
           ),
           const SizedBox(width: 5),
           Text(
-            backendOnline ? 'ONLINE' : 'OFFLINE',
+            backendOnline
+                ? 'ONLINE'
+                : 'OFFLINE',
             style: TextStyle(
-              color: backendOnline ? green : red,
+              color: color,
               fontSize: 11,
-              fontWeight: FontWeight.bold,
+              fontWeight:
+                  FontWeight.bold,
             ),
           ),
         ],
@@ -320,28 +373,38 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildBody() {
-    if (selectedIndex == 1) {
-      return ChartPage(api: api);
-    }
+    switch (selectedIndex) {
+      case 1:
+        return ChartPage(api: api);
 
-    if (selectedIndex == 2) {
-      return AnalysisPage(api: api);
-    }
+      case 2:
+        return AnalysisPage(api: api);
 
-    if (selectedIndex == 3) {
-      return PositionsPage(api: api);
-    }
+      case 3:
+        return PositionsPage(api: api);
 
-    if (selectedIndex == 4) {
-      return SettingsPage(api: api);
-    }
+      case 4:
+        return BrokerAccountsPage(
+          api: api,
+        );
 
+      case 5:
+        return SettingsPage(api: api);
+
+      case 0:
+      default:
+        return _homeBody();
+    }
+  }
+
+  Widget _homeBody() {
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
         physics:
             const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(
+        padding:
+            const EdgeInsets.fromLTRB(
           16,
           8,
           16,
@@ -368,7 +431,8 @@ class _HomePageState extends State<HomePage> {
               'Live market connection',
               style: TextStyle(
                 fontSize: 26,
-                fontWeight: FontWeight.w800,
+                fontWeight:
+                    FontWeight.w800,
               ),
             ),
 
@@ -425,11 +489,13 @@ class _HomePageState extends State<HomePage> {
                 'PAPER TRADING',
                 style: TextStyle(
                   color: gold,
-                  fontWeight: FontWeight.bold,
+                  fontWeight:
+                      FontWeight.bold,
                 ),
               ),
               Icon(
-                Icons.account_balance_wallet_outlined,
+                Icons
+                    .account_balance_wallet_outlined,
                 color: gold,
               ),
             ],
@@ -441,13 +507,16 @@ class _HomePageState extends State<HomePage> {
                   '\$${balance.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontSize: 28,
-                    fontWeight: FontWeight.w800,
+                    fontWeight:
+                        FontWeight.w800,
                   ),
                 ),
           const SizedBox(height: 12),
           const Text(
             'Real-money trading is disabled.',
-            style: TextStyle(color: muted),
+            style: TextStyle(
+              color: muted,
+            ),
           ),
         ],
       ),
@@ -466,7 +535,8 @@ class _HomePageState extends State<HomePage> {
             'PERFORMANCE',
             style: TextStyle(
               color: gold,
-              fontWeight: FontWeight.bold,
+              fontWeight:
+                  FontWeight.bold,
             ),
           ),
           const SizedBox(height: 16),
@@ -476,14 +546,18 @@ class _HomePageState extends State<HomePage> {
             children: [
               const Text(
                 'Total P&L',
-                style: TextStyle(color: muted),
+                style: TextStyle(
+                  color: muted,
+                ),
               ),
               Text(
                 '${positive ? '+' : ''}\$${totalPnl.toStringAsFixed(2)}',
                 style: TextStyle(
-                  color: positive ? green : red,
+                  color:
+                      positive ? green : red,
                   fontSize: 20,
-                  fontWeight: FontWeight.bold,
+                  fontWeight:
+                      FontWeight.bold,
                 ),
               ),
             ],
@@ -507,7 +581,8 @@ class _HomePageState extends State<HomePage> {
                 'RECENT PAPER TRADES',
                 style: TextStyle(
                   color: gold,
-                  fontWeight: FontWeight.bold,
+                  fontWeight:
+                      FontWeight.bold,
                 ),
               ),
               if (journalLoaded)
@@ -516,7 +591,8 @@ class _HomePageState extends State<HomePage> {
                   style: TextStyle(
                     color: muted,
                     fontSize: 10,
-                    fontWeight: FontWeight.bold,
+                    fontWeight:
+                        FontWeight.bold,
                   ),
                 ),
             ],
@@ -525,24 +601,31 @@ class _HomePageState extends State<HomePage> {
           if (loading)
             const Center(
               child: Padding(
-                padding: EdgeInsets.all(20),
-                child: CircularProgressIndicator(),
+                padding:
+                    EdgeInsets.all(20),
+                child:
+                    CircularProgressIndicator(),
               ),
             )
           else if (trades.isEmpty)
             const Padding(
-              padding: EdgeInsets.symmetric(
+              padding:
+                  EdgeInsets.symmetric(
                 vertical: 20,
               ),
               child: Center(
                 child: Text(
                   'No paper trades yet.',
-                  style: TextStyle(color: muted),
+                  style: TextStyle(
+                    color: muted,
+                  ),
                 ),
               ),
             )
           else
-            ...trades.take(5).map(_tradeRow),
+            ...trades
+                .take(5)
+                .map(_tradeRow),
         ],
       ),
     );
@@ -552,20 +635,29 @@ class _HomePageState extends State<HomePage> {
     Map<String, dynamic> trade,
   ) {
     final direction =
-        '${trade['direction'] ?? ''}'.toUpperCase();
+        '${trade['direction'] ?? ''}'
+            .toUpperCase();
 
     final pnlValue = trade['pnl'];
-    final pnl =
-        pnlValue is num ? pnlValue.toDouble() : 0.0;
+
+    final pnl = pnlValue is num
+        ? pnlValue.toDouble()
+        : 0.0;
 
     final positive = pnl >= 0;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
+      margin:
+          const EdgeInsets.only(
+        bottom: 8,
+      ),
+      padding:
+          const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFF06111C),
-        borderRadius: BorderRadius.circular(10),
+        color:
+            const Color(0xFF06111C),
+        borderRadius:
+            BorderRadius.circular(10),
       ),
       child: Row(
         children: [
@@ -574,7 +666,9 @@ class _HomePageState extends State<HomePage> {
                 ? Icons.arrow_upward
                 : Icons.arrow_downward,
             color:
-                direction == 'BUY' ? green : red,
+                direction == 'BUY'
+                    ? green
+                    : red,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -584,13 +678,16 @@ class _HomePageState extends State<HomePage> {
               children: [
                 Text(
                   '${trade['symbol'] ?? 'XAUUSD'} $direction',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
+                  style:
+                      const TextStyle(
+                    fontWeight:
+                        FontWeight.bold,
                   ),
                 ),
                 Text(
                   '${trade['status'] ?? 'unknown'}',
-                  style: const TextStyle(
+                  style:
+                      const TextStyle(
                     color: muted,
                     fontSize: 12,
                   ),
@@ -601,8 +698,10 @@ class _HomePageState extends State<HomePage> {
           Text(
             '${positive ? '+' : ''}\$${pnl.toStringAsFixed(2)}',
             style: TextStyle(
-              color: positive ? green : red,
-              fontWeight: FontWeight.bold,
+              color:
+                  positive ? green : red,
+              fontWeight:
+                  FontWeight.bold,
             ),
           ),
         ],
@@ -616,11 +715,15 @@ class _HomePageState extends State<HomePage> {
     String subtitle,
   ) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding:
+          const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: border),
+        borderRadius:
+            BorderRadius.circular(16),
+        border: Border.all(
+          color: border,
+        ),
       ),
       child: Column(
         crossAxisAlignment:
@@ -628,14 +731,17 @@ class _HomePageState extends State<HomePage> {
         children: [
           Text(
             title,
-            style: const TextStyle(color: muted),
+            style: const TextStyle(
+              color: muted,
+            ),
           ),
           const SizedBox(height: 8),
           Text(
             value,
             style: const TextStyle(
               fontSize: 23,
-              fontWeight: FontWeight.bold,
+              fontWeight:
+                  FontWeight.bold,
             ),
           ),
           const SizedBox(height: 4),
@@ -656,11 +762,15 @@ class _HomePageState extends State<HomePage> {
   }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(16),
+      padding:
+          const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: border),
+        borderRadius:
+            BorderRadius.circular(16),
+        border: Border.all(
+          color: border,
+        ),
       ),
       child: child,
     );
@@ -669,11 +779,16 @@ class _HomePageState extends State<HomePage> {
   Widget _errorCard() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 14),
-      padding: const EdgeInsets.all(14),
+      margin:
+          const EdgeInsets.only(
+        bottom: 14,
+      ),
+      padding:
+          const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: red.withOpacity(.10),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius:
+            BorderRadius.circular(12),
         border: Border.all(
           color: red.withOpacity(.30),
         ),
@@ -688,7 +803,9 @@ class _HomePageState extends State<HomePage> {
           Expanded(
             child: Text(
               '$errorMessage. Pull down to retry.',
-              style: const TextStyle(color: red),
+              style: const TextStyle(
+                color: red,
+              ),
             ),
           ),
         ],
