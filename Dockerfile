@@ -21,19 +21,14 @@ COPY scripts/ /app/scripts/
 # Render provides PORT at runtime.
 EXPOSE 8000
 
-# IMPORTANT:
-# Start through canonical_online_main.py.
+# Start through the canonical online runtime with user-owned
+# paper-position read endpoints registered.
 #
-# canonical_online_main.py loads the existing online_main application
-# and installs the canonical persistent paper-trading runtime before
-# FastAPI startup workers begin.
+# This entry point imports canonical_online_main and preserves
+# the existing online runtime and startup patches.
 #
-# Canonical paper accounting:
-#   Starting balance = $1,000
-#   Balance = starting balance + realized P&L
-#   Equity = balance + unrealized P&L
-#
-# Persistent Position records are the source of truth.
-#
-# Live broker execution remains disabled.
-CMD ["sh", "-c", "uvicorn canonical_online_main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Paper trading only:
+# - Live broker execution remains disabled.
+# - Position reads require authentication.
+# - Position queries are filtered by the authenticated user's ID.
+CMD ["sh", "-c", "uvicorn canonical_user_positions_main:app --host 0.0.0.0 --port ${PORT:-8000}"]
