@@ -285,8 +285,10 @@ except ImportError:
 
 try:
     from .user_auth import router as user_auth_router
+    from .user_positions_api import router as user_positions_router
 except ImportError:
     from user_auth import router as user_auth_router
+    from user_positions_api import router as user_positions_router
 
 app = FastAPI(
     title="RAYMOND v2.8 Trading System",
@@ -344,6 +346,11 @@ async def initialize_database():
 app.include_router(
     user_auth_router,
     tags=["User Authentication"],
+)
+
+app.include_router(
+    user_positions_router,
+    tags=["User Paper Positions"],
 )
 
 app.include_router(
