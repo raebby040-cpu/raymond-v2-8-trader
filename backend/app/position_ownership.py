@@ -1,8 +1,8 @@
 
 """Ownership checks for RAYMOND paper-trading positions.
 
-This module provides reusable helpers for API and repository code.
-It does not alter the trading strategy or execute broker orders.
+These helpers support user-scoped position access.
+They do not change trading decisions or execute broker orders.
 """
 
 from typing import Optional
@@ -14,21 +14,17 @@ from .models import Position
 
 def get_owned_position(
     db: Session,
-    position_id: int,
-    owner_user_id: int,
+    position_id: str,
+    owner_user_id: str,
 ) -> Optional[Position]:
-    """Return a position only when it belongs to the specified user.
-
-    Returns None for both nonexistent positions and positions belonging
-    to another user, preventing callers from distinguishing the two.
-    """
-    if owner_user_id is None:
+    """Return a position only if it belongs to the specified user."""
+    if not position_id or not owner_user_id:
         return None
 
     return (
         db.query(Position)
         .filter(
-            Position.id == position_id,
+            Position.position_id == position_id,
             Position.owner_user_id == owner_user_id,
         )
         .first()
@@ -37,27 +33,31 @@ def get_owned_position(
 
 def list_owned_positions(
     db: Session,
-    owner_user_id: int,
-):
+    owner_user_id: str,
+) -> list[Position]:
     """Return only positions assigned to the specified user."""
-    if owner_user_id is None:
+    if not owner_user_id:
         return []
 
     return (
         db.query(Position)
         .filter(Position.owner_user_id == owner_user_id)
+        .order_by(Position.opened_at.desc())
         .all()
     )
 
 
 def position_belongs_to_user(
     db: Session,
-    position_id: int,
-    owner_user_id: int,
+    position_id: str,
+    owner_user_id: str,
 ) -> bool:
-    """Check whether a position is assigned to the specified user."""
-    return get_owned_position(
-        db=db,
-        position_id=position_id,
-        owner_user_id=owner_user_id,
-    ) is not None
+    """Check whether a position belongs to the specified user."""
+    return (
+        get_owned_position(
+            db=db,
+            position_id=position_id,
+            owner_user_id=owner_user_id,
+        )
+        is not None
+    )
