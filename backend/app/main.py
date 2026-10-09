@@ -279,6 +279,15 @@ try:
 except ImportError:
     from mt5_bridge_integration import register_mt5_bridge
 
+# ============================================================
+# USER AUTHENTICATION
+# ============================================================
+
+try:
+    from .user_auth import router as user_auth_router
+except ImportError:
+    from user_auth import router as user_auth_router
+
 app = FastAPI(
     title="RAYMOND v2.8 Trading System",
     description=(
@@ -331,6 +340,11 @@ async def initialize_database():
 # ============================================================
 # ROUTERS
 # ============================================================
+
+app.include_router(
+    user_auth_router,
+    tags=["User Authentication"],
+)
 
 app.include_router(
     demo_trading_router,
