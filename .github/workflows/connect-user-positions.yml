@@ -25,6 +25,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           main_path = Path("backend/app/main.py")
           module_path = Path("backend/app/user_positions_api.py")
@@ -34,74 +35,93 @@ jobs:
 
           if not module_path.is_file():
               raise SystemExit(
-                  "STOP: existing user_positions_api.py not found."
+                  "STOP: user_positions_api.py not found. "
+                  "No files changed."
               )
 
           source = main_path.read_text(encoding="utf-8")
 
-          old_import = """try:
-              from .user_auth import router as user_auth_router
-          except ImportError:
-              from user_auth import router as user_auth_router
-          """
+          old_import = (
+              "try:\n"
+              "    from .user_auth import router as user_auth_router\n"
+              "except ImportError:\n"
+              "    from user_auth import router as user_auth_router\n"
+          )
 
-          new_import = """try:
-              from .user_auth import router as user_auth_router
-              from .user_positions_api import router as user_positions_router
-          except ImportError:
-              from user_auth import router as user_auth_router
-              from user_positions_api import router as user_positions_router
-          """
+          new_import = (
+              "try:\n"
+              "    from .user_auth import router as user_auth_router\n"
+              "    from .user_positions_api import "
+              "router as user_positions_router\n"
+              "except ImportError:\n"
+              "    from user_auth import router as user_auth_router\n"
+              "    from user_positions_api import "
+              "router as user_positions_router\n"
+          )
 
-          if "user_positions_router" not in source:
+          relative_import = (
+              "from .user_positions_api import "
+              "router as user_positions_router"
+          )
+          fallback_import = (
+              "from user_positions_api import "
+              "router as user_positions_router"
+          )
+
+          has_relative = relative_import in source
+          has_fallback = fallback_import in source
+
+          if not has_relative and not has_fallback:
               if source.count(old_import) != 1:
                   raise SystemExit(
-                      "STOP: authentication import block did not match "
-                      "exactly once. No files changed."
+                      "STOP: Could not safely locate the authentication "
+                      "imports exactly once. No files changed."
                   )
               source = source.replace(old_import, new_import, 1)
+          elif not has_relative or not has_fallback:
+              raise SystemExit(
+                  "STOP: Only one positions import was found. "
+                  "Manual review is required; no files changed."
+              )
 
-          if source.count(
-              "app.include_router(user_positions_router)"
-          ) == 0:
-              old_registration = """app.include_router(
-              user_auth_router,
-              tags=["User Authentication"],
+          registration_pattern = (
+              r"app\.include_router\(\s*"
+              r"user_positions_router\s*,"
           )
-          """
 
-              new_registration = old_registration + """
-          app.include_router(
-              user_positions_router,
-              tags=["User Paper Positions"],
-          )
-          """
+          if not re.search(registration_pattern, source):
+              old_registration = (
+                  "app.include_router(\n"
+                  "    user_auth_router,\n"
+                  '    tags=["User Authentication"],\n'
+                  ")\n"
+              )
 
               if source.count(old_registration) != 1:
                   raise SystemExit(
-                      "STOP: authentication router registration did not "
-                      "match exactly once. No files changed."
+                      "STOP: Could not safely locate the authentication "
+                      "router registration exactly once. No files changed."
                   )
+
+              new_registration = old_registration + (
+                  "\n"
+                  "app.include_router(\n"
+                  "    user_positions_router,\n"
+                  '    tags=["User Paper Positions"],\n'
+                  ")\n"
+              )
 
               source = source.replace(
                   old_registration, new_registration, 1
               )
 
-          if source.count(
-              "app.include_router(user_positions_router)"
-          ) != 0:
-              # The formatted registration above is multiline.
-              pass
-
-          if source.count(
-              "user_positions_router,"
-          ) < 2:
+          if not re.search(registration_pattern, source):
               raise SystemExit(
-                  "STOP: router connection validation failed."
+                  "STOP: Positions router registration was not verified."
               )
 
           main_path.write_text(source, encoding="utf-8")
-          print("Connected existing user paper positions router.")
+          print("Verified positions router import and registration.")
 
           PY
 
