@@ -1,8 +1,10 @@
+
 """
 RAYMOND v2.8 - Trade Journal Persistence
 
-Step 10A:
+Features:
 - Persists demo/paper trades to the existing Trade table.
+- Supports authenticated-user ownership filtering.
 - Reads journal history safely.
 - Keeps paper and live execution types explicit.
 - Never sends orders to MT5, Exness, or any broker.
@@ -59,38 +61,65 @@ class TradeJournal:
 
         return (pnl / notional) * 100.0
 
+    @staticmethod
+    def _trade_query(
+        db: Session,
+        trade_id: str,
+        owner_user_id: Optional[str] = None,
+    ):
+        """
+        Find a trade by ID.
+
+        When owner_user_id is supplied, the query is restricted
+        to that owner. When omitted, legacy internal callers retain
+        the previous global lookup behavior.
+
+        Authenticated API routes must always supply owner_user_id.
+        """
+        query = db.query(Trade).filter(
+            Trade.trade_id == trade_id
+        )
+
+        if owner_user_id is not None:
+            query = query.filter(
+                Trade.owner_user_id == owner_user_id
+            )
+
+        return query
+
     def save_demo_trade(
         self,
         trade: DemoTrade,
+        owner_user_id: Optional[str] = None,
     ) -> Trade:
         """
         Create a persistent paper-trade journal row.
 
         Only paper/demo trades are accepted.
-        """
 
+        Pass owner_user_id for a user-owned trade. Existing
+        automated/internal callers may omit it while ownership
+        is being wired through the remaining application.
+        """
         if trade.execution_type != "paper":
             raise TradeJournalError(
-                "TradeJournal only accepts paper trades in Step 10A."
+                "TradeJournal only accepts paper trades."
             )
 
-        existing = (
-            self.db.query(Trade)
-            .filter(
-                Trade.trade_id == trade.trade_id
-            )
-            .first()
-        )
+        existing = self._trade_query(
+            self.db,
+            trade.trade_id,
+            owner_user_id,
+        ).first()
 
         if existing is not None:
             return existing
 
         row = Trade(
             trade_id=trade.trade_id,
+            owner_user_id=owner_user_id,
             symbol=trade.symbol,
-            direction=self._direction(
-                trade.direction
-            ),
+            direction=self._direction(trade.direction),
             entry_price=trade.entry_price,
             exit_price=trade.exit_price,
             quantity=trade.quantity,
@@ -110,83 +139,96 @@ class TradeJournal:
             closed_at=trade.closed_at,
             stop_loss=trade.stop_loss,
             take_profit=trade.take_profit,
-            notes="Step 10A demo/paper trade",
+            notes="RAYMOND demo/paper trade",
         )
 
-        self.db.add(row)
-        self.db.commit()
-        self.db.refresh(row)
+        try:
+            self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+        except Exception:
+            self.db.rollback()
+            raise
 
         return row
 
     def update_demo_trade(
         self,
         trade: DemoTrade,
+        owner_user_id: Optional[str] = None,
     ) -> Trade:
         """
         Persist the latest state of an existing demo trade.
-        """
 
+        When owner_user_id is provided, only that user's row can
+        be updated. A missing owned row is saved as a new owned row;
+        this avoids silently claiming a legacy unowned row.
+        """
         if trade.execution_type != "paper":
             raise TradeJournalError(
-                "TradeJournal only accepts paper trades in Step 10A."
+                "TradeJournal only accepts paper trades."
             )
 
-        row = (
-            self.db.query(Trade)
-            .filter(
-                Trade.trade_id == trade.trade_id
-            )
-            .first()
-        )
+        row = self._trade_query(
+            self.db,
+            trade.trade_id,
+            owner_user_id,
+        ).first()
 
         if row is None:
-            return self.save_demo_trade(trade)
+            return self.save_demo_trade(
+                trade,
+                owner_user_id=owner_user_id,
+            )
 
         row.exit_price = trade.exit_price
-
         row.pnl = trade.pnl
-
         row.pnl_percent = self._pnl_percent(
             trade.entry_price,
             trade.quantity,
             trade.pnl,
         )
-
         row.status = (
             PositionStatus.CLOSED
             if trade.status == "closed"
             else PositionStatus.OPEN
         )
-
         row.closed_at = trade.closed_at
 
-        self.db.commit()
-        self.db.refresh(row)
+        try:
+            self.db.commit()
+            self.db.refresh(row)
+        except Exception:
+            self.db.rollback()
+            raise
 
         return row
 
     def sync_demo_trade(
         self,
         trade: DemoTrade,
+        owner_user_id: Optional[str] = None,
     ) -> Trade:
         """
-        Insert a demo trade if missing,
-        otherwise update the existing journal entry.
+        Insert a demo trade if missing, otherwise update its journal
+        entry. Ownership is enforced whenever owner_user_id is given.
         """
-
-        existing = (
-            self.db.query(Trade)
-            .filter(
-                Trade.trade_id == trade.trade_id
-            )
-            .first()
-        )
+        existing = self._trade_query(
+            self.db,
+            trade.trade_id,
+            owner_user_id,
+        ).first()
 
         if existing is None:
-            return self.save_demo_trade(trade)
+            return self.save_demo_trade(
+                trade,
+                owner_user_id=owner_user_id,
+            )
 
-        return self.update_demo_trade(trade)
+        return self.update_demo_trade(
+            trade,
+            owner_user_id=owner_user_id,
+        )
 
     def list_trades(
         self,
@@ -194,9 +236,15 @@ class TradeJournal:
         limit: int = 50,
         offset: int = 0,
         execution_type: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
     ) -> tuple[list[Trade], int]:
-        """Return persisted journal trades with pagination."""
+        """
+        Return persisted journal trades with pagination.
 
+        Authenticated routes must pass owner_user_id. Supplying it
+        excludes both other users' records and legacy rows whose
+        owner_user_id is NULL.
+        """
         if limit < 1 or limit > 500:
             raise TradeJournalError(
                 "limit must be between 1 and 500."
@@ -209,15 +257,15 @@ class TradeJournal:
 
         query = self.db.query(Trade)
 
-        if execution_type is not None:
-            normalized = (
-                execution_type.lower().strip()
+        if owner_user_id is not None:
+            query = query.filter(
+                Trade.owner_user_id == owner_user_id
             )
 
-            if normalized not in {
-                "paper",
-                "live",
-            }:
+        if execution_type is not None:
+            normalized = execution_type.lower().strip()
+
+            if normalized not in {"paper", "live"}:
                 raise TradeJournalError(
                     "execution_type must be 'paper' or 'live'."
                 )
@@ -230,9 +278,7 @@ class TradeJournal:
 
         rows = (
             query
-            .order_by(
-                Trade.opened_at.desc()
-            )
+            .order_by(Trade.opened_at.desc())
             .offset(offset)
             .limit(limit)
             .all()
@@ -241,9 +287,7 @@ class TradeJournal:
         return rows, total
 
     @staticmethod
-    def serialize_trade(
-        row: Trade,
-    ) -> dict[str, Any]:
+    def serialize_trade(row: Trade) -> dict[str, Any]:
         """Convert a journal row into a safe API response."""
 
         direction = (
