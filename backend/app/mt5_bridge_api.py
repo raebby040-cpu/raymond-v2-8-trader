@@ -5,23 +5,31 @@ Raymond v2.8 - MT5 Bridge Status API
 Read-only API for the remote MT5 execution bridge.
 
 This module:
-- reports bridge configuration/availability
-- verifies DEMO account connectivity
-- verifies XAUUSD market data
-- NEVER submits an order
-- NEVER modifies a position
-- NEVER closes a position
-- NEVER enables live trading
+- Reports bridge configuration and availability.
+- Verifies DEMO account connectivity.
+- Verifies XAUUSD market data.
+- NEVER submits an order.
+- NEVER modifies a position.
+- NEVER closes a position.
+- NEVER enables live trading.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
-from .mt5_bridge_client import (
-    MT5BridgeError,
-    mt5_bridge_client,
-)
+# Support both package imports and the top-level imports used by
+# the existing test suite (PYTHONPATH=backend).
+try:
+    from .mt5_bridge_client import (
+        MT5BridgeError,
+        mt5_bridge_client,
+    )
+except ImportError:
+    from mt5_bridge_client import (
+        MT5BridgeError,
+        mt5_bridge_client,
+    )
 
 
 router = APIRouter(
@@ -33,9 +41,9 @@ router = APIRouter(
 @router.get("/health")
 async def bridge_health() -> dict:
     """
-    Read-only bridge health.
+    Return read-only bridge health.
 
-    This endpoint does not require the MT5 bridge to be available.
+    This endpoint does not submit or modify broker orders.
     """
     health = await mt5_bridge_client.health()
 
@@ -51,9 +59,10 @@ async def bridge_health() -> dict:
 @router.get("/status")
 async def bridge_status() -> dict:
     """
-    Read-only detailed bridge status.
+    Return detailed bridge status.
 
-    If the bridge is unavailable, the response remains fail-closed.
+    Account status is fail-closed: a connection is not treated
+    as verified DEMO unless the bridge explicitly confirms it.
     """
     health = await mt5_bridge_client.health()
 
@@ -61,10 +70,7 @@ async def bridge_status() -> dict:
         return {
             "status": "unavailable",
             "connected": False,
-            "configured": health.get(
-                "configured",
-                False,
-            ),
+            "configured": health.get("configured", False),
             "demo_only": True,
             "real_accounts_allowed": False,
             "live_trading_enabled": False,
@@ -77,7 +83,6 @@ async def bridge_status() -> dict:
 
     try:
         status = await mt5_bridge_client.status()
-
     except MT5BridgeError as exc:
         return {
             "status": "error",
@@ -92,9 +97,7 @@ async def bridge_status() -> dict:
 
     account = status.get("account") or {}
 
-    is_demo = account.get("is_demo") is True
-
-    if not is_demo:
+    if account.get("is_demo") is not True:
         return {
             "status": "unsafe_account",
             "connected": True,
@@ -126,36 +129,33 @@ async def verify_demo(
     symbol: str = "XAUUSD",
 ) -> dict:
     """
-    Perform a complete read-only DEMO verification.
+    Perform read-only DEMO verification.
 
-    Checks:
-    1. Bridge reachability
-    2. MT5 connection
-    3. DEMO account
-    4. REAL-account blocking
-    5. Symbol availability
-    6. Current bid/ask
+    Checks bridge reachability, MT5 connection, DEMO status,
+    account restrictions, symbol availability and market data.
 
-    No order is submitted.
+    No broker order is submitted.
     """
-    result = await mt5_bridge_client.verify_demo_connection(
-        symbol=symbol,
-    )
-
-    if result.get("verified") is True:
+    try:
+        result = await mt5_bridge_client.verify_demo_connection(
+            symbol=symbol,
+        )
+    except MT5BridgeError as exc:
         return {
-            "status": "verified",
-            "verified": True,
+            "status": "not_verified",
+            "verified": False,
             "demo_only": True,
             "real_accounts_allowed": False,
             "live_trading_enabled": False,
             "read_only": True,
-            **result,
+            "reason": str(exc),
         }
 
+    verified = result.get("verified") is True
+
     return {
-        "status": "not_verified",
-        "verified": False,
+        "status": "verified" if verified else "not_verified",
+        "verified": verified,
         "demo_only": True,
         "real_accounts_allowed": False,
         "live_trading_enabled": False,
@@ -166,9 +166,7 @@ async def verify_demo(
 
 @router.get("/account")
 async def bridge_account() -> dict:
-    """
-    Read-only MT5 account information.
-    """
+    """Return read-only MT5 account information."""
     try:
         account = await mt5_bridge_client.account()
 
@@ -196,9 +194,7 @@ async def bridge_account() -> dict:
 async def bridge_symbol(
     symbol: str,
 ) -> dict:
-    """
-    Read-only broker symbol specification.
-    """
+    """Return read-only broker symbol specifications."""
     try:
         result = await mt5_bridge_client.symbol(symbol)
 
@@ -221,9 +217,7 @@ async def bridge_symbol(
 async def bridge_tick(
     symbol: str,
 ) -> dict:
-    """
-    Read-only current market tick.
-    """
+    """Return a read-only market tick."""
     try:
         result = await mt5_bridge_client.tick(symbol)
 
@@ -244,9 +238,7 @@ async def bridge_tick(
 
 @router.get("/positions")
 async def bridge_positions() -> dict:
-    """
-    Read-only broker positions.
-    """
+    """Return read-only broker positions."""
     try:
         result = await mt5_bridge_client.positions()
 
