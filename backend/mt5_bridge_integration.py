@@ -1,30 +1,31 @@
 """
-Raymond v2.8 — MT5 Bridge Integration
-=====================================
+Raymond v2.8 — MT5 Bridge Integration.
 
-Registers the read-only MT5 Bridge API router with a FastAPI application.
+Registers the read-only MT5 Bridge API with FastAPI.
 
 Safety:
 - Does not submit broker orders.
-- Does not modify or close positions.
+- Does not modify or close broker positions.
 - Does not enable live trading.
-- Keeps the MT5 Bridge API separate from main.py.
+- Does not bypass the Risk Engine or Emergency Stop.
+- Registers the router only once per application instance.
 """
 
 from __future__ import annotations
 
 from fastapi import FastAPI
 
-from .mt5_bridge_api import router as mt5_bridge_router
+try:
+    from .mt5_bridge_api import router as mt5_bridge_router
+except ImportError:
+    try:
+        from app.mt5_bridge_api import router as mt5_bridge_router
+    except ImportError:
+        from mt5_bridge_api import router as mt5_bridge_router
 
 
 def register_mt5_bridge(app: FastAPI) -> None:
-    """
-    Register the MT5 Bridge API exactly once.
-
-    Call this function from the existing FastAPI application's
-    startup/module configuration after the app has been created.
-    """
+    """Register the read-only MT5 Bridge API exactly once."""
     if getattr(app.state, "mt5_bridge_registered", False):
         return
 
