@@ -6,23 +6,18 @@ PURPOSE
 Expose the independent 8-brain advisory ensemble alongside the
 existing RAYMOND Step 13 decision.
 
-Also exposes the persistent PAPER position state required by
-the Android trading terminal.
-
-Also exposes a READ-ONLY historical XAUUSD P/L reconciliation
-endpoint used to identify positions whose stored P/L was recorded
-using the old pre-contract-size calculation.
+Also exposes persistent PAPER position state for the Android
+trading terminal and read-only historical XAUUSD P/L reconciliation.
 
 SAFETY
 ------
-All endpoints in this router are READ-ONLY.
+All endpoints in this router are read-only.
 
 They do NOT:
 - place orders
-- modify positions
-- close positions
+- modify or close positions
 - contact MT5 for execution
-- contact a broker
+- contact a broker for execution
 - bypass Step 14 Risk Engine
 - replace Step 13
 - enable live trading
@@ -58,6 +53,8 @@ try:
         calculate_indicators,
         indicator_result_to_dict,
     )
+    from .user_auth import User, get_current_user
+
 except ImportError:
     from advisory_comparison import analyze_and_compare
     from ai_trading_decision import (
@@ -77,6 +74,7 @@ except ImportError:
         calculate_indicators,
         indicator_result_to_dict,
     )
+    from user_auth import User, get_current_user
 
 
 router = APIRouter(
@@ -86,6 +84,7 @@ router = APIRouter(
 
 _ai = AITradingDecisionEngine()
 
+# XAUUSD: 1 standard lot = 100 troy ounces.
 XAUUSD_CONTRACT_SIZE = 100.0
 
 
@@ -95,12 +94,9 @@ def _utc() -> str:
 
 
 def _enum_value(value: Any) -> Any:
-    """
-    Safely serialize enum-like values.
-    """
+    """Safely serialize enum-like values."""
     if hasattr(value, "value"):
         return value.value
-
     return value
 
 
@@ -119,14 +115,10 @@ def _position_to_dict(
     position: Position,
 ) -> dict[str, Any]:
     """
-    Serialize one persistent paper position.
+    Serialize a persistent paper position for the trading terminal.
 
-    This deliberately exposes the complete trading-terminal
-    state needed by the Android application.
-
-    No execution action is performed here.
+    This function only reads position data. It performs no execution.
     """
-
     entry_price = (
         float(position.entry_price)
         if position.entry_price is not None
@@ -166,10 +158,7 @@ def _position_to_dict(
     )
 
     pnl = float(position.pnl or 0.0)
-
-    pnl_percent = float(
-        position.pnl_percent or 0.0
-    )
+    pnl_percent = float(position.pnl_percent or 0.0)
 
     risk_1r = (
         float(position.risk_1r)
@@ -190,40 +179,26 @@ def _position_to_dict(
         ).lower()
 
         if direction == "buy":
-            profit_distance = (
-                current_price - entry_price
-            )
+            profit_distance = current_price - entry_price
         elif direction == "sell":
-            profit_distance = (
-                entry_price - current_price
-            )
+            profit_distance = entry_price - current_price
         else:
             profit_distance = 0.0
 
-        current_r = (
-            profit_distance / risk_1r
-        )
+        current_r = profit_distance / risk_1r
 
     return {
         "id": position.id,
         "position_id": position.position_id,
         "trade_id": position.trade_id,
-
         "symbol": position.symbol,
-        "direction": _enum_value(
-            position.direction
-        ),
-
-        "status": _enum_value(
-            position.status
-        ),
-
+        "direction": _enum_value(position.direction),
+        "status": _enum_value(position.status),
         "execution_type": (
             position.execution_type
             if hasattr(position, "execution_type")
             else "paper"
         ),
-
         "entry_price": entry_price,
         "original_quantity": (
             float(original_quantity)
@@ -246,7 +221,6 @@ def _position_to_dict(
             else None
         ),
         "risk_1r": risk_1r,
-
         "current_price": current_price,
         "current_stop_loss": (
             float(current_stop_loss)
@@ -273,17 +247,11 @@ def _position_to_dict(
             if remaining_quantity is not None
             else None
         ),
-
         "pnl": pnl,
         "pnl_percent": pnl_percent,
         "current_r": current_r,
-        "max_profit": float(
-            position.max_profit or 0.0
-        ),
-        "max_drawdown": float(
-            position.max_drawdown or 0.0
-        ),
-
+        "max_profit": float(position.max_profit or 0.0),
+        "max_drawdown": float(position.max_drawdown or 0.0),
         "regime": position.regime,
         "setup": position.setup,
         "technical_score": (
@@ -302,35 +270,16 @@ def _position_to_dict(
             else None
         ),
         "trade_thesis": position.trade_thesis,
-
-        "break_even_applied": bool(
-            position.break_even_applied
+        "break_even_applied": bool(position.break_even_applied),
+        "partial_close_applied": bool(position.partial_close_applied),
+        "trailing_active": bool(position.trailing_active),
+        "management_status": position.management_status,
+        "last_management_action": position.last_management_action,
+        "last_management_time": _datetime_value(
+            position.last_management_time
         ),
-        "partial_close_applied": bool(
-            position.partial_close_applied
-        ),
-        "trailing_active": bool(
-            position.trailing_active
-        ),
-        "management_status": (
-            position.management_status
-        ),
-        "last_management_action": (
-            position.last_management_action
-        ),
-        "last_management_time": (
-            _datetime_value(
-                position.last_management_time
-            )
-        ),
-
-        "opened_at": _datetime_value(
-            position.opened_at
-        ),
-        "closed_at": _datetime_value(
-            position.closed_at
-        ),
-
+        "opened_at": _datetime_value(position.opened_at),
+        "closed_at": _datetime_value(position.closed_at),
         "paper_only": True,
         "read_only": True,
         "live_trading_enabled": False,
@@ -357,12 +306,11 @@ async def advisory_analysis(
     ),
 ):
     """
-    Run RAYMOND Step 13 and the independent 8-brain
-    advisory ensemble, then compare their results.
+    Run RAYMOND Step 13 and the independent 8-brain advisory
+    ensemble, then compare their results.
 
     This endpoint is analysis-only.
     """
-
     data = await _fetch_chart(
         symbol,
         timeframe,
@@ -377,7 +325,6 @@ async def advisory_analysis(
         )
 
         context = _context(indicators)
-
         decision = _ai.evaluate(context)
 
         comparison = analyze_and_compare(
@@ -400,29 +347,19 @@ async def advisory_analysis(
 
     return {
         "accepted": True,
-
         "market": {
             "symbol": "XAUUSD",
             "timeframe": data["timeframe"],
             "price": data["price"],
         },
-
         "source": data["source"],
         "source_type": data.get(
             "source_type",
             "public_reference_feed",
         ),
-
-        "indicators": indicator_result_to_dict(
-            indicators
-        ),
-
-        "raymond": _decision_payload(
-            decision
-        ),
-
+        "indicators": indicator_result_to_dict(indicators),
+        "raymond": _decision_payload(decision),
         "advisory_comparison": comparison,
-
         "safety": {
             "read_only": True,
             "advisory_only": True,
@@ -433,7 +370,6 @@ async def advisory_analysis(
             "risk_engine_bypass": False,
             "step13_replaced": False,
         },
-
         "timestamp": _utc(),
     }
 
@@ -460,82 +396,61 @@ def paper_positions(
         ge=0,
     ),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Return persistent PAPER positions for the trading terminal.
+    Return only the authenticated user's paper positions.
 
-    This endpoint is READ-ONLY.
+    Read-only. Positions with no owner are excluded.
     """
-
     try:
-        normalized_status = (
-            status.strip().lower()
+        normalized_status = status.strip().lower()
+
+        # Apply ownership filtering before retrieving any position.
+        query = db.query(Position).filter(
+            Position.owner_user_id == current_user.user_id
         )
 
+        if symbol:
+            query = query.filter(
+                Position.symbol.ilike(symbol.strip())
+            )
+
         if normalized_status == "open":
-            positions = (
-                PositionRepository.get_open_positions(
-                    db
-                )
+            query = query.filter(
+                Position.status == PositionStatus.OPEN
             )
 
-            if symbol:
-                positions = [
-                    position
-                    for position in positions
-                    if position.symbol.lower()
-                    == symbol.lower()
-                ]
+        elif normalized_status not in {"all", "*"}:
+            valid_statuses = {
+                str(_enum_value(value)).lower(): value
+                for value in PositionStatus
+            }
 
-            positions = positions[
-                offset: offset + limit
-            ]
-
-        elif normalized_status in {
-            "all",
-            "*",
-        }:
-            positions = (
-                PositionRepository.get_all(
-                    db,
-                    limit=limit,
-                    offset=offset,
-                )
+            requested_status = valid_statuses.get(
+                normalized_status
             )
 
-            if symbol:
-                positions = [
-                    position
-                    for position in positions
-                    if position.symbol.lower()
-                    == symbol.lower()
-                ]
-
-        else:
-            positions = (
-                PositionRepository.get_all(
-                    db,
-                    limit=limit,
-                    offset=offset,
+            if requested_status is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Unsupported position status.",
                 )
+
+            query = query.filter(
+                Position.status == requested_status
             )
 
-            positions = [
-                position
-                for position in positions
-                if str(
-                    _enum_value(position.status)
-                ).lower()
-                == normalized_status
-            ]
+        positions = (
+            query
+            .order_by(Position.opened_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
 
-            if symbol:
-                positions = [
-                    position
-                    for position in positions
-                    if position.symbol.lower()
-                    == symbol.lower()
-                ]
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
@@ -549,21 +464,17 @@ def paper_positions(
 
     return {
         "accepted": True,
-
         "positions": [
             _position_to_dict(position)
             for position in positions
         ],
-
         "count": len(positions),
-
         "query": {
             "symbol": symbol,
             "status": status,
             "limit": limit,
             "offset": offset,
         },
-
         "safety": {
             "read_only": True,
             "paper_only": True,
@@ -572,7 +483,6 @@ def paper_positions(
             "broker_orders_allowed": False,
             "risk_engine_bypass": False,
         },
-
         "timestamp": _utc(),
     }
 
@@ -594,41 +504,21 @@ def paper_pnl_reconciliation(
         ge=0,
     ),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    READ-ONLY historical P/L reconciliation.
+    Read-only historical P/L reconciliation for the authenticated user.
 
-    Purpose
-    -------
-    Compare the P/L stored in historical PAPER positions against
-    the corrected XAUUSD contract-size calculation.
+    XAUUSD contract size: 100 oz per standard lot.
 
-    Standard XAUUSD assumption used by RAYMOND:
+    Formula:
+        Price movement × lot quantity × 100
 
-        1.00 lot = 100 oz
-
-    Therefore:
-
-        P/L = price movement × lot size × 100
-
-    Example:
-
-        BUY  2056 -> 2050 at 0.02 lot = -$12
-        SELL 2056 -> 2050 at 0.02 lot = +$12
-
-    IMPORTANT
-    ---------
-    This endpoint DOES NOT modify the database.
-
-    It only reports:
-
-        stored P/L
-        corrected P/L
-        difference
-
-    Historical P/L values remain untouched.
+    Historical database values are never modified.
+    Partial-close records are flagged for manual review because
+    the final-position calculation alone cannot reconcile every
+    realized partial close.
     """
-
     normalized_symbol = symbol.strip().upper()
 
     if normalized_symbol != "XAUUSD":
@@ -649,16 +539,15 @@ def paper_pnl_reconciliation(
         query = (
             db.query(Position)
             .filter(
-                Position.status
-                == PositionStatus.CLOSED
+                Position.owner_user_id == current_user.user_id
             )
             .filter(
-                Position.symbol
-                == normalized_symbol
+                Position.status == PositionStatus.CLOSED
             )
-            .order_by(
-                Position.closed_at.desc()
+            .filter(
+                Position.symbol == normalized_symbol
             )
+            .order_by(Position.closed_at.desc())
         )
 
         positions = (
@@ -682,11 +571,9 @@ def paper_pnl_reconciliation(
         ) from exc
 
     reconciled = []
-
     stored_pnl_total = 0.0
     corrected_pnl_total = 0.0
     pnl_difference_total = 0.0
-
     partial_close_review_count = 0
 
     for position in positions:
@@ -708,9 +595,7 @@ def paper_pnl_reconciliation(
             else float(position.quantity or 0.0)
         )
 
-        stored_pnl = float(
-            position.pnl or 0.0
-        )
+        stored_pnl = float(position.pnl or 0.0)
 
         direction = str(
             _enum_value(position.direction)
@@ -723,45 +608,29 @@ def paper_pnl_reconciliation(
         if partial_close_applied:
             partial_close_review_count += 1
 
-        if (
-            entry_price is None
-            or exit_price is None
-        ):
+        if entry_price is None or exit_price is None:
             corrected_pnl = None
             pnl_difference = None
-            calculation_status = (
-                "insufficient_price_data"
-            )
+            calculation_status = "insufficient_price_data"
+
         else:
             if direction == "buy":
-                price_move = (
-                    exit_price - entry_price
-                )
+                price_move = exit_price - entry_price
             elif direction == "sell":
-                price_move = (
-                    entry_price - exit_price
-                )
+                price_move = entry_price - exit_price
             else:
                 price_move = 0.0
 
             corrected_pnl = (
-                price_move
-                * quantity
-                * contract_size
+                price_move * quantity * contract_size
             )
 
-            pnl_difference = (
-                corrected_pnl - stored_pnl
-            )
+            pnl_difference = corrected_pnl - stored_pnl
 
             if partial_close_applied:
-                calculation_status = (
-                    "partial_close_manual_review"
-                )
+                calculation_status = "partial_close_manual_review"
             else:
-                calculation_status = (
-                    "reconciled"
-                )
+                calculation_status = "reconciled"
 
             stored_pnl_total += stored_pnl
             corrected_pnl_total += corrected_pnl
@@ -772,80 +641,44 @@ def paper_pnl_reconciliation(
                 "id": position.id,
                 "position_id": position.position_id,
                 "trade_id": position.trade_id,
-
                 "symbol": position.symbol,
                 "direction": direction,
-
-                "status": _enum_value(
-                    position.status
-                ),
-
+                "status": _enum_value(position.status),
                 "entry_price": entry_price,
                 "recorded_exit_price": exit_price,
                 "original_quantity": quantity,
-
                 "stored_pnl": stored_pnl,
                 "corrected_pnl": corrected_pnl,
                 "pnl_difference": pnl_difference,
-
                 "contract_size": contract_size,
-
-                "partial_close_applied": (
-                    partial_close_applied
-                ),
-
-                "calculation_status": (
-                    calculation_status
-                ),
-
-                "opened_at": _datetime_value(
-                    position.opened_at
-                ),
-                "closed_at": _datetime_value(
-                    position.closed_at
-                ),
+                "partial_close_applied": partial_close_applied,
+                "calculation_status": calculation_status,
+                "opened_at": _datetime_value(position.opened_at),
+                "closed_at": _datetime_value(position.closed_at),
             }
         )
 
     return {
         "accepted": True,
-
         "reconciliation": {
             "symbol": normalized_symbol,
             "contract_size": contract_size,
-            "positions_reconciled": len(
-                reconciled
-            ),
-            "partial_close_manual_review": (
-                partial_close_review_count
-            ),
-
-            "stored_pnl_total": (
-                round(stored_pnl_total, 10)
-            ),
-
-            "corrected_pnl_total": (
-                round(corrected_pnl_total, 10)
-            ),
-
-            "pnl_difference_total": (
-                round(pnl_difference_total, 10)
-            ),
-
+            "positions_reconciled": len(reconciled),
+            "partial_close_manual_review": partial_close_review_count,
+            "stored_pnl_total": round(stored_pnl_total, 10),
+            "corrected_pnl_total": round(corrected_pnl_total, 10),
+            "pnl_difference_total": round(pnl_difference_total, 10),
             "formula": (
                 "price movement × original lot quantity "
                 "× 100 contract size"
             ),
         },
-
         "positions": reconciled,
-
         "query": {
             "symbol": normalized_symbol,
             "limit": limit,
             "offset": offset,
         },
-
         "safety": {
             "read_only": True,
             "database_modified": False,
@@ -857,11 +690,10 @@ def paper_pnl_reconciliation(
             "broker_orders_allowed": False,
             "risk_engine_bypass": False,
         },
-
         "timestamp": _utc(),
     }
 
 
 __all__ = [
     "router",
-]
+            ]
