@@ -1,0 +1,51 @@
+name: Wire User Authentication
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  wire-user-auth:
+    name: Add authentication router to main.py
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify required files
+        run: |
+          test -f wire_user_auth.py
+          test -f backend/app/main.py
+          test -f backend/app/user_auth.py
+          echo "Required files found."
+
+      - name: Run authentication wiring helper
+        run: |
+          python wire_user_auth.py backend/app/main.py
+          python -m py_compile backend/app/main.py
+          git diff --check
+
+      - name: Commit updated main.py if changed
+        run: |
+          if git diff --quiet -- backend/app/main.py; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add backend/app/main.py
+          git commit -m "Wire user authentication router"
+          git push origin HEAD:main
