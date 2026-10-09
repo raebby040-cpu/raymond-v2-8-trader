@@ -1,26 +1,20 @@
+
 """
 RAYMOND v2.8 - Database Migration Layer
 
-Stage 16.2
-Persistent Position State
+Includes:
+- Stage 16.2 persistent position state
+- Stage 16.3 persistent trade thesis
+- Stage 18 exact partial-close accounting
+- Canonical trading state
+- User ownership columns
 
-Stage 16.3
-Persistent Trade Thesis
-
-Stage 18
-Exact Partial-Close Accounting
-
-Batch 1
-Canonical Trading State
-
-This module performs small, idempotent schema upgrades.
-
-IMPORTANT:
-- Never drops existing tables.
+Safety:
+- Never drops tables.
 - Never deletes existing rows.
-- Safe to run more than once.
-- Adds only missing columns/tables.
-- Preserves all existing trading data.
+- Adds only missing columns or tables.
+- Existing historical ownership remains NULL.
+- Safe to rerun when the database schema is unchanged.
 """
 
 from sqlalchemy import inspect, text
@@ -30,10 +24,6 @@ try:
 except ImportError:
     from database import Base, engine
 
-
-# ============================================================
-# EXISTING POSITION COLUMNS
-# ============================================================
 
 POSITION_COLUMNS = {
     "trade_id": "VARCHAR",
@@ -69,14 +59,8 @@ POSITION_COLUMNS = {
 }
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def get_table_columns(
-    connection,
-    table_name: str,
-) -> set[str]:
+def get_table_columns(connection, table_name: str) -> set[str]:
+    """Return existing column names, or an empty set if the table is absent."""
     inspector = inspect(connection)
 
     if table_name not in inspector.get_table_names():
@@ -84,9 +68,7 @@ def get_table_columns(
 
     return {
         column["name"]
-        for column in inspector.get_columns(
-            table_name
-        )
+        for column in inspector.get_columns(table_name)
     }
 
 
@@ -96,38 +78,30 @@ def add_missing_column(
     column_name: str,
     column_definition: str,
 ) -> bool:
-    existing_columns = get_table_columns(
-        connection,
-        table_name,
-    )
-
-    if column_name in existing_columns:
+    """Add one missing column. Table and column names are internal constants."""
+    if column_name in get_table_columns(connection, table_name):
         return False
 
-    sql = (
-        f"ALTER TABLE {table_name} "
-        f"ADD COLUMN {column_name} "
-        f"{column_definition}"
+    connection.execute(
+        text(
+            f"ALTER TABLE {table_name} "
+            f"ADD COLUMN {column_name} {column_definition}"
+        )
     )
-
-    connection.execute(text(sql))
-
     return True
 
 
-def create_trade_id_index(
-    connection,
-) -> bool:
+def create_trade_id_index(connection) -> bool:
+    """Create the existing unique linkage index if it is absent."""
     inspector = inspect(connection)
 
-    existing_indexes = inspector.get_indexes(
-        "positions"
-    )
+    if "positions" not in inspector.get_table_names():
+        raise RuntimeError(
+            "Cannot create the trade_id index: positions table is missing."
+        )
 
-    for index in existing_indexes:
-        if index.get(
-            "name"
-        ) == "ix_positions_trade_id_unique":
+    for index in inspector.get_indexes("positions"):
+        if index.get("name") == "ix_positions_trade_id_unique":
             return False
 
     connection.execute(
@@ -138,13 +112,8 @@ def create_trade_id_index(
             """
         )
     )
-
     return True
 
-
-# ============================================================
-# STAGE 16.2
-# ============================================================
 
 def migrate_stage_16_2() -> dict:
     added_columns = []
@@ -153,16 +122,13 @@ def migrate_stage_16_2() -> dict:
     skipped_indexes = []
 
     with engine.begin() as connection:
-        inspector = inspect(connection)
-
-        if "positions" not in inspector.get_table_names():
+        if "positions" not in inspect(connection).get_table_names():
             raise RuntimeError(
                 "Stage 16.2 migration cannot run because "
-                "the 'positions' table does not exist."
+                "the positions table does not exist."
             )
 
         for column_name, column_definition in POSITION_COLUMNS.items():
-
             if column_name == "trade_thesis":
                 continue
 
@@ -180,31 +146,21 @@ def migrate_stage_16_2() -> dict:
                 column_definition,
             )
 
-            if added:
-                added_columns.append(column_name)
-            else:
-                skipped_columns.append(column_name)
-
-        try:
-            created = create_trade_id_index(
-                connection
+            (added_columns if added else skipped_columns).append(
+                column_name
             )
 
-            if created:
-                created_indexes.append(
-                    "ix_positions_trade_id_unique"
-                )
-            else:
-                skipped_indexes.append(
-                    "ix_positions_trade_id_unique"
-                )
-
+        try:
+            created = create_trade_id_index(connection)
         except Exception as exc:
             raise RuntimeError(
-                "Stage 16.2 could not create the unique "
-                "trade_id index. Existing duplicate non-NULL "
-                "trade_id values may be present."
+                "Stage 16.2 could not create the unique trade_id index. "
+                "Check for duplicate non-NULL trade_id values."
             ) from exc
+
+        (
+            created_indexes if created else skipped_indexes
+        ).append("ix_positions_trade_id_unique")
 
     return {
         "migration": "stage_16_2",
@@ -216,21 +172,12 @@ def migrate_stage_16_2() -> dict:
     }
 
 
-# ============================================================
-# STAGE 16.3
-# ============================================================
-
 def migrate_stage_16_3() -> dict:
-    added_columns = []
-    skipped_columns = []
-
     with engine.begin() as connection:
-        inspector = inspect(connection)
-
-        if "positions" not in inspector.get_table_names():
+        if "positions" not in inspect(connection).get_table_names():
             raise RuntimeError(
                 "Stage 16.3 migration cannot run because "
-                "the 'positions' table does not exist."
+                "the positions table does not exist."
             )
 
         added = add_missing_column(
@@ -240,70 +187,43 @@ def migrate_stage_16_3() -> dict:
             POSITION_COLUMNS["trade_thesis"],
         )
 
-        if added:
-            added_columns.append(
-                "trade_thesis"
-            )
-        else:
-            skipped_columns.append(
-                "trade_thesis"
-            )
-
     return {
         "migration": "stage_16_3",
         "status": "completed",
-        "added_columns": added_columns,
-        "skipped_existing_columns": skipped_columns,
+        "added_columns": ["trade_thesis"] if added else [],
+        "skipped_existing_columns": [] if added else ["trade_thesis"],
     }
 
 
-# ============================================================
-# STAGE 18
-# ============================================================
-
 def migrate_stage_18() -> dict:
+    stage_18_columns = {
+        name: POSITION_COLUMNS[name]
+        for name in (
+            "partial_close_price",
+            "partial_close_quantity",
+            "partial_close_pnl",
+        )
+    }
     added_columns = []
     skipped_columns = []
 
-    stage_18_columns = {
-        "partial_close_price": POSITION_COLUMNS[
-            "partial_close_price"
-        ],
-        "partial_close_quantity": POSITION_COLUMNS[
-            "partial_close_quantity"
-        ],
-        "partial_close_pnl": POSITION_COLUMNS[
-            "partial_close_pnl"
-        ],
-    }
-
     with engine.begin() as connection:
-        inspector = inspect(connection)
-
-        if "positions" not in inspector.get_table_names():
+        if "positions" not in inspect(connection).get_table_names():
             raise RuntimeError(
                 "Stage 18 migration cannot run because "
-                "the 'positions' table does not exist."
+                "the positions table does not exist."
             )
 
-        for column_name, column_definition in (
-            stage_18_columns.items()
-        ):
+        for column_name, definition in stage_18_columns.items():
             added = add_missing_column(
                 connection,
                 "positions",
                 column_name,
-                column_definition,
+                definition,
             )
-
-            if added:
-                added_columns.append(
-                    column_name
-                )
-            else:
-                skipped_columns.append(
-                    column_name
-                )
+            (added_columns if added else skipped_columns).append(
+                column_name
+            )
 
     return {
         "migration": "stage_18",
@@ -313,23 +233,10 @@ def migrate_stage_18() -> dict:
     }
 
 
-# ============================================================
-# BATCH 1 - CANONICAL TRADING STATE
-# ============================================================
-
 def migrate_canonical_trading_state() -> dict:
     """
-    Create the canonical trading-state tables.
-
-    The model definitions live in canonical_state.py.
-
-    create_all() is deliberately used here because this migration
-    only creates missing tables and never alters or deletes the
-    existing tables.
-
-    Future additive columns can receive their own migration.
+    Create missing canonical state tables without altering existing tables.
     """
-
     try:
         from .canonical_state import (
             CanonicalTradingPosition,
@@ -344,25 +251,15 @@ def migrate_canonical_trading_state() -> dict:
     created_tables = []
 
     with engine.begin() as connection:
-        inspector = inspect(connection)
-        existing_tables = set(
-            inspector.get_table_names()
-        )
+        existing_tables = set(inspect(connection).get_table_names())
 
-        target_tables = [
+        for table in (
             CanonicalTradingPosition.__table__,
             TradingAccountSnapshot.__table__,
-        ]
-
-        for table in target_tables:
+        ):
             if table.name not in existing_tables:
-                table.create(
-                    bind=connection,
-                    checkfirst=True,
-                )
-                created_tables.append(
-                    table.name
-                )
+                table.create(bind=connection, checkfirst=True)
+                created_tables.append(table.name)
 
     return {
         "migration": "canonical_trading_state",
@@ -375,121 +272,81 @@ def migrate_canonical_trading_state() -> dict:
     }
 
 
-# ============================================================
-# STARTUP
-# ============================================================
-
-def run_database_migrations() -> dict:
+def migrate_user_ownership_columns() -> dict:
     """
-    Run every currently required migration.
+    Add nullable ownership columns to existing trading tables.
 
-    Order:
-
-        Stage 16.2
-        Stage 16.3
-        Stage 18
-        Canonical Trading State
+    Existing rows remain NULL-owned. Do not assign them to a user unless
+    a separate, verified reconciliation process establishes ownership.
     """
+    target_tables = ("trades", "orders", "positions")
+    added_columns = []
+    skipped_columns = []
+    skipped_tables = []
 
-    stage_16_2_result = migrate_stage_16_2()
+    with engine.begin() as connection:
+        existing_tables = set(inspect(connection).get_table_names())
 
-    stage_16_3_result = migrate_stage_16_3()
+        for table_name in target_tables:
+            if table_name not in existing_tables:
+                skipped_tables.append(table_name)
+                continue
 
-    stage_18_result = migrate_stage_18()
+            added = add_missing_column(
+                connection,
+                table_name,
+                "owner_user_id",
+                "VARCHAR(36)",
+            )
 
-    canonical_result = (
-        migrate_canonical_trading_state()
-    )
+            name = f"{table_name}.owner_user_id"
+            (added_columns if added else skipped_columns).append(name)
 
     return {
+        "migration": "user_ownership_columns",
         "status": "completed",
-        "migrations": [
-            stage_16_2_result,
-            stage_16_3_result,
-            stage_18_result,
-            canonical_result,
-        ],
+        "added_columns": added_columns,
+        "skipped_existing_columns": skipped_columns,
+        "skipped_missing_tables": skipped_tables,
     }
 
 
-# ============================================================
-# COMMAND LINE
-# ============================================================
+def run_database_migrations() -> dict:
+    """Run required migrations in order."""
+    results = [
+        migrate_stage_16_2(),
+        migrate_stage_16_3(),
+        migrate_stage_18(),
+        migrate_canonical_trading_state(),
+        migrate_user_ownership_columns(),
+    ]
+
+    return {
+        "status": "completed",
+        "migrations": results,
+    }
+
 
 if __name__ == "__main__":
     result = run_database_migrations()
 
-    print(
-        "RAYMOND v2.8 database migration completed."
-    )
-
-    print(
-        f"Status: {result['status']}"
-    )
+    print("RAYMOND v2.8 database migration completed.")
+    print(f"Status: {result['status']}")
 
     for migration in result["migrations"]:
-        print(
-            f"Migration: {migration['migration']}"
-        )
+        print(f"\nMigration: {migration['migration']}")
+        print(f"Status: {migration['status']}")
 
-        print(
-            f"Status: {migration['status']}"
-        )
-
-        if migration.get("added_columns"):
-            print("Added columns:")
-
-            for column_name in migration[
-                "added_columns"
-            ]:
-                print(
-                    f"  + {column_name}"
-                )
-
-        if migration.get(
-            "skipped_existing_columns"
+        for key, heading in (
+            ("added_columns", "Added columns"),
+            ("skipped_existing_columns", "Already existing columns"),
+            ("created_indexes", "Created indexes"),
+            ("skipped_existing_indexes", "Already existing indexes"),
+            ("created_tables", "Created tables"),
+            ("skipped_missing_tables", "Skipped missing tables"),
         ):
-            print(
-                "Already existing columns:"
-            )
-
-            for column_name in migration[
-                "skipped_existing_columns"
-            ]:
-                print(
-                    f"  = {column_name}"
-                )
-
-        if migration.get("created_indexes"):
-            print("Created indexes:")
-
-            for index_name in migration[
-                "created_indexes"
-            ]:
-                print(
-                    f"  + {index_name}"
-                )
-
-        if migration.get(
-            "skipped_existing_indexes"
-        ):
-            print(
-                "Already existing indexes:"
-            )
-
-            for index_name in migration[
-                "skipped_existing_indexes"
-            ]:
-                print(
-                    f"  = {index_name}"
-                )
-
-        if migration.get("created_tables"):
-            print("Created tables:")
-
-            for table_name in migration[
-                "created_tables"
-            ]:
-                print(
-                    f"  + {table_name}"
-)
+            values = migration.get(key, [])
+            if values:
+                print(f"{heading}:")
+                for value in values:
+                    print(f"  - {value}")
