@@ -1,0 +1,125 @@
+name: Safely Connect User Paper Positions V2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: connect-user-paper-positions
+  cancel-in-progress: false
+
+jobs:
+  connect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Connect existing positions module safely
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          main_path = Path("backend/app/main.py")
+          module_path = Path("backend/app/user_positions_api.py")
+
+          if not main_path.is_file():
+              raise SystemExit("STOP: main.py not found.")
+
+          if not module_path.is_file():
+              raise SystemExit(
+                  "STOP: existing user_positions_api.py not found."
+              )
+
+          source = main_path.read_text(encoding="utf-8")
+
+          old_import = """try:
+              from .user_auth import router as user_auth_router
+          except ImportError:
+              from user_auth import router as user_auth_router
+          """
+
+          new_import = """try:
+              from .user_auth import router as user_auth_router
+              from .user_positions_api import router as user_positions_router
+          except ImportError:
+              from user_auth import router as user_auth_router
+              from user_positions_api import router as user_positions_router
+          """
+
+          if "user_positions_router" not in source:
+              if source.count(old_import) != 1:
+                  raise SystemExit(
+                      "STOP: authentication import block did not match "
+                      "exactly once. No files changed."
+                  )
+              source = source.replace(old_import, new_import, 1)
+
+          if source.count(
+              "app.include_router(user_positions_router)"
+          ) == 0:
+              old_registration = """app.include_router(
+              user_auth_router,
+              tags=["User Authentication"],
+          )
+          """
+
+              new_registration = old_registration + """
+          app.include_router(
+              user_positions_router,
+              tags=["User Paper Positions"],
+          )
+          """
+
+              if source.count(old_registration) != 1:
+                  raise SystemExit(
+                      "STOP: authentication router registration did not "
+                      "match exactly once. No files changed."
+                  )
+
+              source = source.replace(
+                  old_registration, new_registration, 1
+              )
+
+          if source.count(
+              "app.include_router(user_positions_router)"
+          ) != 0:
+              # The formatted registration above is multiline.
+              pass
+
+          if source.count(
+              "user_positions_router,"
+          ) < 2:
+              raise SystemExit(
+                  "STOP: router connection validation failed."
+              )
+
+          main_path.write_text(source, encoding="utf-8")
+          print("Connected existing user paper positions router.")
+
+          PY
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile \
+            backend/app/main.py \
+            backend/app/user_positions_api.py
+
+      - name: Commit verified change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/app/main.py
+          if git diff --cached --quiet; then
+            echo "No new changes were necessary."
+          else
+            git commit -m "Connect authenticated user paper positions API"
+            git push origin HEAD:main
+          fi
