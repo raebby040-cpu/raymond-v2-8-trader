@@ -1,4 +1,6 @@
+
 import 'package:dio/dio.dart';
+import 'auth_service.dart';
 
 class ApiService {
   ApiService({String? baseUrl})
@@ -18,7 +20,24 @@ class ApiService {
                   'application/json',
             },
           ),
-        );
+        ) {
+    // Attach the saved backend access token to API requests.
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          final token =
+              await AuthService.instance.getToken();
+
+          if (token != null && token.isNotEmpty) {
+            options.headers['Authorization'] =
+                'Bearer $token';
+          }
+
+          handler.next(options);
+        },
+      ),
+    );
+  }
 
   final Dio _dio;
 
@@ -27,9 +46,7 @@ class ApiService {
   // ============================================================
 
   Future<Map<String, dynamic>> health() async {
-    final response =
-        await _dio.get('/health');
-
+    final response = await _dio.get('/health');
     return _asMap(response.data);
   }
 
@@ -38,36 +55,21 @@ class ApiService {
   // ============================================================
 
   Future<Map<String, dynamic>> demoStatus() async {
-    final response =
-        await _dio.get('/api/demo/status');
-
+    final response = await _dio.get('/api/demo/status');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      demoPerformance() async {
-    final response =
-        await _dio.get(
-      '/api/demo/performance',
-    );
-
+  Future<Map<String, dynamic>> demoPerformance() async {
+    final response = await _dio.get('/api/demo/performance');
     return _asMap(response.data);
   }
 
-  Future<List<Map<String, dynamic>>>
-      demoTrades() async {
-    final response =
-        await _dio.get(
-      '/api/demo/trades',
-    );
-
-    return _asTradeList(
-      response.data,
-    );
+  Future<List<Map<String, dynamic>>> demoTrades() async {
+    final response = await _dio.get('/api/demo/trades');
+    return _asTradeList(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      openDemoTrade({
+  Future<Map<String, dynamic>> openDemoTrade({
     required String symbol,
     required String direction,
     required double entryPrice,
@@ -75,8 +77,7 @@ class ApiService {
     double? stopLoss,
     double? takeProfit,
   }) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/demo/trades',
       data: {
         'symbol': symbol,
@@ -91,29 +92,20 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      closeDemoTrade({
+  Future<Map<String, dynamic>> closeDemoTrade({
     required String tradeId,
     required double exitPrice,
   }) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/demo/trades/$tradeId/close',
-      data: {
-        'exit_price': exitPrice,
-      },
+      data: {'exit_price': exitPrice},
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      resetDemo() async {
-    final response =
-        await _dio.post(
-      '/api/demo/reset',
-    );
-
+  Future<Map<String, dynamic>> resetDemo() async {
+    final response = await _dio.post('/api/demo/reset');
     return _asMap(response.data);
   }
 
@@ -121,13 +113,11 @@ class ApiService {
   // PAPER JOURNAL
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      paperJournalTrades({
+  Future<Map<String, dynamic>> paperJournalTrades({
     int limit = 50,
     int offset = 0,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/journal/trades',
       queryParameters: {
         'limit': limit,
@@ -138,19 +128,16 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      paperPositions({
+  Future<Map<String, dynamic>> paperPositions({
     String? symbol,
     String status = 'open',
     int limit = 100,
     int offset = 0,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/online/paper-positions',
       queryParameters: {
-        if (symbol != null &&
-            symbol.isNotEmpty)
+        if (symbol != null && symbol.isNotEmpty)
           'symbol': symbol,
         'status': status,
         'limit': limit,
@@ -165,29 +152,23 @@ class ApiService {
   // ONLINE MARKET
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      marketPrice({
+  Future<Map<String, dynamic>> marketPrice({
     String symbol = 'XAUUSD',
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/online/price',
-      queryParameters: {
-        'symbol': symbol,
-      },
+      queryParameters: {'symbol': symbol},
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      marketIndicators({
+  Future<Map<String, dynamic>> marketIndicators({
     String symbol = 'XAUUSD',
     String timeframe = 'H1',
     int limit = 100,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/online/indicators',
       queryParameters: {
         'symbol': symbol,
@@ -199,14 +180,12 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      marketCandlesticks({
+  Future<Map<String, dynamic>> marketCandlesticks({
     String symbol = 'XAUUSD',
     String timeframe = 'H1',
     int limit = 60,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/online/candlesticks',
       queryParameters: {
         'symbol': symbol,
@@ -218,24 +197,17 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      marketOnlineStatus() async {
-    final response =
-        await _dio.get(
-      '/api/online/status',
-    );
-
+  Future<Map<String, dynamic>> marketOnlineStatus() async {
+    final response = await _dio.get('/api/online/status');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      marketAnalysis({
+  Future<Map<String, dynamic>> marketAnalysis({
     String symbol = 'XAUUSD',
     String timeframe = 'M15',
     int limit = 100,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/online/analysis',
       queryParameters: {
         'symbol': symbol,
@@ -247,14 +219,12 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      advisoryAnalysis({
+  Future<Map<String, dynamic>> advisoryAnalysis({
     String symbol = 'XAUUSD',
     String timeframe = 'H1',
     int limit = 100,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/online/advisory-analysis',
       queryParameters: {
         'symbol': symbol,
@@ -271,92 +241,57 @@ class ApiService {
       );
     }
 
-    final data =
-        Map<String, dynamic>.from(raw);
-
-    final rawComparison =
-        data['advisory_comparison'];
+    final data = Map<String, dynamic>.from(raw);
+    final rawComparison = data['advisory_comparison'];
 
     if (rawComparison is Map) {
       final comparison =
-          Map<String, dynamic>.from(
-        rawComparison,
-      );
+          Map<String, dynamic>.from(rawComparison);
 
-      final rawAdvisory =
-          comparison['advisory'];
+      final rawAdvisory = comparison['advisory'];
 
       if (rawAdvisory is Map) {
         final advisory =
-            Map<String, dynamic>.from(
-          rawAdvisory,
-        );
+            Map<String, dynamic>.from(rawAdvisory);
 
-        comparison[
-                'advisory_direction'] =
+        comparison['advisory_direction'] =
             advisory['direction'];
-
-        comparison[
-                'advisory_confidence'] =
+        comparison['advisory_confidence'] =
             advisory['confidence'];
-
         comparison['advisory_score'] =
             advisory['score'];
-
-        comparison['buy_votes'] =
-            advisory['buy_votes'];
-
-        comparison['sell_votes'] =
-            advisory['sell_votes'];
-
-        comparison['wait_votes'] =
-            advisory['wait_votes'];
-
-        comparison[
-                'agreement_percent'] =
-            advisory[
-                'agreement_percent'];
-
+        comparison['buy_votes'] = advisory['buy_votes'];
+        comparison['sell_votes'] = advisory['sell_votes'];
+        comparison['wait_votes'] = advisory['wait_votes'];
+        comparison['agreement_percent'] =
+            advisory['agreement_percent'];
         comparison['entry_quality'] =
             advisory['entry_quality'];
       }
 
-      final rawResult =
-          comparison['comparison'];
+      final rawResult = comparison['comparison'];
 
       if (rawResult is Map) {
-        final result =
-            Map<String, dynamic>.from(
-          rawResult,
-        );
+        final result = Map<String, dynamic>.from(rawResult);
 
-        comparison['status'] =
-            result['status'];
-
-        comparison['summary'] =
-            result['summary'];
-
-        comparison['warning'] =
-            result['warning'];
+        comparison['status'] = result['status'];
+        comparison['summary'] = result['summary'];
+        comparison['warning'] = result['warning'];
       }
 
-      data['advisory_comparison'] =
-          comparison;
+      data['advisory_comparison'] = comparison;
     }
 
     return data;
   }
 
-  Future<Map<String, dynamic>>
-      marketPositions({
+  Future<Map<String, dynamic>> marketPositions({
     String? symbol,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/trading/positions',
       queryParameters: {
-        if (symbol != null &&
-            symbol.isNotEmpty)
+        if (symbol != null && symbol.isNotEmpty)
           'symbol': symbol,
       },
     );
@@ -368,107 +303,85 @@ class ApiService {
   // BROKER ACCOUNTS
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      brokerAccounts() async {
-    final response =
-        await _dio.get(
-      '/api/broker-accounts',
-    );
-
+  Future<Map<String, dynamic>> brokerAccounts() async {
+    final response = await _dio.get('/api/broker-accounts');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      brokerAccount(
+  Future<Map<String, dynamic>> brokerAccount(
     String accountId,
   ) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/broker-accounts/$accountId',
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      createBrokerAccount({
+  Future<Map<String, dynamic>> createBrokerAccount({
     required String broker,
     required String platform,
     required String server,
     required String accountNumber,
     required String credentialRef,
   }) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/broker-accounts',
       data: {
         'broker': broker,
         'platform': platform,
         'server': server,
-        'account_number':
-            accountNumber,
-        'credential_ref':
-            credentialRef,
+        'account_number': accountNumber,
+        'credential_ref': credentialRef,
       },
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      updateBrokerAccount({
+  Future<Map<String, dynamic>> updateBrokerAccount({
     required String accountId,
     String? broker,
     String? server,
     String? credentialRef,
   }) async {
-    final response =
-        await _dio.patch(
+    final response = await _dio.patch(
       '/api/broker-accounts/$accountId',
       data: {
-        if (broker != null)
-          'broker': broker,
-        if (server != null)
-          'server': server,
+        if (broker != null) 'broker': broker,
+        if (server != null) 'server': server,
         if (credentialRef != null)
-          'credential_ref':
-              credentialRef,
+          'credential_ref': credentialRef,
       },
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      selectBrokerAccount(
+  Future<Map<String, dynamic>> selectBrokerAccount(
     String accountId,
   ) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/broker-accounts/$accountId/select',
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      disableBrokerLive(
+  Future<Map<String, dynamic>> disableBrokerLive(
     String accountId,
   ) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/broker-accounts/$accountId/disable-live',
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      deleteBrokerAccount(
+  Future<Map<String, dynamic>> deleteBrokerAccount(
     String accountId,
   ) async {
-    final response =
-        await _dio.delete(
+    final response = await _dio.delete(
       '/api/broker-accounts/$accountId',
     );
 
@@ -476,36 +389,31 @@ class ApiService {
   }
 
   // ============================================================
-  // MT5 ACCOUNT CONNECTION — STEP 17.8
+  // MT5 ACCOUNT CONNECTION
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      connectBrokerAccount({
+  Future<Map<String, dynamic>> connectBrokerAccount({
     required String accountId,
     required String password,
     String? terminalPath,
   }) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/broker-accounts/$accountId/connect',
       data: {
         'password': password,
         if (terminalPath != null &&
             terminalPath.trim().isNotEmpty)
-          'terminal_path':
-              terminalPath.trim(),
+          'terminal_path': terminalPath.trim(),
       },
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      disconnectBrokerAccount(
+  Future<Map<String, dynamic>> disconnectBrokerAccount(
     String accountId,
   ) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/broker-accounts/$accountId/disconnect',
     );
 
@@ -516,96 +424,60 @@ class ApiService {
   // MT5 BROKER ADAPTER
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      brokerAdapterStatus() async {
-    final response =
-        await _dio.get(
-      '/api/broker-adapter/status',
-    );
-
+  Future<Map<String, dynamic>> brokerAdapterStatus() async {
+    final response = await _dio.get('/api/broker-adapter/status');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      brokerAdapterConnect() async {
-    final response =
-        await _dio.post(
-      '/api/broker-adapter/connect',
-    );
-
+  Future<Map<String, dynamic>> brokerAdapterConnect() async {
+    final response = await _dio.post('/api/broker-adapter/connect');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      brokerAdapterDisconnect() async {
-    final response =
-        await _dio.post(
-      '/api/broker-adapter/disconnect',
-    );
-
+  Future<Map<String, dynamic>> brokerAdapterDisconnect() async {
+    final response = await _dio.post('/api/broker-adapter/disconnect');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      brokerAdapterAccount() async {
-    final response =
-        await _dio.get(
-      '/api/broker-adapter/account',
-    );
-
+  Future<Map<String, dynamic>> brokerAdapterAccount() async {
+    final response = await _dio.get('/api/broker-adapter/account');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      brokerAdapterTerminal() async {
-    final response =
-        await _dio.get(
-      '/api/broker-adapter/terminal',
-    );
-
+  Future<Map<String, dynamic>> brokerAdapterTerminal() async {
+    final response = await _dio.get('/api/broker-adapter/terminal');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      brokerAdapterSymbol({
+  Future<Map<String, dynamic>> brokerAdapterSymbol({
     String symbol = 'XAUUSD',
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/broker-adapter/symbol',
-      queryParameters: {
-        'symbol': symbol,
-      },
+      queryParameters: {'symbol': symbol},
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      brokerAdapterTick({
+  Future<Map<String, dynamic>> brokerAdapterTick({
     String symbol = 'XAUUSD',
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/broker-adapter/tick',
-      queryParameters: {
-        'symbol': symbol,
-      },
+      queryParameters: {'symbol': symbol},
     );
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      brokerAdapterPositions({
+  Future<Map<String, dynamic>> brokerAdapterPositions({
     String? symbol,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/broker-adapter/positions',
       queryParameters: {
-        if (symbol != null &&
-            symbol.isNotEmpty)
+        if (symbol != null && symbol.isNotEmpty)
           'symbol': symbol,
       },
     );
@@ -617,26 +489,20 @@ class ApiService {
   // LIVE RECONCILIATION
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      liveReconciliationStatus() async {
+  Future<Map<String, dynamic>> liveReconciliationStatus() async {
     final response =
-        await _dio.get(
-      '/api/live-reconciliation/status',
-    );
+        await _dio.get('/api/live-reconciliation/status');
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      runLiveReconciliation({
+  Future<Map<String, dynamic>> runLiveReconciliation({
     String? symbol,
   }) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/live-reconciliation/run',
       queryParameters: {
-        if (symbol != null &&
-            symbol.isNotEmpty)
+        if (symbol != null && symbol.isNotEmpty)
           'symbol': symbol,
       },
     );
@@ -648,26 +514,20 @@ class ApiService {
   // LIVE POSITION MONITOR
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      livePositionMonitorStatus() async {
+  Future<Map<String, dynamic>> livePositionMonitorStatus() async {
     final response =
-        await _dio.get(
-      '/api/live-position-monitor/status',
-    );
+        await _dio.get('/api/live-position-monitor/status');
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      livePositionMonitorPositions({
+  Future<Map<String, dynamic>> livePositionMonitorPositions({
     String? symbol,
   }) async {
-    final response =
-        await _dio.get(
+    final response = await _dio.get(
       '/api/live-position-monitor/positions',
       queryParameters: {
-        if (symbol != null &&
-            symbol.isNotEmpty)
+        if (symbol != null && symbol.isNotEmpty)
           'symbol': symbol,
       },
     );
@@ -675,16 +535,13 @@ class ApiService {
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      runLivePositionMonitor({
+  Future<Map<String, dynamic>> runLivePositionMonitor({
     String? symbol,
   }) async {
-    final response =
-        await _dio.post(
+    final response = await _dio.post(
       '/api/live-position-monitor/run',
       queryParameters: {
-        if (symbol != null &&
-            symbol.isNotEmpty)
+        if (symbol != null && symbol.isNotEmpty)
           'symbol': symbol,
       },
     );
@@ -696,22 +553,16 @@ class ApiService {
   // LIVE PROTECTION WORKER
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      liveProtectionWorkerStatus() async {
+  Future<Map<String, dynamic>> liveProtectionWorkerStatus() async {
     final response =
-        await _dio.get(
-      '/api/live-protection-worker/status',
-    );
+        await _dio.get('/api/live-protection-worker/status');
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      liveProtectionWorkerHealth() async {
+  Future<Map<String, dynamic>> liveProtectionWorkerHealth() async {
     final response =
-        await _dio.get(
-      '/api/live-protection-worker/health',
-    );
+        await _dio.get('/api/live-protection-worker/health');
 
     return _asMap(response.data);
   }
@@ -719,19 +570,14 @@ class ApiService {
   Future<Map<String, dynamic>>
       liveProtectionWorkerConfiguration() async {
     final response =
-        await _dio.get(
-      '/api/live-protection-worker/configuration',
-    );
+        await _dio.get('/api/live-protection-worker/configuration');
 
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      liveProtectionDryRun() async {
+  Future<Map<String, dynamic>> liveProtectionDryRun() async {
     final response =
-        await _dio.post(
-      '/api/live-protection-worker/dry-run',
-    );
+        await _dio.post('/api/live-protection-worker/dry-run');
 
     return _asMap(response.data);
   }
@@ -740,32 +586,19 @@ class ApiService {
   // ADMIN / SAFETY
   // ============================================================
 
-  Future<Map<String, dynamic>>
-      adminStatus() async {
-    final response =
-        await _dio.get(
-      '/api/admin/status',
-    );
-
+  Future<Map<String, dynamic>> adminStatus() async {
+    final response = await _dio.get('/api/admin/status');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      activateEmergencyStop() async {
-    final response =
-        await _dio.post(
-      '/api/admin/emergency-stop',
-    );
-
+  Future<Map<String, dynamic>> activateEmergencyStop() async {
+    final response = await _dio.post('/api/admin/emergency-stop');
     return _asMap(response.data);
   }
 
-  Future<Map<String, dynamic>>
-      resetEmergencyStop() async {
+  Future<Map<String, dynamic>> resetEmergencyStop() async {
     final response =
-        await _dio.post(
-      '/api/admin/emergency-stop/reset',
-    );
+        await _dio.post('/api/admin/emergency-stop/reset');
 
     return _asMap(response.data);
   }
@@ -774,19 +607,12 @@ class ApiService {
   // HELPERS
   // ============================================================
 
-  List<Map<String, dynamic>>
-      _asTradeList(
-    dynamic data,
-  ) {
-    if (data is Map &&
-        data['trades'] is List) {
+  List<Map<String, dynamic>> _asTradeList(dynamic data) {
+    if (data is Map && data['trades'] is List) {
       return (data['trades'] as List)
           .whereType<Map>()
           .map(
-            (item) =>
-                Map<String, dynamic>.from(
-              item,
-            ),
+            (item) => Map<String, dynamic>.from(item),
           )
           .toList();
     }
@@ -794,13 +620,9 @@ class ApiService {
     return [];
   }
 
-  Map<String, dynamic> _asMap(
-    dynamic data,
-  ) {
+  Map<String, dynamic> _asMap(dynamic data) {
     if (data is Map) {
-      return Map<String, dynamic>.from(
-        data,
-      );
+      return Map<String, dynamic>.from(data);
     }
 
     throw const FormatException(
