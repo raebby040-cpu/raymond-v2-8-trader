@@ -1,0 +1,334 @@
+
+name: Fix Paper Risk Accounting
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-paper-risk-accounting
+  cancel-in-progress: false
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Apply guarded paper-only corrections
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          runtime_path = Path("backend/app/canonical_paper_runtime.py")
+          manager_path = Path("backend/app/advanced_trade_management.py")
+          integration_path = Path("backend/app/paper_position_manager.py")
+
+          runtime = runtime_path.read_text()
+          manager = manager_path.read_text()
+          integration = integration_path.read_text()
+
+          old_exposure = '''    Exposure is calculated from:
+
+        entry_price × remaining_quantity
+
+    when available, with quantity/original quantity as a fallback.
+
+    No broker state is consulted.
+'''
+          new_exposure = '''    Exposure is calculated as estimated monetary risk at the
+    original stop, using the remaining position quantity.
+
+    No broker state is consulted.
+'''
+          if old_exposure not in runtime:
+              raise SystemExit(
+                  "STOP: canonical exposure documentation did not match; "
+                  "no files will be committed."
+              )
+          runtime = runtime.replace(old_exposure, new_exposure, 1)
+
+          old_loop = '''            entry_price = _as_float(
+                getattr(
+                    position,
+                    "entry_price",
+                    None,
+                )
+            )
+
+            if remaining_quantity <= 0:
+                continue
+
+            if entry_price > 0:
+                total_exposure += (
+                    entry_price
+                    * remaining_quantity
+                )
+            else:
+                # If an older persisted record has no entry price,
+                # keep the risk state usable without inventing price
+                # information.
+                total_exposure += remaining_quantity
+'''
+          new_loop = '''            if remaining_quantity <= 0:
+                raise RuntimeError(
+                    "Open paper position has invalid remaining quantity; "
+                    "risk check cannot safely estimate exposure."
+                )
+
+            risk_1r = _as_float(
+                getattr(position, "risk_1r", None)
+            )
+
+            if risk_1r <= 0:
+                entry_price = _as_float(
+                    getattr(position, "entry_price", None)
+                )
+                initial_stop_loss = _as_float(
+                    getattr(position, "initial_stop_loss", None)
+                )
+
+                if entry_price > 0 and initial_stop_loss > 0:
+                    risk_1r = abs(entry_price - initial_stop_loss)
+
+            if risk_1r <= 0:
+                raise RuntimeError(
+                    "Open paper position has no valid original risk distance; "
+                    "risk check fails closed instead of undercounting exposure."
+                )
+
+            # Match the monetary-risk convention used by persistent_paper_risk:
+            # 0.01 price movement represents one monetary unit per 0.01 lot.
+            total_exposure += (
+                risk_1r / 0.01
+            ) * remaining_quantity
+'''
+          if old_loop not in runtime:
+              raise SystemExit(
+                  "STOP: canonical exposure calculation did not match; "
+                  "no files will be committed."
+              )
+          runtime = runtime.replace(old_loop, new_loop, 1)
+
+          old_snapshot_fields = '''    entry_price: float
+    current_price: float
+    quantity: float
+
+    stop_loss: Optional[float] = None
+'''
+          new_snapshot_fields = '''    entry_price: float
+    current_price: float
+    quantity: float
+
+    # Original entry-to-stop distance; remains stable after break-even
+    # or trailing-stop management changes the protective stop.
+    original_risk_distance: Optional[float] = None
+
+    stop_loss: Optional[float] = None
+'''
+          if old_snapshot_fields not in manager:
+              raise SystemExit(
+                  "STOP: PositionSnapshot fields did not match; "
+                  "no files will be committed."
+              )
+          manager = manager.replace(old_snapshot_fields, new_snapshot_fields, 1)
+
+          old_risk_method = '''    @staticmethod
+    def _risk_distance(
+        position: PositionSnapshot,
+    ) -> float:
+        if position.stop_loss is None:
+            raise TradeManagementError(
+                "stop_loss is required for R-based management"
+            )
+
+        distance = abs(
+            position.entry_price
+            - position.stop_loss
+        )
+
+        if distance <= 0:
+            raise TradeManagementError(
+                "stop_loss distance must be greater than zero"
+            )
+
+        return distance
+'''
+          new_risk_method = '''    @staticmethod
+    def _risk_distance(
+        position: PositionSnapshot,
+    ) -> float:
+        # Prefer the immutable original risk distance. The current stop
+        # may already have been moved to entry or beyond.
+        original_distance = position.original_risk_distance
+
+        if original_distance is not None:
+            if original_distance <= 0:
+                raise TradeManagementError(
+                    "original_risk_distance must be greater than zero"
+                )
+            return original_distance
+
+        # Compatibility fallback for older callers that have not yet
+        # supplied original_risk_distance.
+        if position.stop_loss is None:
+            raise TradeManagementError(
+                "Original risk distance or stop_loss is required for R-based management"
+            )
+
+        distance = abs(
+            position.entry_price
+            - position.stop_loss
+        )
+
+        if distance <= 0:
+            raise TradeManagementError(
+                "Original risk distance is unavailable for a break-even stop"
+            )
+
+        return distance
+'''
+          if old_risk_method not in manager:
+              raise SystemExit(
+                  "STOP: risk-distance method did not match; "
+                  "no files will be committed."
+              )
+          manager = manager.replace(old_risk_method, new_risk_method, 1)
+
+          snapshot_anchor = '''    # ============================================================
+          # SNAPSHOT
+          # ============================================================
+'''
+          # Use a simpler stable anchor for inserting the helper.
+          helper_anchor = '''    def _snapshot(
+        self,
+        position: Any,
+        current_price: Optional[float] = None,
+    ) -> PositionSnapshot:
+'''
+          helper_code = '''    @staticmethod
+    def _original_risk_distance(position: Any) -> Optional[float]:
+        """Read the original entry-to-stop distance, not the moving stop."""
+        risk_1r = getattr(position, "risk_1r", None)
+        try:
+            risk_1r = float(risk_1r) if risk_1r is not None else 0.0
+        except (TypeError, ValueError):
+            risk_1r = 0.0
+
+        if risk_1r > 0:
+            return risk_1r
+
+        entry_price = getattr(position, "entry_price", None)
+        initial_stop_loss = getattr(position, "initial_stop_loss", None)
+
+        try:
+            entry_price = float(entry_price) if entry_price is not None else 0.0
+            initial_stop_loss = (
+                float(initial_stop_loss)
+                if initial_stop_loss is not None
+                else 0.0
+            )
+        except (TypeError, ValueError):
+            return None
+
+        if entry_price > 0 and initial_stop_loss > 0:
+            distance = abs(entry_price - initial_stop_loss)
+            return distance if distance > 0 else None
+
+        return None
+
+'''
+          if helper_anchor not in integration:
+              raise SystemExit(
+                  "STOP: snapshot method anchor did not match; "
+                  "no files will be committed."
+              )
+          if "_original_risk_distance(position: Any)" not in integration:
+              integration = integration.replace(
+                  helper_anchor,
+                  helper_code + helper_anchor,
+                  1,
+              )
+
+          old_snapshot_call = '''            quantity=self._quantity(position),
+            stop_loss=self._current_stop_loss(position),
+'''
+          new_snapshot_call = '''            quantity=self._quantity(position),
+            original_risk_distance=self._original_risk_distance(position),
+            stop_loss=self._current_stop_loss(position),
+'''
+          if old_snapshot_call not in integration:
+              raise SystemExit(
+                  "STOP: PositionSnapshot construction did not match; "
+                  "no files will be committed."
+              )
+          integration = integration.replace(old_snapshot_call, new_snapshot_call, 1)
+
+          runtime_path.write_text(runtime)
+          manager_path.write_text(manager)
+          integration_path.write_text(integration)
+
+          print("Applied guarded corrections to three paper-management files.")
+          PY
+
+      - name: Compile changed Python files
+        run: |
+          python -m py_compile \
+            backend/app/canonical_paper_runtime.py \
+            backend/app/advanced_trade_management.py \
+            backend/app/paper_position_manager.py
+
+      - name: Install backend test dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run paper-risk regression tests
+        working-directory: backend
+        run: |
+          pytest -q \
+            app/test_paper_position_manager.py \
+            app/test_persistent_paper_risk.py
+
+      - name: Check patch formatting
+        run: git diff --check
+
+      - name: Verify paper-only safety markers remain present
+        shell: bash
+        run: |
+          grep -q "This module is PAPER ONLY" backend/app/canonical_paper_runtime.py
+          grep -q "broker_order_required: bool = False" backend/app/advanced_trade_management.py
+          grep -q "execution_type: str = \"paper\"" backend/app/advanced_trade_management.py
+          echo "Paper-only safety checks passed."
+
+      - name: Commit only validated changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            backend/app/canonical_paper_runtime.py \
+            backend/app/advanced_trade_management.py \
+            backend/app/paper_position_manager.py
+          git commit -m "Fix paper exposure and break-even risk tracking"
+          git push origin HEAD:main
