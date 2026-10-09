@@ -1,4 +1,6 @@
+
 import 'package:dio/dio.dart';
+import 'auth_service.dart';
 
 /// RAYMOND v2.8
 ///
@@ -32,7 +34,24 @@ class CanonicalApiService {
               'Content-Type': 'application/json',
             },
           ),
-        );
+        ) {
+    // Attach the saved login token to canonical API requests.
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          final token =
+              await AuthService.instance.getToken();
+
+          if (token != null && token.isNotEmpty) {
+            options.headers['Authorization'] =
+                'Bearer $token';
+          }
+
+          handler.next(options);
+        },
+      ),
+    );
+  }
 
   final Dio _dio;
 
@@ -107,8 +126,7 @@ class CanonicalApiService {
   // CONVENIENCE METHODS
   // ============================================================
 
-  Future<List<Map<String, dynamic>>>
-      openPositions({
+  Future<List<Map<String, dynamic>>> openPositions({
     required String mode,
     String? symbol,
     int limit = 100,
@@ -120,13 +138,10 @@ class CanonicalApiService {
       limit: limit,
     );
 
-    return _positionList(
-      response['positions'],
-    );
+    return _positionList(response['positions']);
   }
 
-  Future<List<Map<String, dynamic>>>
-      allPositions({
+  Future<List<Map<String, dynamic>>> allPositions({
     required String mode,
     String? symbol,
     int limit = 100,
@@ -137,22 +152,16 @@ class CanonicalApiService {
       limit: limit,
     );
 
-    return _positionList(
-      response['positions'],
-    );
+    return _positionList(response['positions']);
   }
 
   // ============================================================
   // HELPERS
   // ============================================================
 
-  Map<String, dynamic> _asMap(
-    dynamic data,
-  ) {
+  Map<String, dynamic> _asMap(dynamic data) {
     if (data is Map) {
-      return Map<String, dynamic>.from(
-        data,
-      );
+      return Map<String, dynamic>.from(data);
     }
 
     throw const FormatException(
@@ -160,9 +169,7 @@ class CanonicalApiService {
     );
   }
 
-  List<Map<String, dynamic>> _positionList(
-    dynamic raw,
-  ) {
+  List<Map<String, dynamic>> _positionList(dynamic raw) {
     if (raw is! List) {
       return [];
     }
@@ -170,9 +177,7 @@ class CanonicalApiService {
     return raw
         .whereType<Map>()
         .map(
-          (item) => Map<String, dynamic>.from(
-            item,
-          ),
+          (item) => Map<String, dynamic>.from(item),
         )
         .toList();
   }
