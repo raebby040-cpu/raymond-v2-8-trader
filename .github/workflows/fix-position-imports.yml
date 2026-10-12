@@ -1,0 +1,106 @@
+name: Fix Position Import Compatibility
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fix package and standalone imports
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          changes = {
+              "backend/app/position_ownership_integration.py": (
+                  "from .models import Position, PositionStatus\n"
+                  "from .position_ownership import get_owned_position",
+                  "try:\n"
+                  "    from .models import Position, PositionStatus\n"
+                  "    from .position_ownership import get_owned_position\n"
+                  "except ImportError:\n"
+                  "    from models import Position, PositionStatus\n"
+                  "    from position_ownership import get_owned_position",
+              ),
+              "backend/app/position_ownership.py": (
+                  "from .models import Position",
+                  "try:\n"
+                  "    from .models import Position\n"
+                  "except ImportError:\n"
+                  "    from models import Position",
+              ),
+          }
+
+          for filename, (old, new) in changes.items():
+              path = Path(filename)
+              source = path.read_text()
+
+              if new in source:
+                  print(f"Already fixed: {filename}")
+                  continue
+
+              if old not in source:
+                  raise SystemExit(
+                      f"STOP: expected import block not found in {filename}. "
+                      "No commit will be made."
+                  )
+
+              path.write_text(source.replace(old, new, 1))
+              print(f"Fixed: {filename}")
+          PY
+
+      - name: Compile changed files
+        run: |
+          python -m py_compile \
+            backend/app/position_ownership_integration.py \
+            backend/app/position_ownership.py
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+          python -m pip install pytest
+
+      - name: Run backend tests
+        env:
+          PYTHONPATH: backend
+        run: pytest -q backend
+
+      - name: Check patch formatting
+        run: git diff --check
+
+      - name: Commit only after tests pass
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No changes required."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            backend/app/position_ownership_integration.py \
+            backend/app/position_ownership.py
+
+          git commit -m "Fix position ownership import compatibility"
+          git push origin HEAD:main
