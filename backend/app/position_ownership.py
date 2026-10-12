@@ -1,4 +1,3 @@
-
 """Ownership checks for RAYMOND paper-trading positions.
 
 These helpers support user-scoped position access.
@@ -9,7 +8,10 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from .models import Position
+try:
+    from .models import Position
+except ImportError:
+    from models import Position
 
 
 def get_owned_position(
