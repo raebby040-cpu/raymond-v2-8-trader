@@ -1,4 +1,3 @@
-
 """RAYMOND V2.8 position ownership integration helpers.
 
 Provides a separate integration layer for authenticated, user-scoped
@@ -11,8 +10,12 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from .models import Position, PositionStatus
-from .position_ownership import get_owned_position
+try:
+    from .models import Position, PositionStatus
+    from .position_ownership import get_owned_position
+except ImportError:
+    from models import Position, PositionStatus
+    from position_ownership import get_owned_position
 
 
 def get_user_position(
