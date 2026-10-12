@@ -1,332 +1,126 @@
-name: Fix Paper Risk Accounting
+name: Validate Paper Account Changes
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
 
 permissions:
-contents: write
+  contents: read
 
 concurrency:
-group: fix-paper-risk-accounting
-cancel-in-progress: false
+  group: validate-paper-account-changes
+  cancel-in-progress: false
 
 jobs:
-fix-and-test:
-runs-on: ubuntu-latest
+  validate:
+    name: Validate feature branch safely
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
-steps:
-  - name: Checkout main
-    uses: actions/checkout@v4
-    with:
-      ref: main
-      fetch-depth: 0
+    steps:
+      - name: Checkout feature branch only
+        uses: actions/checkout@v4
+        with:
+          ref: feature/isolated-user-paper-accounts
+          fetch-depth: 1
+          persist-credentials: false
 
-  - name: Set up Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: "3.11"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
-  - name: Apply guarded paper-only corrections
-    shell: bash
-    run: |
-      cat > /tmp/fix_paper_risk.py <<'PY'
-      from pathlib import Path
+      - name: Verify repository and branch
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      runtime_path = Path("backend/app/canonical_paper_runtime.py")
-      manager_path = Path("backend/app/advanced_trade_management.py")
-      integration_path = Path("backend/app/paper_position_manager.py")
+          BRANCH="$(git branch --show-current)"
+          echo "Checked out branch: ${BRANCH}"
 
-      runtime = runtime_path.read_text()
-      manager = manager_path.read_text()
-      integration = integration_path.read_text()
+          test "${BRANCH}" = "feature/isolated-user-paper-accounts"
 
-      old_exposure = """    Exposure is calculated from:
+          echo "Feature branch verified."
 
-    entry_price × remaining_quantity
+      - name: Verify ownership implementation files
+        shell: bash
+        run: |
+          set -euo pipefail
 
-when available, with quantity/original quantity as a fallback.
+          test -f backend/app/position_repository.py
+          test -f backend/app/models.py
+          test -f backend/app/position_ownership_integration.py
+          test -f backend/app/user_positions_api.py
+          test -f backend/app/user_auth.py
 
-No broker state is consulted.
-      """
-      new_exposure = """    Exposure is calculated as estimated monetary risk at the
-original stop, using the remaining position quantity.
+          echo "Required ownership files exist."
 
-No broker state is consulted.
-      """
+      - name: Compile backend Python files
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      if old_exposure not in runtime:
-          raise SystemExit(
-              "STOP: canonical exposure documentation did not match; "
-              "no files will be committed."
-          )
-      runtime = runtime.replace(old_exposure, new_exposure, 1)
+          python -m compileall -q backend/app
 
-      old_loop = """            entry_price = _as_float(
-            getattr(
-                position,
-                "entry_price",
-                None,
-            )
-        )
+          echo "Python compilation passed."
 
-        if remaining_quantity <= 0:
-            continue
+      - name: Install test dependencies
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
 
-        if entry_price > 0:
-            total_exposure += (
-                entry_price
-                * remaining_quantity
-            )
-        else:
-            # If an older persisted record has no entry price,
-            # keep the risk state usable without inventing price
-            # information.
-            total_exposure += remaining_quantity
-      """
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
 
-      new_loop = """            if remaining_quantity <= 0:
-            raise RuntimeError(
-                "Open paper position has invalid remaining quantity; "
-                "risk check cannot safely estimate exposure."
-            )
+      - name: Run paper-account regression tests
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
 
-        risk_1r = _as_float(
-            getattr(position, "risk_1r", None)
-        )
+          if [ -f app/test_paper_position_manager.py ]; then
+            pytest -q app/test_paper_position_manager.py
+          fi
 
-        if risk_1r <= 0:
-            entry_price = _as_float(
-                getattr(position, "entry_price", None)
-            )
-            initial_stop_loss = _as_float(
-                getattr(position, "initial_stop_loss", None)
-            )
+          if [ -f app/test_persistent_paper_risk.py ]; then
+            pytest -q app/test_persistent_paper_risk.py
+          fi
 
-            if entry_price > 0 and initial_stop_loss > 0:
-                risk_1r = abs(entry_price - initial_stop_loss)
+      - name: Check patch formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          echo "Formatting check passed."
 
-        if risk_1r <= 0:
-            raise RuntimeError(
-                "Open paper position has no valid original risk distance; "
-                "risk check fails closed instead of undercounting exposure."
-            )
+      - name: Verify paper-only safety markers
+        shell: bash
+        run: |
+          set -euo pipefail
 
-        # Preserve the existing monetary-risk convention.
-        total_exposure += (risk_1r / 0.01) * remaining_quantity
-      """
+          grep -q "This module is PAPER ONLY" \
+            backend/app/canonical_paper_runtime.py
 
-      if old_loop not in runtime:
-          raise SystemExit(
-              "STOP: canonical exposure calculation did not match; "
-              "no files will be committed."
-          )
-      runtime = runtime.replace(old_loop, new_loop, 1)
+          grep -q "broker_order_required: bool = False" \
+            backend/app/advanced_trade_management.py
 
-      old_snapshot_fields = """    entry_price: float
-current_price: float
-quantity: float
+          grep -q 'execution_type: str = "paper"' \
+            backend/app/advanced_trade_management.py
 
-stop_loss: Optional[float] = None
-      """
-      new_snapshot_fields = """    entry_price: float
-current_price: float
-quantity: float
+          echo "Paper-only safety markers verified."
 
-# Preserve initial risk when the protective stop moves.
-original_risk_distance: Optional[float] = None
+      - name: Confirm no files were changed
+        shell: bash
+        run: |
+          set -euo pipefail
 
-stop_loss: Optional[float] = None
-      """
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Unexpected working-tree changes detected."
+            git status --short
+            exit 1
+          fi
 
-      if old_snapshot_fields not in manager:
-          raise SystemExit(
-              "STOP: PositionSnapshot fields did not match; "
-              "no files will be committed."
-          )
-      manager = manager.replace(old_snapshot_fields, new_snapshot_fields, 1)
-
-      old_risk_method = """    @staticmethod
-def _risk_distance(
-    position: PositionSnapshot,
-) -> float:
-    if position.stop_loss is None:
-        raise TradeManagementError(
-            "stop_loss is required for R-based management"
-        )
-
-    distance = abs(
-        position.entry_price
-        - position.stop_loss
-    )
-
-    if distance <= 0:
-        raise TradeManagementError(
-            "stop_loss distance must be greater than zero"
-        )
-
-    return distance
-      """
-
-      new_risk_method = """    @staticmethod
-def _risk_distance(
-    position: PositionSnapshot,
-) -> float:
-    original_distance = position.original_risk_distance
-
-    if original_distance is not None:
-        if original_distance <= 0:
-            raise TradeManagementError(
-                "original_risk_distance must be greater than zero"
-            )
-        return original_distance
-
-    # Compatibility fallback for callers without the new field.
-    if position.stop_loss is None:
-        raise TradeManagementError(
-            "Original risk distance or stop_loss is required "
-            "for R-based management"
-        )
-
-    distance = abs(position.entry_price - position.stop_loss)
-
-    if distance <= 0:
-        raise TradeManagementError(
-            "Original risk distance is unavailable for a break-even stop"
-        )
-
-    return distance
-      """
-
-      if old_risk_method not in manager:
-          raise SystemExit(
-              "STOP: risk-distance method did not match; "
-              "no files will be committed."
-          )
-      manager = manager.replace(old_risk_method, new_risk_method, 1)
-
-      helper_anchor = """    def _snapshot(
-    self,
-    position: Any,
-    current_price: Optional[float] = None,
-) -> PositionSnapshot:
-      """
-
-      helper_code = """    @staticmethod
-def _original_risk_distance(position: Any) -> Optional[float]:
-    risk_1r = getattr(position, "risk_1r", None)
-
-    try:
-        risk_1r = float(risk_1r) if risk_1r is not None else 0.0
-    except (TypeError, ValueError):
-        risk_1r = 0.0
-
-    if risk_1r > 0:
-        return risk_1r
-
-    entry_price = getattr(position, "entry_price", None)
-    initial_stop_loss = getattr(position, "initial_stop_loss", None)
-
-    try:
-        entry_price = (
-            float(entry_price) if entry_price is not None else 0.0
-        )
-        initial_stop_loss = (
-            float(initial_stop_loss)
-            if initial_stop_loss is not None
-            else 0.0
-        )
-    except (TypeError, ValueError):
-        return None
-
-    if entry_price > 0 and initial_stop_loss > 0:
-        distance = abs(entry_price - initial_stop_loss)
-        return distance if distance > 0 else None
-
-    return None
-
-      """
-
-      if helper_anchor not in integration:
-          raise SystemExit(
-              "STOP: snapshot method anchor did not match; "
-              "no files will be committed."
-          )
-
-      if "_original_risk_distance(position: Any)" not in integration:
-          integration = integration.replace(
-              helper_anchor, helper_code + helper_anchor, 1
-          )
-
-      old_snapshot_call = """            quantity=self._quantity(position),
-        stop_loss=self._current_stop_loss(position),
-      """
-      new_snapshot_call = """            quantity=self._quantity(position),
-        original_risk_distance=self._original_risk_distance(position),
-        stop_loss=self._current_stop_loss(position),
-      """
-
-      if old_snapshot_call not in integration:
-          raise SystemExit(
-              "STOP: PositionSnapshot construction did not match; "
-              "no files will be committed."
-          )
-      integration = integration.replace(old_snapshot_call, new_snapshot_call, 1)
-
-      runtime_path.write_text(runtime)
-      manager_path.write_text(manager)
-      integration_path.write_text(integration)
-
-      print("Applied guarded corrections to three paper-management files.")
-      PY
-      python /tmp/fix_paper_risk.py
-
-  - name: Compile changed Python files
-    run: |
-      python -m py_compile \
-        backend/app/canonical_paper_runtime.py \
-        backend/app/advanced_trade_management.py \
-        backend/app/paper_position_manager.py
-
-  - name: Install backend test dependencies
-    working-directory: backend
-    run: |
-      python -m pip install --upgrade pip
-      pip install -r requirements.txt
-      pip install pytest
-
-  - name: Run paper-risk regression tests
-    working-directory: backend
-    run: |
-      pytest -q \
-        app/test_paper_position_manager.py \
-        app/test_persistent_paper_risk.py
-
-  - name: Check patch formatting
-    run: git diff --check
-
-  - name: Verify paper-only safety markers remain present
-    shell: bash
-    run: |
-      grep -q "This module is PAPER ONLY" backend/app/canonical_paper_runtime.py
-      grep -q "broker_order_required: bool = False" backend/app/advanced_trade_management.py
-      grep -q 'execution_type: str = "paper"' backend/app/advanced_trade_management.py
-      echo "Paper-only safety checks passed."
-
-  - name: Commit only validated changes
-    shell: bash
-    run: |
-      if git diff --quiet; then
-        echo "No changes to commit."
-        exit 0
-      fi
-
-      git config user.name "github-actions[bot]"
-      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      git add \
-        backend/app/canonical_paper_runtime.py \
-        backend/app/advanced_trade_management.py \
-        backend/app/paper_position_manager.py
-
-      git commit -m "Fix paper exposure and break-even risk tracking"
-      git push origin HEAD:main
+          echo "Validation completed without modifying repository files."
