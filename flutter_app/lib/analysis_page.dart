@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'api_service.dart';
 
@@ -6,6 +5,7 @@ import 'api_service.dart';
 ///
 /// Market analysis loads independently from paper positions.
 /// If the positions endpoint fails, successful market analysis remains visible.
+/// This page is read-only and does not place broker orders.
 class AnalysisPage extends StatefulWidget {
   final ApiService api;
 
@@ -44,7 +44,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
       positionsWarning = null;
     });
 
-    // Load market analysis first. Positions errors must not hide it.
+    // First load the analysis. An error loading positions must not
+    // prevent the market analysis from being displayed.
     late final Map<String, dynamic> advisoryData;
 
     try {
@@ -71,7 +72,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
       return;
     }
 
-    // Load paper positions separately. Failure here is only a warning.
+    // Load open paper positions independently.
+    // A 401 here only affects the positions section.
     final positions = <Map<String, dynamic>>[];
     String? warning;
 
@@ -149,7 +151,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
     String fallback = '--',
   }) {
     final n = _num(value);
-    return n == null ? fallback : n.toStringAsFixed(decimals);
+    if (n == null || !n.isFinite) return fallback;
+    return n.toStringAsFixed(decimals);
   }
 
   String _errorText(Object e) {
@@ -279,8 +282,10 @@ class _AnalysisPageState extends State<AnalysisPage> {
               color: Colors.orange,
             ),
             const SizedBox(height: 10),
-            Text(error ?? 'Analysis unavailable',
-                textAlign: TextAlign.center),
+            Text(
+              error ?? 'Analysis unavailable',
+              textAlign: TextAlign.center,
+            ),
             const SizedBox(height: 12),
             FilledButton.icon(
               onPressed: loading ? null : _loadEverything,
@@ -373,7 +378,10 @@ class _AnalysisPageState extends State<AnalysisPage> {
               style: const TextStyle(fontSize: 11, color: Colors.grey),
             ),
             const SizedBox(height: 4),
-            Text(value, style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              value,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
           ],
         ),
       ),
@@ -398,8 +406,10 @@ class _AnalysisPageState extends State<AnalysisPage> {
           padding: const EdgeInsets.symmetric(vertical: 14),
           child: Column(
             children: [
-              const Text('CURRENT PRICE',
-                  style: TextStyle(fontSize: 12)),
+              const Text(
+                'CURRENT PRICE',
+                style: TextStyle(fontSize: 12),
+              ),
               const SizedBox(height: 4),
               Text(
                 _number(market['price'], decimals: 2),
@@ -419,8 +429,28 @@ class _AnalysisPageState extends State<AnalysisPage> {
 
   Widget _decisionCard() {
     final raymond = _map(analysis['raymond']);
-    final signal =
-        _string(raymond['signal'], fallback: 'WAIT').toUpperCase();
+    final proposal = _map(raymond['proposal']);
+
+    // The backend provides a direction and a separate signal/reason.
+    // Use the direction as a fallback if signal is missing.
+    final rawSignal = _string(
+      raymond['signal'],
+      fallback: _string(
+        raymond['direction'],
+        fallback: 'WAIT',
+      ),
+    ).toUpperCase();
+
+    final signal = rawSignal == 'BUY' ||
+            rawSignal == 'SELL' ||
+            rawSignal == 'STRONG BUY' ||
+            rawSignal == 'STRONG SELL'
+        ? rawSignal
+        : _string(
+            raymond['direction'],
+            fallback: 'WAIT',
+          ).toUpperCase();
+
     final color = _signalColor(signal);
 
     return _card('RAYMOND DECISION', Icons.psychology, [
@@ -470,10 +500,15 @@ class _AnalysisPageState extends State<AnalysisPage> {
       _row('Market regime', raymond['market_regime']),
       _row('Setup', raymond['setup']),
       _row('Reasoning', raymond['reasoning']),
+      if (proposal.isNotEmpty)
+        _row('Proposal status', 'Advisory proposal available'),
     ]);
   }
 
   Widget _indicatorsCard() {
+    // Actual response shape:
+    // response.indicators.indicators.{ema20, ema50, rsi14, ...}
+    // response.indicators.analysis.{trend, score, signal}
     final outer = _map(analysis['indicators']);
     final values = _map(outer['indicators']);
     final technical = _map(outer['analysis']);
@@ -483,12 +518,12 @@ class _AnalysisPageState extends State<AnalysisPage> {
       _row('EMA 50', _number(values['ema50'], decimals: 3)),
       _row('RSI 14', _number(values['rsi14'])),
       _row('ATR 14', _number(values['atr14'])),
-      _row('MACD', _number(values['macd'])),
-      _row('MACD signal', _number(values['macd_signal'])),
-      _row('MACD histogram', _number(values['macd_histogram'])),
-      _row('Trend', technical['trend'] ?? outer['trend']),
-      _row('Signal', technical['signal'] ?? outer['signal']),
-      _row('Score', technical['score'] ?? outer['score']),
+      _row('MACD', _number(values['macd'], decimals: 4)),
+      _row('MACD signal', _number(values['macd_signal'], decimals: 4)),
+      _row('MACD histogram', _number(values['macd_histogram'], decimals: 4)),
+      _row('Trend', technical['trend']),
+      _row('Signal', technical['signal']),
+      _row('Score', technical['score']),
       _row('Candles used', outer['candles_used']),
     ]);
   }
@@ -533,44 +568,103 @@ class _AnalysisPageState extends State<AnalysisPage> {
   }
 
   Widget _tradePlanCard() {
-    final plan = _map(analysis['trade_plan']);
     final raymond = _map(analysis['raymond']);
-    final nested = _map(raymond['trade_plan']);
-    final data = plan.isNotEmpty ? plan : nested;
+
+    // Correct backend location:
+    // raymond.proposal.entry_price
+    // raymond.proposal.stop_loss
+    // raymond.proposal.take_profit
+    // raymond.proposal.risk_reward
+    final proposal = _map(raymond['proposal']);
+
+    // Retain compatibility if another backend version supplies trade_plan.
+    final topLevelPlan = _map(analysis['trade_plan']);
+    final nestedPlan = _map(raymond['trade_plan']);
+
+    final data = proposal.isNotEmpty
+        ? proposal
+        : (topLevelPlan.isNotEmpty ? topLevelPlan : nestedPlan);
+
+    final direction = _string(
+      data['direction'] ?? raymond['direction'],
+      fallback: 'WAIT',
+    ).toUpperCase();
+
+    final hasProposal = data.isNotEmpty;
+
+    final entry = data['entry_price'] ??
+        data['entry'] ??
+        data['entryPrice'];
+
+    final stopLoss = data['stop_loss'] ??
+        data['initial_stop_loss'] ??
+        data['sl'] ??
+        data['stopLoss'];
+
+    // AITradeProposal currently provides one take-profit target.
+    // Do not fabricate a second target that the backend did not return.
+    final takeProfit1 = data['take_profit'] ??
+        data['take_profit_1'] ??
+        data['tp1'] ??
+        data['target_1'] ??
+        data['takeProfit'];
+
+    final takeProfit2 = data['take_profit_2'] ??
+        data['tp2'] ??
+        data['target_2'];
+
+    final riskReward = data['risk_reward'] ??
+        data['risk_reward_ratio'] ??
+        data['rr'];
+
+    final entryQuality = data['entry_quality'] ??
+        raymond['entry_quality'] ??
+        _map(analysis['advisory_comparison'])['entry_quality'];
 
     return _card('TRADE PLAN', Icons.rule, [
-      _row('Status', data['status'] ?? raymond['signal']),
-      _row('Direction', data['direction'] ?? raymond['direction']),
+      _row(
+        'Status',
+        hasProposal
+            ? 'Proposal available — advisory only'
+            : _string(raymond['signal'], fallback: 'WAIT'),
+        color: hasProposal ? Colors.green : Colors.orange,
+      ),
+      _row('Direction', direction),
       _row(
         'Entry',
-        _number(
-          data['entry'] ?? data['entry_price'] ?? raymond['entry'],
-        ),
+        _number(entry, decimals: 2),
       ),
       _row(
         'Stop Loss',
-        _number(
-          data['stop_loss'] ?? data['sl'] ?? raymond['stop_loss'],
-        ),
+        _number(stopLoss, decimals: 2),
       ),
       _row(
         'Take Profit 1',
-        _number(
-          data['take_profit_1'] ??
-              data['tp1'] ??
-              raymond['take_profit_1'],
-        ),
+        _number(takeProfit1, decimals: 2),
       ),
       _row(
         'Take Profit 2',
-        _number(
-          data['take_profit_2'] ??
-              data['tp2'] ??
-              raymond['take_profit_2'],
-        ),
+        _number(takeProfit2, decimals: 2),
       ),
-      _row('Risk/reward', data['risk_reward'] ?? data['rr']),
-      _row('Entry quality', data['entry_quality'] ?? raymond['entry_quality']),
+      _row(
+        'Risk/reward',
+        riskReward == null
+            ? '--'
+            : _number(riskReward, decimals: 2),
+      ),
+      _row('Entry quality', entryQuality),
+      if (data['reason'] != null)
+        _row('Proposal reason', data['reason']),
+      if (!hasProposal)
+        const Padding(
+          padding: EdgeInsets.only(top: 8),
+          child: Text(
+            'RAYMOND has not returned a qualified trade proposal. '
+            'Entry, Stop Loss and Take Profit are intentionally left blank '
+            'instead of generating unverified prices.',
+            style: TextStyle(fontSize: 12),
+          ),
+        ),
       const Padding(
         padding: EdgeInsets.only(top: 8),
         child: Text(
@@ -633,13 +727,17 @@ class _AnalysisPageState extends State<AnalysisPage> {
           _row(
             'Stop Loss',
             _number(
-              openPositions[i]['stop_loss'] ?? openPositions[i]['sl'],
+              openPositions[i]['current_stop_loss'] ??
+                  openPositions[i]['stop_loss'] ??
+                  openPositions[i]['sl'],
             ),
           ),
           _row(
             'Take Profit',
             _number(
-              openPositions[i]['take_profit'] ?? openPositions[i]['tp'],
+              openPositions[i]['take_profit_1'] ??
+                  openPositions[i]['take_profit'] ??
+                  openPositions[i]['tp'],
             ),
           ),
           _row(
